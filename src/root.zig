@@ -16,22 +16,23 @@
 
 pub const errors = @import("core/errors.zig");
 
-// Stage 2 additions (uncomment as files are created):
-// pub const dtype = @import("core/dtype.zig");
-// pub const device = @import("core/device.zig");
-// pub const rng = @import("core/rng.zig");
-// pub const shape = @import("tensor/shape.zig");
-// pub const Tensor = @import("tensor/tensor.zig").Tensor;
-// pub const tensor_print = @import("tensor/print.zig");
-// pub const ops = struct {
-//     pub const create = @import("tensor/ops/create.zig");
-//     pub const elementwise = @import("tensor/ops/elementwise.zig");
-//     pub const reduce = @import("tensor/ops/reduce.zig");
-//     pub const matmul = @import("tensor/ops/matmul.zig");
-//     pub const unary = @import("tensor/ops/unary.zig");
-//     pub const softmax = @import("tensor/ops/softmax.zig");
-//     pub const loss = @import("tensor/ops/loss.zig");
-// };
+// Stage 2 additions:
+pub const dtype = @import("core/dtype.zig");
+pub const device = @import("core/device.zig");
+pub const rng = @import("core/rng.zig");
+pub const shape = @import("tensor/shape.zig");
+const tensor_mod = @import("tensor/tensor.zig");
+pub const Tensor = tensor_mod.Tensor;
+pub const tensor_print = @import("tensor/print.zig");
+pub const ops = struct {
+    pub const create = @import("tensor/ops/create.zig");
+    pub const elementwise = @import("tensor/ops/elementwise.zig");
+    pub const reduce = @import("tensor/ops/reduce.zig");
+    pub const matmul = @import("tensor/ops/matmul.zig");
+    pub const unary = @import("tensor/ops/unary.zig");
+    pub const softmax = @import("tensor/ops/softmax.zig");
+    pub const loss = @import("tensor/ops/loss.zig");
+};
 
 // Stage 3 additions:
 // pub const autograd = @import("autograd/node.zig");
@@ -73,4 +74,17 @@ pub const errors = @import("core/errors.zig");
 
 test {
     _ = errors;
+    _ = dtype;
+    _ = device;
+    _ = rng;
+    _ = shape;
+    _ = tensor_mod;
+    _ = tensor_print;
+    _ = ops.create;
+    _ = ops.elementwise;
+    _ = ops.reduce;
+    _ = ops.matmul;
+    _ = ops.unary;
+    _ = ops.softmax;
+    _ = ops.loss;
 }

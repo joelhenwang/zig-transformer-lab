@@ -1,0 +1,66 @@
+# Expected stale patterns — fixture for grep_stale_patterns.py.
+#
+# This file contains canonical bad code. The grepper MUST flag each line
+# below. Do not edit the file without updating tests and regex patterns.
+#
+# (File suffix is .txt on purpose — the grepper only scans .zig/.md/build.zig*,
+# so these lines will not create spurious hits during a full-project scan
+# unless explicitly pointed at the file.)
+
+# --- I/O ---
+const stdout = std.io.getStdOut().writer();
+var bw = std.io.bufferedWriter(stdout);
+var stream = std.io.fixedBufferStream(&buf);
+const R = std.io.GenericReader(void, error{}, readFn);
+
+# --- memory ---
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+var safe = std.heap.ThreadSafeAllocator{ .child_allocator = a };
+
+# --- concurrency ---
+var pool: std.Thread.Pool = undefined;
+
+# --- process / env ---
+const args = try std.process.argsAlloc(a);
+const home = try std.process.getEnvVarOwned(a, "HOME");
+const envp = std.os.environ;
+
+# --- C interop ---
+const c = @cImport({ @cInclude("stdio.h"); });
+fn bar() callconv(.C) void {}
+
+# --- build.zig ---
+pub fn build(b: *std.build.Builder) void {
+    const lib = b.addStaticLibrary(.{});
+    const shr = b.addSharedLibrary(.{});
+    exe.addModule("util", util_mod);
+    const t = std.zig.CrossTarget.fromTarget(..);
+    const fs: FileSource = ...;
+    const exe = b.addExecutable(.{ .name = "x", .root_source_file = b.path("a.zig") });
+}
+
+# --- language / builtins ---
+const T = @Type(.{ .int = .{ .signedness = .unsigned, .bits = 8 } });
+const fields = @typeInfo(S).Struct.fields;
+const p = @intToPtr(*u8, addr);
+const i = @ptrToInt(p);
+const e = @intToEnum(E, 1);
+const v = @enumToInt(e);
+const f = @intToFloat(f32, 7);
+const n = @floatToInt(i32, 3.14);
+const b = @boolToInt(true);
+const ec = @errSetCast(T, err);
+pub usingnamespace other;
+async foo();
+await future;
+suspend {}
+resume f;
+
+# --- containers ---
+var list = std.ArrayList(u32).init(a);
+
+# --- stdlib renames ---
+const i = std.mem.indexOf(u8, s, "x");
+
+# --- formatting ---
+try w.print("took {D}\n", .{ns});

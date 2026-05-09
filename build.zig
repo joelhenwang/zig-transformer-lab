@@ -23,19 +23,19 @@ pub fn build(b: *std.Build) void {
     });
 
     // --- Test step ---
-    // Runs all unit tests from tests/unit_all.zig (which @imports every src/ file).
+    // Runs all unit tests. We use src/root.zig as the test root because
+    // Zig's test runner only discovers `test` blocks in files that belong
+    // to the SAME module as the test root. Since root.zig already imports
+    // every sub-module, its `test { _ = ...; }` block pulls in all tests.
     const test_step = b.step("test", "Run all tests");
 
-    const unit_test_mod = b.createModule(.{
-        .root_source_file = b.path("tests/unit_all.zig"),
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{
-            .{ .name = "zig_transformer_lab", .module = lib_mod },
-        },
     });
     const unit_tests = b.addTest(.{
-        .root_module = unit_test_mod,
+        .root_module = test_mod,
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
     test_step.dependOn(&run_unit_tests.step);

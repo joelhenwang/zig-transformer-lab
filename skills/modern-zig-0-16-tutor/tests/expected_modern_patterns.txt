@@ -1,0 +1,66 @@
+# Expected modern patterns — negative fixture for grep_stale_patterns.py.
+#
+# The grepper MUST NOT flag any line in this file. These are canonical 0.16.0
+# patterns. A false positive here is a grepper bug to fix.
+
+# --- I/O (modern) ---
+var fw = std.Io.File.stdout().writer(init.io, &buf);
+try fw.interface.print("x = {d}\n", .{42});
+try fw.flush();
+var r: std.Io.Reader = .fixed(data);
+
+# --- memory (modern) ---
+var gpa_state: std.heap.DebugAllocator(.{}) = .init;
+var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+
+# --- process / env (modern) ---
+pub fn main(init: std.process.Init) !void {}
+const home = init.environ_map.get("HOME");
+const args = try init.minimal.args.toSlice(init.arena.allocator());
+
+# --- C interop (modern) ---
+const tc = b.addTranslateC(.{ .root_source_file = b.path("c/api.h") });
+exe.root_module.addImport("c", tc.createModule());
+export fn add(a: c_int, b: c_int) c_int { return a + b; }
+fn fast(x: c_int) callconv(.c) c_int { return x; }
+
+# --- build.zig (modern) ---
+pub fn build(b: *std.Build) void {
+    const exe = b.addExecutable(.{
+        .name = "app",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const lib = b.addLibrary(.{ .linkage = .static, .name = "mylib" });
+    exe.root_module.linkSystemLibrary("z", .{});
+    b.installArtifact(exe);
+}
+
+# --- language / builtins (modern) ---
+const U10 = @Int(.unsigned, 10);
+const fields = @typeInfo(S).@"struct".fields;
+const p: *u8 = @ptrFromInt(addr);
+const i: usize = @intFromPtr(p);
+const e: E = @enumFromInt(1);
+const v: i32 = @intFromEnum(e);
+const f: f32 = @floatFromInt(7);
+const n: i32 = @intFromFloat(3.14);
+const b: u1 = @intFromBool(true);
+const ec: T = @errorCast(err);
+
+# --- containers (modern) ---
+var list: std.ArrayList(u32) = .empty;
+try list.append(a, 42);
+defer list.deinit(a);
+
+# --- stdlib (modern) ---
+if (std.mem.cut(u8, s, "=")) |pair| {
+    _ = pair.prefix;
+}
+if (std.mem.find(u8, s, "=")) |idx| { _ = idx; }
+
+# --- formatting (modern) ---
+try w.print("took {f}\n", .{std.Io.Duration{ .nanoseconds = ns }});
