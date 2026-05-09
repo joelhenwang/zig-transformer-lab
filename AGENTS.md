@@ -43,6 +43,72 @@ Use modern 0.16 API exclusively:
 - `@ptrFromInt`, `@intFromPtr`, `@intFromEnum` (not the old cast builtins)
 - `callconv(.c)` not `callconv(.C)`
 - Explicit re-exports, never `usingnamespace`
+- `std.Io.Dir.cwd()` not `std.fs.cwd()`
+- `const` for non-mutated locals (Zig 0.16.0 enforces this as an error, not a warning)
+
+## This project's Shape API (MUST follow — tripped up 3 subagents)
+
+The `Shape` struct in `src/tensor/shape.zig` uses rank-specific constructors:
+
+```zig
+const s1 = Shape.init1D(10);          // 1D: (10,)
+const s2 = Shape.init2D(2, 3);       // 2D: (2, 3)
+const s3 = Shape.init3D(2, 3, 4);    // 3D: (2, 3, 4)
+const s4 = Shape.init4D(2, 3, 4, 5); // 4D: (2, 3, 4, 5)
+```
+
+**CRITICAL:** There is NO `Shape.init(&.{2, 3})` constructor. It does not exist.
+If you write `Shape.init(...)` with a slice/array argument, compilation will fail.
+
+The `rank` field is a `u2` storing `ndim - 1` (0-3 for 1D-4D). Use `shape.ndim()`
+to get the dimension count (returns `rank + 1`). Never compare `rank` directly
+to a dimension count without adding 1.
+
+`Shape.equals` is a **free function**, not a method: `equals(a, b)` not `a.equals(b)`.
+
+## Zig 0.16.0 gotchas encountered during Stage 2
+
+These are real compilation errors we hit. Learn from them:
+
+1. **`std.fs.cwd()` does not exist in 0.16.0.** The `std.fs` module is mostly
+   deprecated. Use `std.Io.Dir.cwd()` for filesystem access. In `build.zig`,
+   avoid runtime filesystem operations entirely — use build-system commands
+   and static file lists instead of directory iteration.
+
+2. **`var` vs `const` is enforced as an error.** If a local variable is never
+   mutated after initialization, Zig 0.16.0 emits a hard error (not a warning).
+   Use `const` by default. Only use `var` when you actually mutate the variable.
+
+3. **Unused function parameters are errors.** If a function parameter isn't
+   used, either prefix with `_` or remove it. No silent warnings.
+
+4. **`build.zig.zon` fingerprint must match.** The `fingerprint` field is
+   verified by the compiler. If you create a new project, let the compiler
+   tell you the correct value on first build — it prints the expected value.
+
+5. **Unused build options must be suppressed.** If you declare `b.option(...)`
+   but don't use the value, add `_ = variable;` to suppress the error.
+
+6. **`addSystemCommand` takes `[]const []const u8`.** All arguments must be
+   available at build-configuration time. `b.fmt()` returns `[]const u8` which
+   works, but you can't do runtime string construction inside the arg array.
+
+7. **`LazyPath` uses `.cwd_relative = "path"`.** When adding library/rpath
+   entries, use `std.Build.LazyPath{ .cwd_relative = "/path" }`.
+
+8. **`exe.builder.allocator` doesn't exist.** In 0.16.0, access the build
+   allocator via `b.allocator` (inside `build` function scope), not through
+   the compile step.
+
+9. **Test discovery goes through module imports.** Zig's test runner only finds
+   `test "..."` blocks in files transitively imported by the test root. Our
+   `src/root.zig` re-exports everything and its own `test { }` block references
+   each sub-module. Don't use relative file paths in test files — import
+   through the module.
+
+10. **`std.fmt.bufPrint` for string formatting.** `std.io.fixedBufferStream`
+    may not exist or have a different API. `std.fmt.bufPrint(buf, fmt, args)`
+    is the reliable way to format into a buffer.
 
 ## CUDA sacred spots
 
@@ -51,11 +117,15 @@ Use modern 0.16 API exclusively:
 - Offline .ptx only (no NVRTC).
 - Bindings module opens libraries with dlopen at runtime.
 - Link `libc` + `dl`, never `libcuda` directly.
+- In `build.zig`, use a static `kernel_names` list for nvcc compilation —
+  don't iterate the filesystem at build time (avoids `std.fs.cwd()` issues).
 
 ## When stuck
 
 - Ask the user with a crisp options-style question (max 4 options).
 - Never guess at hardware, environment, or decisions.
+- Consult `skills/modern-zig-0-16-tutor/SKILL.md` for Zig API questions.
+- See `SESSION_GUIDE.md` for full project state and continuation instructions.
 
 ## Full plan
 

@@ -102,6 +102,11 @@ implementations unless the learner explicitly asks.
 | `std.heap.ThreadSafeAllocator` wrap | ≤0.15 | `ArenaAllocator` is already threadsafe | 05 |
 | `std.mem.indexOf*` | ≤0.15 | `std.mem.find*`; often `cut`/`cutScalar` | 01 |
 | `{D}` format specifier for nanoseconds | ≤0.15 | `Io.Duration{ .nanoseconds = ns }` + `{f}` | 12 |
+| `std.fs.cwd()` | ≤0.15 | `std.Io.Dir.cwd()` | 01 |
+| `var x = try init(...)` (never mutated) | ≤0.15 | `const x = try init(...)` (enforced) | 02 |
+| `ArrayList(T).init(a)` managed style | ≤0.15 | `.empty` + `append(a, v)` + `deinit(a)` | 06 |
+| `std.io.fixedBufferStream(str)` | ≤0.15 | `std.fmt.bufPrint(&buf, fmt, args)` | 07 |
+| `exe.builder.allocator` | never valid | `b.allocator` (in build scope) | 08 |
 
 ## Quick Fixes: compiler-error → likely cause
 
@@ -122,6 +127,14 @@ implementations unless the learner explicitly asks.
 | `use of undeclared '@intToPtr'` etc. | renamed to `@ptrFromInt` etc. | ref 03 |
 | `use of undeclared 'usingnamespace'` | removed; re-export explicitly | ref 11 |
 | `expected []const u8, found ...` inside `print` using `{D}` | specifier gone, use `Io.Duration` | ref 12 |
+| `no member 'cwd' in 'std.fs'` | `std.fs` deprecated; use `std.Io.Dir.cwd()` | project §1 |
+| `local variable is never mutated` | change `var` to `const` (enforced in 0.16) | project §2 |
+| `unused function parameter` | prefix with `_` or remove | project §3 |
+| `invalid fingerprint` in `build.zig.zon` | copy the value the compiler suggests | project §4 |
+| `unused local constant` for build option | add `_ = variable;` to suppress | project §5 |
+| `no field 'builder' in struct 'Build.Step.Compile'` | use `b.allocator` not `exe.builder.allocator` | project §6 |
+| `struct 'Shape' has no member named 'init'` | use `Shape.init1D/init2D/init3D/init4D` | project §13 |
+| `integer type 'u2' cannot represent value` | value out of range for narrow int type | project §11 |
 
 ## Progressive-loading decision tree
 
@@ -145,10 +158,13 @@ implementations unless the learner explicitly asks.
 Full version: `references/15-code-review-checklist.md`.
 
 - **ALWAYS FLAG** (mechanical, objectively broken on 0.16.0):
-  stale stdlib namespaces (`std.io`, `std.os.environ`), stale casts
+  stale stdlib namespaces (`std.io`, `std.os.environ`, `std.fs.cwd()`), stale casts
   (`@intToPtr`…), stale containers (`ArrayList(T).init(a)`), stale build.zig
-  (`root_source_file` on exe, `addStaticLibrary`), `@cImport`, `@Type`,
-  `usingnamespace`, `async`/`await` keywords, `{D}` format, `callconv(.C)`.
+  (`root_source_file` on exe, `addStaticLibrary`, `exe.builder.allocator`),
+  `@cImport`, `@Type`, `usingnamespace`, `async`/`await` keywords, `{D}` format,
+  `callconv(.C)`, `var` used where `const` suffices (0.16.0 enforces this),
+  `Shape.init(&.{...})` (does not exist — use `init1D/init2D/init3D/init4D`),
+  `std.io.fixedBufferStream` (use `std.fmt.bufPrint` instead).
 - **FLAG WITH CONTEXT** (semantic): ownership / allocator lifetime, missing
   `defer` / `errdefer`, hidden allocation in library code, wrong pointer kind
   (`*T` vs `[*]T` vs `[]T` vs `[*:0]T`), unflushed buffered writers, missing
@@ -172,6 +188,115 @@ Full version: `references/15-code-review-checklist.md`.
   (see `recipes/numerical-code.md`).
 - Shape-check at API boundaries; never silently broadcast.
 
+## Project-specific gotchas (zig-transformer-lab, discovered during Stages 1–2)
+
+These are real compilation errors encountered during implementation. They go
+beyond the generic stale-pattern table — they are subtle 0.16.0 API differences
+that the release notes don't prominently call out.
+
+### 1. `std.fs.cwd()` does not exist
+
+`std.fs` is mostly deprecated in 0.16.0. The `cwd()` function moved to
+`std.Io.Dir.cwd()`. In `build.zig`, avoid runtime filesystem operations
+entirely — use build-system commands (`b.addSystemCommand`) and static file
+lists instead of directory iteration. Our `build.zig` uses a `kernel_names`
+constant array instead of iterating `src/backend/cuda/kernels/` at build time.
+
+### 2. `var` vs `const` is a hard error
+
+Zig 0.16.0 treats non-mutation as a **compilation error**, not a warning:
+```
+error: local variable is never mutated
+    var t = try Tensor.init(allocator, shape);
+        ^
+note: consider using 'const'
+```
+Always use `const` by default. Only use `var` when you actually mutate.
+
+### 3. Unused parameters are errors
+
+```
+error: unused function parameter
+fn foo(x: i32, y: i32) void { ... }
+                    ^~~~
+```
+Prefix with `_` or remove the parameter. No silent warnings in 0.16.0.
+
+### 4. `build.zig.zon` fingerprint must match
+
+The `.fingerprint` field is verified by the compiler. When creating a new
+project, let the first `zig build` attempt tell you the correct value:
+```
+error: invalid fingerprint: 0x...; if this is a new or forked package,
+use this value: 0xaaddbc7d5bdba141
+```
+Copy the suggested value into `build.zig.zon`.
+
+### 5. Unused build options must be suppressed
+
+`b.option(...)` values that aren't consumed cause errors. Suppress with
+`_ = variable;` until the consuming code is written.
+
+### 6. `exe.builder.allocator` doesn't exist
+
+The build allocator is `b.allocator` (within `build()` scope), not
+`exe.builder.allocator` or `exe.step.owner.allocator`.
+
+### 7. `LazyPath` uses `.cwd_relative`
+
+When manually constructing a `LazyPath` for library/rpath:
+```zig
+const lp: std.Build.LazyPath = .{ .cwd_relative = "/usr/local/cuda/targets/x86_64-linux/lib" };
+```
+
+### 8. Test discovery goes through module imports
+
+Zig's test runner only finds `test "..."` blocks in files transitively imported
+by the test root. Don't use `@import("src/core/errors.zig")` with relative
+paths in test files — the paths resolve from the test file's directory, not
+the project root. Import through the module instead:
+```zig
+const ztl = @import("zig_transformer_lab");
+// Tests in ztl's transitive imports are automatically discovered
+```
+
+### 9. `std.fmt.bufPrint` for string formatting
+
+`std.io.fixedBufferStream` may have a different API. `std.fmt.bufPrint`
+is the reliable way to format into a fixed buffer in 0.16.0:
+```zig
+var buf: [128]u8 = undefined;
+const result = std.fmt.bufPrint(&buf, "({d}, {d})", .{rows, cols});
+```
+
+### 10. `std.math` functions require explicit f32
+
+`std.math.erf(x)` and `std.math.sqrt(x)` may not auto-cast integer or
+comptime-float arguments. Ensure arguments are explicitly `f32`:
+```zig
+const result = std.math.erf(x / std.math.sqrt(@as(f32, 2.0)));
+```
+
+### 11. Integer type narrowing is an error
+
+Passing a `usize` or `int` literal where a `u2` is expected fails if the
+value is out of range. For example, passing `5` as a `u2` axis parameter:
+```
+error: integer type 'u2' cannot represent value '5'
+```
+Use `@intCast` explicitly or validate ranges before casting.
+
+### 12. `Shape.equals` is a free function
+
+In this project, `equals(a: Shape, b: Shape)` is a free function in
+`shape.zig`, NOT a method on `Shape`. Write `equals(a, b)`, not `a.equals(b)`.
+
+### 13. `Shape.rank` is NOT the dimension count
+
+The `rank` field is a `u2` storing `ndim - 1`. For a 2D shape, `rank = 1`.
+Use `shape.ndim()` to get the dimension count (2). Never compare `rank`
+directly to a dimension count.
+
 ## How to use this skill
 
 - Consumers of this skill read `SKILL.md` every turn. Consult specific
@@ -180,5 +305,7 @@ Full version: `references/15-code-review-checklist.md`.
   full code last.
 - Always link back to the canonical reference file when giving a fact
   (e.g. "see `references/07-io-0-16.md#flushing`").
+- For zig-transformer-lab project-specific issues, consult the
+  project-specific gotchas above AND `AGENTS.md` in the repository root.
 
-<!-- ~3.0k tokens · verified against Zig 0.16.0 release notes (2026) -->
+<!-- ~4.5k tokens · verified against Zig 0.16.0 release notes (2026) + zig-transformer-lab Stage 1-2 experience -->
