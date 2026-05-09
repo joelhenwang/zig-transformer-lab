@@ -120,11 +120,38 @@ These are real compilation errors we hit. Learn from them:
 - In `build.zig`, use a static `kernel_names` list for nvcc compilation —
   don't iterate the filesystem at build time (avoids `std.fs.cwd()` issues).
 
+## Zig 0.16.0 skill reference
+
+The `skills/modern-zig-0-16-tutor/` directory contains a comprehensive Zig 0.16.0
+reference library. **Read `skills/modern-zig-0-16-tutor/SKILL.md` every session** — it
+has the canonical stale-pattern table (28 rows), compiler-error quick lookup (22 entries),
+and 13 project-specific gotchas discovered during Stages 1-2.
+
+When you hit a Zig compilation error or API question, load reference files by topic
+(max 3 per turn to manage token budget):
+
+| Task | Load |
+|------|------|
+| Build system errors | `references/08-build-system-0-16.md` |
+| I/O (stdout, writer, formatting) | `references/07-io-0-16.md` |
+| Allocators, arena, leaks | `references/05-memory-allocators.md` |
+| ArrayList / HashMap | `references/06-containers-0-16.md` |
+| C/CUDA interop | `references/09-c-interop-0-16.md` + `references/17-zig-cuda-interop-notes.md` |
+| Testing, debugging | `references/10-testing-debugging.md` |
+| Code review | `references/15-code-review-checklist.md` |
+| ML/tensor design | `references/16-zig-for-ml-runtime-projects.md` |
+| Tensor2D skeleton | `templates/tensor2d-skeleton-0-16.zig` |
+| Numerical code testing | `recipes/numerical-code.md` |
+| Stale pattern scanning | `scripts/grep_stale_patterns.py <dir>` |
+
+Also available: 19 reference files, 12 recipes, 7 templates, 4 validation scripts.
+See `skills/modern-zig-0-16-tutor/README.md` for the full directory map.
+
 ## When stuck
 
 - Ask the user with a crisp options-style question (max 4 options).
 - Never guess at hardware, environment, or decisions.
-- Consult `skills/modern-zig-0-16-tutor/SKILL.md` for Zig API questions.
+- Check the skill's compiler-error quick lookup table in `SKILL.md`.
 - See `SESSION_GUIDE.md` for full project state and continuation instructions.
 
 ## Full plan
