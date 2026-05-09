@@ -1,0 +1,27 @@
+# Zig
+zig-out/
+zig-cache/
+.zig-cache/
+
+# Python tools
+tools/.venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Pre-flight (local only)
+docs/pre_flight.md
+
+# Run artifacts
+logs/
+*.loss.csv
+*.ckpt
+*.bin
+!data/*.bin
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

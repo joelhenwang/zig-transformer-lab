@@ -1,0 +1,14 @@
+.{
+    .name = .zig_transformer_lab,
+    .version = "0.1.0",
+    .fingerprint = 0xaaddbc7d5bdba141,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "docs",
+        "examples",
+    },
+}
