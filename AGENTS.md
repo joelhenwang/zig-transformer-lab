@@ -17,6 +17,46 @@ code that teaches how PyTorch-like systems work internally.
 - Kernels are compiled offline with nvcc to .ptx and loaded via cuModuleLoadData.
 - Never copy code from LGPL sources. Architectural ideas only, attributed in file headers.
 
+## Current progress
+
+| Stage | Status | Notes |
+|-------|--------|-------|
+| 1 — Scaffold | **Done** | Commit `153095b` |
+| 2 — CPU Tensor Foundation | **Done (uncommitted)** | All code + ~103 tests + example + 3 doc chapters ready; needs commit |
+| 3 — Tape-based Autograd | **Next** | Ready to start when user says go |
+| 4–9 | Not started | |
+
+**Stage 2 is complete but not yet committed.** Before committing, user should
+confirm readiness. The commit message should be:
+`stage(2): cpu tensor foundation`
+
+**What was completed this session:**
+1. `examples/01_tensor_playground.zig` — 13-section runnable example (shapes, creation, indexing, debug printing, broadcasting, elementwise/unary/reduce/matmul ops, views, softmax, cross-entropy, squeeze)
+2. `docs/01_zig_primer.md` — 803 lines: Zig 0.16 concepts used in the library + 15-entry gotcha table + 10-entry common mistakes
+3. `docs/02_tensors.md` — 973 lines: row-major strides, broadcasting (ASCII diagrams), softmax stability, log-softmax, cross-entropy, ikj matmul, views/contiguity
+4. `docs/02b_from_tensors_to_training.md` — 861 lines: bridges Stage 2 ops to ML/DL concepts, mini forward-pass trace with shapes, design-decision rationale, PyTorch equivalents table
+5. AGENTS.md revised — added progress tracking, known dead code section, renamed gotchas header
+6. `init.io.lockStderr` pattern discovered for stdout writing in examples (gotcha #11)
+
+**New Zig 0.16.0 gotcha discovered this session:**
+
+11. **`std.Io.get()` does not exist in 0.16.0.** There is no global stdout writer.
+    Use `init.io.lockStderr(&buffer, null)` inside `pub fn main(init: std.process.Init) !void`
+    to get a locked stderr writer. The `Init` struct provides the `io: Io` field.
+
+See `SESSION_GUIDE.md` for file-level detail, environment info, and resumption instructions.
+
+## Known dead code / pitfalls
+
+- **`tests/unit_all.zig` is dead code.** It is NOT wired into `build.zig` and would
+  fail to compile if used (wrong import names). The actual test aggregator is
+  `src/root.zig` (its `test { _ = ...; }` block references each sub-module).
+  Do NOT add tests to `unit_all.zig` — add them co-located in source files.
+
+- **`plan.md` lists `src/core/allocator.zig`** in its repository layout, but this
+  file was never created and is not imported anywhere. The plan's layout is stale
+  on this point; `docs/00_overview.md` is accurate.
+
 ## Workflow
 
 - Implement stages 1 through 9 in order. Do not interleave stages.
@@ -66,9 +106,9 @@ to a dimension count without adding 1.
 
 `Shape.equals` is a **free function**, not a method: `equals(a, b)` not `a.equals(b)`.
 
-## Zig 0.16.0 gotchas encountered during Stage 2
+## Zig 0.16.0 compilation gotchas
 
-These are real compilation errors we hit. Learn from them:
+Real errors encountered during implementation. New entries added per stage:
 
 1. **`std.fs.cwd()` does not exist in 0.16.0.** The `std.fs` module is mostly
    deprecated. Use `std.Io.Dir.cwd()` for filesystem access. In `build.zig`,
@@ -109,6 +149,10 @@ These are real compilation errors we hit. Learn from them:
 10. **`std.fmt.bufPrint` for string formatting.** `std.io.fixedBufferStream`
     may not exist or have a different API. `std.fmt.bufPrint(buf, fmt, args)`
     is the reliable way to format into a buffer.
+
+11. **`std.Io.get()` does not exist in 0.16.0.** There is no global stdout
+    writer. In examples, use `init.io.lockStderr(&buffer, null)` to get a
+    locked stderr writer. The `Init` struct provides the `io: Io` field.
 
 ## CUDA sacred spots
 

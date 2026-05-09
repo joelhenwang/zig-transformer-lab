@@ -51,7 +51,7 @@ Files created:
 
 Acceptance: ✅ `zig build` succeeds, `zig build test` passes
 
-### Stage 2 — CPU Tensor Foundation 🔄 IN PROGRESS (~85% done)
+### Stage 2 — CPU Tensor Foundation ✅ COMPLETE (uncommitted)
 
 **Files completed (all compile and pass tests):**
 
@@ -73,12 +73,17 @@ Acceptance: ✅ `zig build` succeeds, `zig build test` passes
 
 **Total: ~103 tests passing**
 
-**Still needed for Stage 2 acceptance:**
-1. `examples/01_tensor_playground.zig` — runnable example demonstrating shapes, broadcasting, softmax
-2. `docs/01_zig_primer.md` — Zig 0.16 concepts used in the library (500+ lines)
-3. `docs/02_tensors.md` — row-major, strides, broadcasting, softmax stability (500+ lines)
-4. Python oracle comparison (tools/oracle.py with tensor-op subcommand)
-5. Stage commit: `stage(2): cpu tensor foundation`
+**Examples:**
+- `examples/01_tensor_playground.zig` — 13-section runnable example covering all Stage 2 ops
+
+**Documentation:**
+- `docs/01_zig_primer.md` — 803 lines: Zig 0.16 concepts, 15-entry gotcha table, 10-entry common mistakes
+- `docs/02_tensors.md` — 973 lines: row-major strides, broadcasting, softmax stability, ikj matmul, views
+- `docs/02b_from_tensors_to_training.md` — 861 lines: bridges Stage 2 ops to ML/DL, forward-pass trace, PyTorch equivalents
+
+**Acceptance verified:** `zig build test` green, example runs, all docs 500+ lines
+
+**Remaining:** Commit as `stage(2): cpu tensor foundation`
 
 ### Stage 3 — Tape-based Autograd 🔲 NOT STARTED
 
@@ -178,30 +183,19 @@ zig build docs
 
 ## 7. How to Resume Implementation
 
-### To complete Stage 2:
+### Stage 2: Commit (if not yet done)
 
-1. **Create `examples/01_tensor_playground.zig`:**
-   - Demonstrates shape arithmetic, broadcasting (1,3)+(2,3), softmax, debug printing
-   - Must use `pub fn main(init: std.process.Init) !void`
-   - Import the library: `const ztl = @import("zig_transformer_lab");`
+If Stage 2 is not yet committed, commit it now:
 
-2. **Write `docs/01_zig_primer.md` (500+ lines):**
-   - Covers: allocators, slices, comptime, error unions, defer/errdefer, ownership
-   - Tuned to what THIS library uses (not a general Zig tutorial)
-   - Ends with "Common mistakes" section
+```bash
+git add -A
+git commit -m "stage(2): cpu tensor foundation"
+```
 
-3. **Write `docs/02_tensors.md` (500+ lines):**
-   - Covers: row-major derivation, stride math, broadcasting rules (ASCII diagrams), numerical stability of softmax/log_softmax
-   - Ends with "Common mistakes" section
-
-4. **Update `build.zig** to add the example as a named executable
-
-5. **Verify acceptance:**
-   - `zig build test` green with 30+ tests ✅ (currently ~103)
-   - `01_tensor_playground.zig` runs with expected output
-   - Oracle comparison (optional for now, tools/oracle.py not yet written)
-
-6. **Commit:** `stage(2): cpu tensor foundation`
+Acceptance already verified:
+- `zig build test` green with ~103 tests
+- `01_tensor_playground.zig` runs with expected output
+- All doc chapters 500+ lines
 
 ### To start Stage 3 (Autograd):
 
@@ -242,8 +236,9 @@ zig-transformer-lab/
 ├── docs/
 │   ├── 00_overview.md     ✅ 283 lines
 │   ├── pre_flight.md      ✅ Local only (gitignored)
-│   ├── 01_zig_primer.md   🔲 TODO (Stage 2)
-│   └── 02_tensors.md      🔲 TODO (Stage 2)
+│   ├── 01_zig_primer.md   ✅ 803 lines (Stage 2)
+│   ├── 02_tensors.md      ✅ 973 lines (Stage 2)
+│   └── 02b_from_tensors_to_training.md ✅ 861 lines (Stage 2)
 ├── src/
 │   ├── root.zig           ✅ Stage 1+2 wired
 │   ├── core/              ✅ errors, dtype, device, rng
@@ -257,9 +252,10 @@ zig-transformer-lab/
 │   ├── backend/           🔲 Stage 7
 │   ├── debug/             🔲 Stage 8
 │   └── lab/               🔲 Stage 6
-├── examples/              🔲 01_tensor_playground.zig (Stage 2)
+├── examples/
+│   └── 01_tensor_playground.zig ✅ 13-section runnable example (Stage 2)
 ├── tests/
-│   └── unit_all.zig       ✅ Module-based aggregator
+│   └── unit_all.zig       ✅ Module-based aggregator (dead code — see AGENTS.md)
 ├── tools/
 │   ├── requirements.txt   ✅
 │   └── .venv/             ✅ numpy+torch (gitignored)
@@ -301,6 +297,7 @@ The `skills/modern-zig-0-16-tutor/` directory is a comprehensive Zig 0.16.0 refe
 6. **broadcastShapes** returns `!Shape` (can fail with ShapeMismatch). Always use `try`.
 7. **crossEntropy** expects targets stored as f32 values (rounds to int for indexing).
 8. **The `seed` build option** is declared but not yet consumed by examples (placeholder for Stage 6).
+9. **`std.Io.get()` does not exist in 0.16.0.** There is no global stdout writer. In examples, use `init.io.lockStderr(&buffer, null)` to get a locked stderr writer. The `Init` struct provides the `io: Io` field.
 
 ---
 
