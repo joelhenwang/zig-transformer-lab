@@ -61,6 +61,8 @@ const Shape = @import("../shape.zig").Shape;
 const Tape = @import("../../autograd/tape.zig").Tape;
 const Node = @import("../../autograd/node.zig").Node;
 const OpKind = @import("../../autograd/node.zig").OpKind;
+// PR-κ: matmul routes CUDA inputs to cuBLAS via backend.cuda.gemm.
+const cuda_gemm = @import("../../backend/cuda/gemm.zig");
 
 /// Matrix multiply two rank-2 tensors.
 ///
@@ -77,6 +79,26 @@ const OpKind = @import("../../autograd/node.zig").OpKind;
 ///
 /// Memory: caller owns the returned tensor; must call deinit(allocator).
 pub fn matmul(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) LabError!Tensor {
+    // PR-κ: CUDA path routes to cuBLAS sgemm via the
+    // backend.cuda.gemm wrapper. Tape recording mirrors the CPU
+    // path at the bottom of the function.
+    if (a.device == .cuda or b.device == .cuda) {
+        var out = try cuda_gemm.matmul(a, b);
+        if (tape) |t| {
+            if (a.requires_grad or b.requires_grad) {
+                const node_id = try t.record(Node{
+                    .id = undefined,
+                    .op = .matmul,
+                    .parents = .{ a.tape_node, b.tape_node },
+                    .n_parents = 2,
+                    .saved = .{ .tensor_pair = .{ .a = a, .b = b } },
+                });
+                out.requires_grad = true;
+                out.tape_node = node_id;
+            }
+        }
+        return out;
+    }
     // --- Rank validation ---
     // We restrict to rank-2 because general ND matmul requires
     // broadcasting rules and batch dimension handling — those belong
@@ -166,6 +188,24 @@ pub fn matmul(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) 
 ///
 /// Memory: caller owns the returned tensor; must call deinit(allocator).
 pub fn matmulBatch(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) LabError!Tensor {
+    // PR-κ: CUDA path via cublasSgemmStridedBatched.
+    if (a.device == .cuda or b.device == .cuda) {
+        var out = try cuda_gemm.matmulBatch(a, b);
+        if (tape) |t| {
+            if (a.requires_grad or b.requires_grad) {
+                const node_id = try t.record(Node{
+                    .id = undefined,
+                    .op = .matmul_batch,
+                    .parents = .{ a.tape_node, b.tape_node },
+                    .n_parents = 2,
+                    .saved = .{ .tensor_pair = .{ .a = a, .b = b } },
+                });
+                out.requires_grad = true;
+                out.tape_node = node_id;
+            }
+        }
+        return out;
+    }
     // --- Rank validation ---
     // Rank-3 is the standard for batched matmul in transformers.
     // For other ranks, the caller should reshape or use matmul.

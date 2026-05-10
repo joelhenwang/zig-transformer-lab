@@ -35,6 +35,7 @@ const context = lab.backend.cuda.context;
 const mem = lab.backend.cuda.mem;
 const module = lab.backend.cuda.module;
 const dispatch = lab.backend.cuda.dispatch;
+const gemm = lab.backend.cuda.gemm;
 const CudaContext = context.CudaContext;
 const DeviceBuffer = mem.DeviceBuffer;
 const Tensor = lab.Tensor;
@@ -44,6 +45,7 @@ const computeStrides = lab.shape.computeStrides;
 const oracle = lab.testing_utils.oracle;
 const ops_elementwise = lab.ops.elementwise;
 const ops_reduce = lab.ops.reduce;
+const ops_matmul = lab.ops.matmul;
 const Tape = lab.Tape;
 
 // -- Io plumbing (shared with oracle tests; see tests/integration_oracle.zig) -----
@@ -1346,4 +1348,199 @@ test "cuda oracle add_2d: forward + backward parity via ops_elementwise.add" {
 
     try oracle.expectClose(da_cpu, expect_da, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
     try oracle.expectClose(db_cpu, expect_db, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
+}
+
+// ---------------------------------------------------------------------------
+// PR-kappa: cuBLAS row-major GEMM (matmul, matmulBatch)
+// ---------------------------------------------------------------------------
+//
+// Every test here uses deliberately asymmetric M/N/K dimensions.
+// A wrong transa/transb/operand-swap in the row-major -> col-major
+// translation would yield either the wrong output shape (caught
+// at the dims check) or the wrong values on the first call. See
+// docs/08_backends_cuda.md §3.5, §3.7, §11 for the derivation and
+// test-shape rationale.
+
+test "cuda gemm matmul: asymmetric (4,5) @ (5,3) hand-computed reference" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    const alloc = testing.allocator;
+
+    // Simple integer-valued inputs so the CPU reference computation
+    // is exact under f32 (no rounding).
+    //   a : (4, 5)  row-major: each row is 1,2,3,4,5
+    //   b : (5, 3)  row-major: column i has value i+1 in every row
+    // Expected:  a @ b  where (a@b)[i,j] = sum_k a[i,k] * b[k,j]
+    //           = (1+2+3+4+5) * b[:,j] summed appropriately
+    var a_vals: [20]f32 = undefined;
+    for (0..4) |i| {
+        for (0..5) |k| a_vals[i * 5 + k] = @floatFromInt(k + 1); // rows = 1,2,3,4,5
+    }
+    var b_vals: [15]f32 = undefined;
+    for (0..5) |k| {
+        for (0..3) |j| b_vals[k * 3 + j] = @floatFromInt(j + 1); // col j = j+1 everywhere
+    }
+    var a = try cudaFromSlice(&ctx, Shape.init2D(4, 5), &a_vals);
+    defer a.storage.deinit(alloc);
+    var b = try cudaFromSlice(&ctx, Shape.init2D(5, 3), &b_vals);
+    defer b.storage.deinit(alloc);
+
+    var c = try gemm.matmul(a, b);
+    defer c.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    var c_cpu = try c.toCpu(alloc);
+    defer c_cpu.deinit(alloc);
+    try testing.expectEqual(@as(usize, 2), c_cpu.shape.ndim());
+    try testing.expectEqual(@as(usize, 4), c_cpu.shape.dims[0]);
+    try testing.expectEqual(@as(usize, 3), c_cpu.shape.dims[1]);
+
+    // Hand reference: for every (i, j) we have
+    //   c[i,j] = sum_k (k+1) * (j+1) = (j+1) * sum_k (k+1) = (j+1) * 15
+    for (0..4) |i| {
+        for (0..3) |j| {
+            const expected: f32 = @as(f32, @floatFromInt(j + 1)) * 15.0;
+            const got = c_cpu.at(&[_]usize{ i, j });
+            try testing.expectEqual(expected, got);
+        }
+    }
+}
+
+test "cuda gemm matmul: oracle matmul_2d forward parity" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+
+    const alloc = testing.allocator;
+
+    var a_cpu = try oracle.loadTensor(alloc, io, fixturePath("matmul_2d", "input_0.ztlt"));
+    defer a_cpu.deinit(alloc);
+    var b_cpu = try oracle.loadTensor(alloc, io, fixturePath("matmul_2d", "input_1.ztlt"));
+    defer b_cpu.deinit(alloc);
+    var expect_y = try oracle.loadTensor(alloc, io, fixturePath("matmul_2d", "output.ztlt"));
+    defer expect_y.deinit(alloc);
+
+    var a_gpu = try a_cpu.toCuda(&ctx);
+    defer a_gpu.storage.deinit(alloc);
+    var b_gpu = try b_cpu.toCuda(&ctx);
+    defer b_gpu.storage.deinit(alloc);
+
+    var y_gpu = try gemm.matmul(a_gpu, b_gpu);
+    defer y_gpu.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    var y_cpu = try y_gpu.toCpu(alloc);
+    defer y_cpu.deinit(alloc);
+    try oracle.expectClose(y_cpu, expect_y, .{ .rel_tol = 1e-4, .abs_tol = 5e-5 });
+}
+
+test "cuda gemm matmul: shape/layout validation" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    const alloc = testing.allocator;
+    var a = try cudaFromSlice(&ctx, Shape.init2D(2, 3), &[_]f32{ 1, 2, 3, 4, 5, 6 });
+    defer a.storage.deinit(alloc);
+    // K mismatch: a is (2,3), b is (4,5) — can't multiply.
+    var bad = try cudaFromSlice(&ctx, Shape.init2D(4, 5), &[_]f32{0} ** 20);
+    defer bad.storage.deinit(alloc);
+    try testing.expectError(error.ShapeMismatch, gemm.matmul(a, bad));
+
+    // Rank mismatch.
+    var three_d = try cudaFromSlice(&ctx, Shape.init3D(1, 2, 3), &[_]f32{ 1, 2, 3, 4, 5, 6 });
+    defer three_d.storage.deinit(alloc);
+    try testing.expectError(error.ShapeMismatch, gemm.matmul(a, three_d));
+}
+
+test "cuda gemm matmulBatch: oracle matmul_batch_3d forward parity" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+
+    const alloc = testing.allocator;
+
+    var a_cpu = try oracle.loadTensor(alloc, io, fixturePath("matmul_batch_3d", "input_0.ztlt"));
+    defer a_cpu.deinit(alloc);
+    var b_cpu = try oracle.loadTensor(alloc, io, fixturePath("matmul_batch_3d", "input_1.ztlt"));
+    defer b_cpu.deinit(alloc);
+    var expect_y = try oracle.loadTensor(alloc, io, fixturePath("matmul_batch_3d", "output.ztlt"));
+    defer expect_y.deinit(alloc);
+
+    var a_gpu = try a_cpu.toCuda(&ctx);
+    defer a_gpu.storage.deinit(alloc);
+    var b_gpu = try b_cpu.toCuda(&ctx);
+    defer b_gpu.storage.deinit(alloc);
+
+    var y_gpu = try gemm.matmulBatch(a_gpu, b_gpu);
+    defer y_gpu.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    var y_cpu = try y_gpu.toCpu(alloc);
+    defer y_cpu.deinit(alloc);
+    try oracle.expectClose(y_cpu, expect_y, .{ .rel_tol = 1e-4, .abs_tol = 5e-5 });
+}
+
+test "cuda ops_matmul.matmul: oracle matmul_2d forward + backward parity" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+
+    const alloc = testing.allocator;
+
+    var a_cpu = try oracle.loadTensor(alloc, io, fixturePath("matmul_2d", "input_0.ztlt"));
+    defer a_cpu.deinit(alloc);
+    var b_cpu = try oracle.loadTensor(alloc, io, fixturePath("matmul_2d", "input_1.ztlt"));
+    defer b_cpu.deinit(alloc);
+    var expect_y = try oracle.loadTensor(alloc, io, fixturePath("matmul_2d", "output.ztlt"));
+    defer expect_y.deinit(alloc);
+    var expect_da = try oracle.loadTensor(alloc, io, fixturePath("matmul_2d", "grad_input_0.ztlt"));
+    defer expect_da.deinit(alloc);
+    var expect_db = try oracle.loadTensor(alloc, io, fixturePath("matmul_2d", "grad_input_1.ztlt"));
+    defer expect_db.deinit(alloc);
+
+    var a_gpu = try a_cpu.toCuda(&ctx);
+    defer a_gpu.storage.deinit(alloc);
+    a_gpu.requires_grad = true;
+    var b_gpu = try b_cpu.toCuda(&ctx);
+    defer b_gpu.storage.deinit(alloc);
+    b_gpu.requires_grad = true;
+
+    var tape = Tape.init(alloc);
+    defer tape.deinit();
+    _ = try tape.trackLeaf(&a_gpu);
+    _ = try tape.trackLeaf(&b_gpu);
+
+    var y = try ops_matmul.matmul(alloc, a_gpu, b_gpu, &tape);
+    defer y.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    {
+        var y_cpu = try y.toCpu(alloc);
+        defer y_cpu.deinit(alloc);
+        try oracle.expectClose(y_cpu, expect_y, .{ .rel_tol = 1e-4, .abs_tol = 5e-5 });
+    }
+
+    // Loss = sumAll(y); backward computes dL/dA = dL/dC @ B^T,
+    // dL/dB = A^T @ dL/dC via more matmuls that also route through
+    // the CUDA dispatch.
+    var loss = try ops_reduce.sumAll(alloc, y, &tape);
+    defer loss.storage.deinit(alloc);
+    try tape.backward(&loss);
+    try ctx.synchronize();
+
+    var da_cpu = try a_gpu.grad.?.*.toCpu(alloc);
+    defer da_cpu.deinit(alloc);
+    var db_cpu = try b_gpu.grad.?.*.toCpu(alloc);
+    defer db_cpu.deinit(alloc);
+
+    try oracle.expectClose(da_cpu, expect_da, .{ .rel_tol = 1e-4, .abs_tol = 5e-5 });
+    try oracle.expectClose(db_cpu, expect_db, .{ .rel_tol = 1e-4, .abs_tol = 5e-5 });
 }

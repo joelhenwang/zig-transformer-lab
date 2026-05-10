@@ -101,6 +101,7 @@ pub const backend = struct {
         pub const mem = @import("backend/cuda/mem.zig");
         pub const module = @import("backend/cuda/module.zig");
         pub const dispatch = @import("backend/cuda/dispatch.zig");
+        pub const gemm = @import("backend/cuda/gemm.zig");
     };
 };
 
