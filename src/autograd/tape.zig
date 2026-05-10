@@ -337,6 +337,16 @@ pub const Tape = struct {
     /// `owned` / `storage.cpu.owned` are set to false — the tape
     /// owns the buffer, not this snapshot.
     fn cloneTensorData(self: *Tape, t: Tensor) LabError!Tensor {
+        // PR-δ guard: CUDA saved-tensor copies require a
+        // DeviceBuffer DtoD copy into a tape-owned device buffer, not
+        // `allocator.dupe` on a host slice. PR-η (first CUDA op PR)
+        // wires the CUDA branch. Reaching this path with a CUDA
+        // tensor today means an autograd op was registered on a CUDA
+        // input without the corresponding CUDA save-path support —
+        // return NotImplemented loudly so the gap is visible instead
+        // of silently snapshotting an empty slice and corrupting
+        // backward.
+        if (t.device == .cuda) return error.NotImplemented;
         const copy = self.allocator.dupe(f32, t.data) catch return error.OutOfMemory;
         self.kept_alive.append(self.allocator, copy) catch {
             self.allocator.free(copy);

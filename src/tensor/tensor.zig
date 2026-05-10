@@ -68,6 +68,12 @@ const logicalOffsetFromLinear = shape_mod.logicalOffsetFromLinear;
 const maxLogicalOffset = shape_mod.maxLogicalOffset;
 const DType = @import("../core/dtype.zig").DType;
 const Device = @import("../core/device.zig").Device;
+// PR-δ: Storage.cuda carries a DeviceBuffer (RAII over cuMemAlloc_v2).
+// Importing here pulls in backend.cuda.bindings + context transitively.
+// All three CUDA files compile cross-platform (std.DynLib is portable),
+// so this import does not break the Windows CPU-only build — bindings
+// only touch the GPU at runtime via load(), never at compile time.
+const DeviceBuffer = @import("../backend/cuda/mem.zig").DeviceBuffer;
 
 /// NodeId for the autograd tape graph.
 /// u32 is sufficient for our use case: even a large training run
@@ -111,32 +117,48 @@ pub const CpuStorage = struct {
 
 /// Device-tagged storage union.
 ///
-/// Today only the `.cpu` variant carries data. The `.cuda` variant is
-/// intentionally `void` so that the shape of the type is committed —
-/// subsequent PRs can replace `void` with the real CUDA descriptor
-/// (`CUdeviceptr`, length, device id, owned flag) without any other
-/// file needing to change its top-level switches on `Storage`.
+/// PR-δ replaced the `cuda: void` placeholder with a real
+/// `DeviceBuffer` payload. The CUDA branch now carries everything
+/// needed to free the allocation and to cross-reference it with a
+/// `CudaContext` (for the `requireSameDevice`-style checks that
+/// later PRs will extend to cross-context safety).
+///
+/// The `Device` enum is the tag. The payload type varies per tag:
+///   - `.cpu`  -> `CpuStorage { data: []f32, owned: bool }`
+///   - `.cuda` -> `DeviceBuffer { ctx, ptr, len, owned }`
+///
+/// Using `DeviceBuffer` directly (rather than wrapping it in an
+/// outer `CudaStorage` struct) keeps the representation flat: the
+/// outer struct would have held only a single `buffer: DeviceBuffer`
+/// field, with no additional CUDA-specific metadata that isn't
+/// already tracked inside `DeviceBuffer`.
 pub const Storage = union(Device) {
     cpu: CpuStorage,
-    cuda: void,
+    cuda: DeviceBuffer,
 
     /// Number of f32 elements in the backing buffer.
-    /// For CPU, this is `cpu.data.len`. For CUDA (once implemented),
-    /// it will be the number of floats in the `CUdeviceptr` allocation.
+    /// For CPU this is `cpu.data.len`; for CUDA it is the
+    /// `DeviceBuffer.len` we tracked at `cuMemAlloc_v2` time.
     pub fn len(self: Storage) usize {
         return switch (self) {
             .cpu => |s| s.data.len,
-            .cuda => 0,
+            .cuda => |b| b.len,
         };
     }
 
     /// Free any memory the storage owns.
+    ///
+    /// The `allocator` parameter is only used for the CPU branch;
+    /// CUDA storage frees itself through `DeviceBuffer.deinit`,
+    /// which routes to `cuMemFree_v2` via the CUDA loader. The
+    /// allocator is harmless on the CUDA path and lets us keep the
+    /// signature uniform across every call site.
     pub fn deinit(self: *Storage, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .cpu => |*s| {
                 if (s.owned) allocator.free(s.data);
             },
-            .cuda => {}, // will call cuMemFree_v2 once PR-ι fleshes this out
+            .cuda => |*b| b.deinit(),
         }
     }
 };
@@ -659,8 +681,25 @@ pub const Tensor = struct {
                 if (self.owned != s.owned) return error.InvalidLayout;
                 if (self.device != .cpu) return error.DeviceMismatch;
             },
-            .cuda => {
+            .cuda => |b| {
                 if (self.device != .cuda) return error.DeviceMismatch;
+                // The CPU compat alias is intentionally empty for a
+                // CUDA tensor. Any host code that walks `self.data[i]`
+                // iterates zero times — a loud failure (no output)
+                // rather than a silent wrong answer from reading past
+                // a non-host-addressable CUdeviceptr.
+                if (self.data.len != 0) return error.InvalidLayout;
+                // A CUDA tensor's top-level `owned` flag must stay
+                // false: deinit of Tensor.data would try
+                // `allocator.free(emptySlice)` (harmless) but more
+                // importantly, the *real* ownership lives inside the
+                // DeviceBuffer, not in the top-level alias.
+                if (self.owned) return error.InvalidLayout;
+                // The backing DeviceBuffer must be internally
+                // consistent: zero-length means zero pointer, and
+                // nonzero-length implies a real device pointer. This
+                // matches the alloc(0) convention in DeviceBuffer.
+                if (b.len == 0 and b.ptr != 0) return error.InvalidLayout;
             },
         }
 
@@ -682,7 +721,12 @@ pub const Tensor = struct {
 pub fn nonOwningStorage(src: Storage) Storage {
     return switch (src) {
         .cpu => |s| Storage{ .cpu = .{ .data = s.data, .owned = false } },
-        .cuda => Storage{ .cuda = {} },
+        .cuda => |b| Storage{ .cuda = .{
+            .ctx = b.ctx,
+            .ptr = b.ptr,
+            .len = b.len,
+            .owned = false,
+        } },
     };
 }
 
@@ -1130,9 +1174,14 @@ test "requireSameDevice no-op on two CPU tensors" {
 
 test "requireSameDevice rejects differing devices" {
     // Construct a fake 'cuda' tensor by hand (no allocation; we only
-    // exercise the device-check branch). This is why requireSameDevice
-    // must never read data — a CUDA tensor's data slice is not host-
-    // accessible once PR-ι ships the real Storage.cuda variant.
+    // exercise the device-check branch). requireSameDevice reads only
+    // Tensor.device, so the CUDA storage need not be backed by a real
+    // GPU allocation. We use `stubCudaStorage` which sets `ctx` to
+    // undefined — safe here because no code in this test path ever
+    // dereferences `ctx`. Any future change to checkInvariants or to
+    // requireSameDevice that reads the ctx pointer would crash loudly
+    // in debug builds (undefined is 0xAA-filled), prompting the
+    // migration of this test to a real-GPU fixture.
     var data: [1]f32 = .{0};
     const cpu_t = Tensor{
         .data = &data,
@@ -1154,7 +1203,7 @@ test "requireSameDevice rejects differing devices" {
         .dtype = .f32,
         .device = .cuda,
         .owned = false,
-        .storage = .{ .cuda = {} },
+        .storage = stubCudaStorage(1),
         .offset = 0,
         .requires_grad = false,
         .grad = null,
@@ -1188,4 +1237,120 @@ test "Tensor view marks storage as not owned" {
     }
     // Top-level `owned` alias agrees with storage.
     try std.testing.expect(!v.owned);
+}
+
+// -- PR-δ Storage.cuda invariants ------------------------------------------
+//
+// These tests exercise only the *structural* invariants of a
+// CUDA-tagged tensor. They do not allocate on the GPU (that happens in
+// `tests/integration_cuda.zig` under `-Dcuda=true`). Instead they build
+// a Tensor literal with `Storage.cuda` backed by a stub DeviceBuffer
+// whose `ctx` field is `undefined` — safe because no code in these
+// tests ever dereferences the ctx pointer.
+//
+// The stub pattern is test-only. Any future change to the invariant
+// check or to requireSameDevice that reads `storage.cuda.ctx` would
+// crash these tests loudly in debug builds (Zig fills `undefined` with
+// 0xAA), signalling that the stub needs to become a real-GPU fixture.
+
+/// Build a Storage.cuda value that is structurally valid (so
+/// checkInvariants accepts it) but is **not** backed by a real GPU
+/// allocation. The embedded DeviceBuffer has:
+///   - ctx = undefined (never dereferenced in the tests that use this)
+///   - ptr = 0 (matches the `alloc(0)` empty-handle convention)
+///   - len = n (caller-chosen, must match the tensor's logical size)
+///   - owned = false (so deinit does not try to call cuMemFree_v2)
+fn stubCudaStorage(n: usize) Storage {
+    return .{ .cuda = .{
+        .ctx = undefined,
+        .ptr = 0,
+        .len = n,
+        .owned = false,
+    } };
+}
+
+test "Tensor.checkInvariants accepts a hand-built CUDA stub" {
+    const s = Shape.init2D(3, 4);
+    const t = Tensor{
+        .data = &.{},
+        .shape = s,
+        .strides = computeStrides(s),
+        .dtype = .f32,
+        .device = .cuda,
+        .owned = false,
+        .storage = stubCudaStorage(12),
+        .offset = 0,
+        .requires_grad = false,
+        .grad = null,
+        .tape_node = null,
+    };
+    try t.checkInvariants();
+}
+
+test "Tensor.checkInvariants rejects CUDA tensor with nonzero data.len alias" {
+    // A CUDA tensor must keep the top-level `data` compat alias empty.
+    // Any non-empty slice here means host code would silently walk a
+    // slice that is *not* the actual CUDA payload — the exact silent-
+    // wrong-answer bug Storage was designed to prevent.
+    var bogus_host: [4]f32 = .{ 0, 0, 0, 0 };
+    const s = Shape.init1D(4);
+    const t = Tensor{
+        .data = &bogus_host, // INVALID — CUDA tensors must have data.len == 0
+        .shape = s,
+        .strides = computeStrides(s),
+        .dtype = .f32,
+        .device = .cuda,
+        .owned = false,
+        .storage = stubCudaStorage(4),
+        .offset = 0,
+        .requires_grad = false,
+        .grad = null,
+        .tape_node = null,
+    };
+    try std.testing.expectError(error.InvalidLayout, t.checkInvariants());
+}
+
+test "Tensor.checkInvariants rejects CUDA tensor whose top-level owned=true" {
+    // Ownership of CUDA memory lives inside the DeviceBuffer, not in
+    // the top-level `owned` compat alias. If a tensor claims to own
+    // host memory while living on CUDA, Tensor.deinit would try to
+    // free a host-side empty slice (harmless) but more importantly it
+    // signals a structural confusion about who is responsible for
+    // cuMemFree_v2 — refuse to trust such a tensor.
+    const s = Shape.init1D(4);
+    const t = Tensor{
+        .data = &.{},
+        .shape = s,
+        .strides = computeStrides(s),
+        .dtype = .f32,
+        .device = .cuda,
+        .owned = true, // INVALID for a CUDA tensor
+        .storage = stubCudaStorage(4),
+        .offset = 0,
+        .requires_grad = false,
+        .grad = null,
+        .tape_node = null,
+    };
+    try std.testing.expectError(error.InvalidLayout, t.checkInvariants());
+}
+
+test "Tensor.checkInvariants rejects device/storage tag disagreement" {
+    // A tensor with device = .cpu but storage = .cuda is internally
+    // inconsistent. The union tag on `storage` is the source of truth;
+    // the `device` field is a convenience alias. Drift is a bug.
+    const s = Shape.init1D(4);
+    const t = Tensor{
+        .data = &.{},
+        .shape = s,
+        .strides = computeStrides(s),
+        .dtype = .f32,
+        .device = .cpu, // disagrees with storage tag below
+        .owned = false,
+        .storage = stubCudaStorage(4),
+        .offset = 0,
+        .requires_grad = false,
+        .grad = null,
+        .tape_node = null,
+    };
+    try std.testing.expectError(error.DeviceMismatch, t.checkInvariants());
 }

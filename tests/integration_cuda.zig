@@ -35,6 +35,10 @@ const context = lab.backend.cuda.context;
 const mem = lab.backend.cuda.mem;
 const CudaContext = context.CudaContext;
 const DeviceBuffer = mem.DeviceBuffer;
+const Tensor = lab.Tensor;
+const Storage = lab.Storage;
+const Shape = lab.shape.Shape;
+const computeStrides = lab.shape.computeStrides;
 
 // ---------------------------------------------------------------------------
 // PR-alpha: dynamic loader smoke tests
@@ -277,4 +281,90 @@ test "cuda DeviceBuffer: mismatched sizes return ShapeMismatch" {
 
     var mismatch_dst: [3]f32 = undefined;
     try testing.expectError(error.ShapeMismatch, buf.copyToHost(&mismatch_dst));
+}
+
+// ---------------------------------------------------------------------------
+// PR-delta: Tensor with real Storage.cuda backed by DeviceBuffer
+// ---------------------------------------------------------------------------
+
+test "cuda Tensor: Storage.cuda wraps a real DeviceBuffer and passes invariants" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    // Allocate 12 f32s on the device and wrap them in a Storage.cuda.
+    // The DeviceBuffer is owned; transferring ownership into Storage
+    // means the Tensor's storage.deinit must free it.
+    const src = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
+    const dbuf = try DeviceBuffer.fromHost(&ctx, &src);
+    // Do NOT defer dbuf.deinit(); ownership moves into the Tensor below.
+
+    const s = Shape.init3D(2, 3, 2);
+    var t = Tensor{
+        .data = &.{}, // CPU compat alias is intentionally empty on CUDA
+        .shape = s,
+        .strides = computeStrides(s),
+        .dtype = .f32,
+        .device = .cuda,
+        .owned = false, // ownership of CUDA memory is inside DeviceBuffer
+        .storage = .{ .cuda = dbuf },
+        .offset = 0,
+        .requires_grad = false,
+        .grad = null,
+        .tape_node = null,
+    };
+
+    // Structural invariants hold.
+    try t.checkInvariants();
+
+    // Storage.len reports the device-buffer element count.
+    try testing.expectEqual(@as(usize, 12), t.storage.len());
+
+    // Device tag and storage union tag agree.
+    try testing.expect(t.device == .cuda);
+    switch (t.storage) {
+        .cuda => |b| {
+            try testing.expect(b.owned);
+            try testing.expect(b.ptr != 0);
+            try testing.expectEqual(@as(usize, 12), b.len);
+        },
+        .cpu => unreachable,
+    }
+
+    // Deinit drives the CUDA free path. The arg allocator is ignored
+    // on the CUDA branch; we pass testing.allocator for uniformity.
+    t.storage.deinit(testing.allocator);
+}
+
+test "cuda Tensor: nonOwningStorage view over Storage.cuda preserves ctx/ptr/len, flips owned" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    const src = [_]f32{ 10, 20, 30, 40 };
+    var dbuf = try DeviceBuffer.fromHost(&ctx, &src);
+    defer dbuf.deinit(); // the owner lives here, not in the storage below
+
+    // Build a Storage.cuda that is already a non-owning "view" of dbuf,
+    // then exercise nonOwningStorage (which must preserve ctx/ptr/len
+    // and clear any owned bit). This mirrors how view()/reshape()/
+    // transpose2d() will construct child storages from CUDA parents
+    // once PR-epsilon wires Tensor.toCuda.
+    const owner_storage = Storage{ .cuda = .{
+        .ctx = dbuf.ctx,
+        .ptr = dbuf.ptr,
+        .len = dbuf.len,
+        .owned = false,
+    } };
+    const view_storage = lab.nonOwningStorage(owner_storage);
+
+    switch (view_storage) {
+        .cuda => |b| {
+            try testing.expectEqual(dbuf.ctx, b.ctx);
+            try testing.expectEqual(dbuf.ptr, b.ptr);
+            try testing.expectEqual(dbuf.len, b.len);
+            try testing.expect(!b.owned);
+        },
+        .cpu => unreachable,
+    }
 }
