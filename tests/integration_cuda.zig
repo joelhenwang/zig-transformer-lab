@@ -32,7 +32,9 @@ const testing = std.testing;
 const lab = @import("zig_transformer_lab");
 const bindings = lab.backend.cuda.bindings;
 const context = lab.backend.cuda.context;
+const mem = lab.backend.cuda.mem;
 const CudaContext = context.CudaContext;
+const DeviceBuffer = mem.DeviceBuffer;
 
 // ---------------------------------------------------------------------------
 // PR-alpha: dynamic loader smoke tests
@@ -153,4 +155,126 @@ test "cuda context: two sequential init/deinit cycles leave no state behind" {
         defer ctx.deinit();
         try ctx.synchronize();
     }
+}
+
+// ---------------------------------------------------------------------------
+// PR-gamma: DeviceBuffer alloc / copy / free
+// ---------------------------------------------------------------------------
+
+test "cuda DeviceBuffer: alloc + deinit on an empty context" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    var buf = try DeviceBuffer.alloc(&ctx, 1024);
+    defer buf.deinit();
+
+    try testing.expectEqual(@as(usize, 1024), buf.len);
+    try testing.expect(buf.owned);
+    try testing.expect(buf.ptr != 0);
+}
+
+test "cuda DeviceBuffer: alloc(0) returns a valid, non-owning, zero-length handle" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    var buf = try DeviceBuffer.alloc(&ctx, 0);
+    defer buf.deinit();
+
+    try testing.expectEqual(@as(usize, 0), buf.len);
+    try testing.expectEqual(@as(bindings.CUdeviceptr, 0), buf.ptr);
+    try testing.expect(!buf.owned);
+}
+
+test "cuda DeviceBuffer: HtoD + DtoH round-trip is byte-identical (NaN included)" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    // NaN is the interesting case: a float memcpy preserves the exact
+    // bit pattern, but `f == f` is false for any NaN. We compare via
+    // @bitCast to u32 so bit-exactness is visible even for NaN payloads.
+    // Other values stress the range: finite, subnormal-adjacent, and
+    // extremes. f32 round-trip under memcpy is always bit-identical.
+    const nan_val = std.math.nan(f32);
+    const src = [_]f32{
+        1.0,
+        -2.5,
+        1.0e6,
+        1.0e-6,
+        nan_val,
+    };
+
+    var buf = try DeviceBuffer.fromHost(&ctx, &src);
+    defer buf.deinit();
+
+    var dst: [5]f32 = undefined;
+    try buf.copyToHost(&dst);
+
+    for (src, dst, 0..) |s, d, i| {
+        const sb: u32 = @bitCast(s);
+        const db: u32 = @bitCast(d);
+        if (sb != db) {
+            std.debug.print(
+                "mismatch at [{d}]: src=0x{x:0>8} ({e}) dst=0x{x:0>8} ({e})\n",
+                .{ i, sb, s, db, d },
+            );
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "cuda DeviceBuffer: toHost() allocates + copies" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    const src = [_]f32{ 3.14, 2.71, -1.0, 0.0, 42.0 };
+    var buf = try DeviceBuffer.fromHost(&ctx, &src);
+    defer buf.deinit();
+
+    const host_copy = try buf.toHost(testing.allocator);
+    defer testing.allocator.free(host_copy);
+
+    try testing.expectEqual(src.len, host_copy.len);
+    for (src, host_copy) |s, d| {
+        try testing.expectEqual(s, d);
+    }
+}
+
+test "cuda DeviceBuffer: DtoD copy preserves bytes between two buffers" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    const src_vals = [_]f32{ 10, 20, 30, 40, 50, 60, 70, 80 };
+    var a = try DeviceBuffer.fromHost(&ctx, &src_vals);
+    defer a.deinit();
+
+    var b = try DeviceBuffer.alloc(&ctx, src_vals.len);
+    defer b.deinit();
+
+    try b.copyFromDevice(a);
+
+    var dst: [8]f32 = undefined;
+    try b.copyToHost(&dst);
+    try testing.expectEqualSlices(f32, &src_vals, &dst);
+}
+
+test "cuda DeviceBuffer: mismatched sizes return ShapeMismatch" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    var buf = try DeviceBuffer.alloc(&ctx, 10);
+    defer buf.deinit();
+
+    const too_short = [_]f32{0} ** 5;
+    const too_long = [_]f32{0} ** 20;
+    try testing.expectError(error.ShapeMismatch, buf.copyFromHost(&too_short));
+    try testing.expectError(error.ShapeMismatch, buf.copyFromHost(&too_long));
+
+    var mismatch_dst: [3]f32 = undefined;
+    try testing.expectError(error.ShapeMismatch, buf.copyToHost(&mismatch_dst));
 }
