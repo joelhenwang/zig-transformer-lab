@@ -93,38 +93,21 @@ pub const Windowing = struct {
 
     /// Number of valid windows in the token stream.
     ///
-    /// A window at index i requires tokens[i..i+seq_len] and
-    /// tokens[i+1..i+1+seq_len] to both be valid. The last valid
-    /// starting index i satisfies i + seq_len + 1 <= tokens.len,
-    /// which gives i <= tokens.len - seq_len - 1.
+    /// A window at starting index i exposes:
+    ///   input  = tokens[i        .. i + T]     (T tokens)
+    ///   target = tokens[i + 1    .. i + 1 + T] (T tokens)
     ///
-    /// So count = tokens.len - seq_len if tokens.len > seq_len, else 0.
+    /// The last valid index needs tokens[i + T] to exist, i.e.
+    /// `i + T < tokens.len`. So i ranges from 0 to tokens.len - T - 1
+    /// inclusive, giving `tokens.len - T` windows when `tokens.len > T`,
+    /// and 0 otherwise.
     ///
-    /// Wait — we need seq_len tokens for input AND one more token for
-    /// the last target position. So we need at least seq_len + 1 tokens
-    /// total. The number of windows is tokens.len - seq_len.
-    ///
-    /// Actually: input is tokens[i..i+T] (length T), target is
-    /// tokens[i+1..i+1+T] (length T). For target to be valid,
-    /// i+1+T <= tokens.len, so i <= tokens.len - T - 1.
-    /// Number of valid i values: tokens.len - T (if tokens.len > T).
-    ///
-    /// Hmm, let me think again. The simplest way:
-    ///   - We need tokens[i] through tokens[i+T] to exist (T+1 tokens).
-    ///   - i ranges from 0 to tokens.len - T - 1.
-    ///   - Count = tokens.len - T (when tokens.len >= T + 1).
-    ///   - Or equivalently: max(tokens.len - seq_len, 0) when we use
-    ///     the "target[t] = input[t+1]" definition where target needs
-    ///     one token beyond input.
-    ///
-    /// Actually wait: input has T tokens (indices i..i+T-1), target has
-    /// T tokens (indices i+1..i+T). So we need index i+T to exist,
-    /// meaning tokens.len > i+T, so i < tokens.len - T. Number of
-    /// valid i values = tokens.len - T (when tokens.len > T).
+    /// Derivation in one line:
+    ///   count = max(tokens.len - seq_len, 0)
     ///
     /// Worked example:
     ///   tokens.len = 5, T = 3
-    ///   Windows: i=0 (needs indices 0..3), i=1 (needs indices 1..4)
+    ///   valid starts: i = 0 (needs indices 0..3), i = 1 (needs indices 1..4)
     ///   count = 5 - 3 = 2  ✓
     pub fn count(self: Windowing) usize {
         if (self.tokens.len <= self.seq_len) return 0;

@@ -44,6 +44,54 @@
 const std = @import("std");
 const Tensor = @import("../tensor/tensor.zig").Tensor;
 
+// ---------------------------------------------------------------------------
+// ParamId — stable identity for learnable parameters (PR-ζ)
+// ---------------------------------------------------------------------------
+//
+// Optimizers track per-parameter state (e.g. AdamW's m and v moments).
+// Pre-PR-ζ that state was keyed by `@intFromPtr(param.data.ptr)` — the
+// raw memory address of the parameter's backing buffer. That key is
+// unstable: any operation that replaces the buffer (loading a
+// checkpoint into a fresh tensor; PR-ι moving parameters to CUDA and
+// back; a future tensor resize) would silently invalidate the key,
+// and the optimizer would start the next step with zero moments.
+// The correct model — what PyTorch uses internally — is to give each
+// parameter a stable identity that travels with the tensor across
+// buffer replacements. `ParamId` is that identity.
+//
+// Design notes:
+//   - 32-bit IDs. Even a pathological training run creates far fewer
+//     than 4 billion parameters.
+//   - Globally monotonic counter. Tests may create parameters across
+//     multiple models in the same process; each one gets a fresh ID.
+//   - Atomic so that future multi-threaded parameter creation remains
+//     safe. Single-threaded today.
+//   - `?ParamId` on Tensor so intermediate tensors (which are NOT
+//     parameters) carry a null and never appear in optimizer state.
+
+/// A stable, 32-bit identity for a learnable parameter tensor.
+/// Assigned by `assignParamId` during layer initialisation and keyed
+/// by the optimizer in place of `@intFromPtr`.
+pub const ParamId = u32;
+
+var next_param_id: std.atomic.Value(ParamId) = .init(1);
+
+/// Assign a fresh, globally-unique `ParamId` to this tensor if it does
+/// not already have one. Idempotent: re-calling on an already-assigned
+/// tensor is a no-op, which lets helpers (e.g. checkpoint load) safely
+/// preserve IDs when replacing the backing buffer.
+pub fn assignParamId(t: *Tensor) void {
+    if (t.param_id == null) {
+        t.param_id = next_param_id.fetchAdd(1, .monotonic);
+    }
+}
+
+/// For tests: reset the global counter so IDs are deterministic across
+/// test runs. Not called in production.
+pub fn resetParamIdCounterForTests() void {
+    next_param_id.store(1, .monotonic);
+}
+
 /// Configuration for a single transformer model.
 ///
 /// All fields have pedagogically small defaults so the model can

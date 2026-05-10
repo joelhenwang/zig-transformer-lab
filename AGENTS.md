@@ -6,6 +6,37 @@ Build a pedagogical Zig 0.16.0 library that trains a tiny 1-block 1-head word-le
 transformer on CPU, then on CUDA, with extensive documentation and heavily commented
 code that teaches how PyTorch-like systems work internally.
 
+## Current engineering gate — Stage 6.5 (CPU hardening)
+
+Stage 7 CUDA is **blocked** until Stage 6.5 ships. Rationale and full plan are
+in `zig_transformer_lab_implementation_assessment_and_plan.md` (researcher
+review) plus the accepted plan in session notes.
+
+Stage 6.5 consists of seven PRs, executed in order:
+
+| PR  | Scope                                                  | Status      |
+|-----|--------------------------------------------------------|-------------|
+| α   | Honesty pass + Windows-portable build                  | In progress |
+| β   | Fix strided elementwise ops and `copyTo`               | Pending     |
+| γ   | Tensor invariants + `LabError` expansion               | Pending     |
+| δ   | Storage union + offset field (CPU-only backend seam)   | Pending     |
+| ε   | Operation-owned `SavedTensor`; remove `keepAlive`      | Pending     |
+| ζ   | Stable `ParamId`-based optimizer state                 | Pending     |
+| η   | Strict checkpoint validation                            | Pending     |
+
+Exit criteria:
+
+- README, AGENTS, docs agree that CUDA is not yet implemented.
+- Tensor invariants implemented and tested; zero dimensions rejected.
+- Storage/offset model exists; CUDA memory is never represented as `[]f32`.
+- Non-contiguous view behavior is correct or explicitly rejected per op.
+- Autograd saved data is operation-owned; no manual `keepAlive` in `src/nn/`.
+- Optimizer state keyed by stable `ParamId`, not by data pointer.
+- Checkpoint loading validates metadata strictly (magic, version, shape, dtype).
+- `zig build test` passes on Windows and Linux; exact output recorded.
+
+Only after this gate passes may Stage 7 CUDA wrapper work begin.
+
 ## Hard rules
 
 - Do not violate Locked Decisions D1 through D14 or policies P1 through P4.
@@ -27,7 +58,8 @@ code that teaches how PyTorch-like systems work internally.
 | 4 — NN Layers + Optimizers | **Done** | Commit `b02801b` — 18 files, 3638 insertions |
 | 5 — Tokenizer + Data Pipeline | **Done** | Commit `d286c8a` — 7 source files, 2 data files, 2 docs, 1 example |
 | 6 — End-to-end CPU Training | **Done** | Commit `015da3c` — Trainer, generation, gradient clipping, bug fixes |
-| 7 — CUDA Backend | **Not started** | See Stage 7 section below |
+| 6.5 — CPU Hardening | **In progress** | PR-α underway |
+| 7 — CUDA Backend | **Blocked on 6.5** | See Stage 7 section below |
 | 8–9 | Not started | |
 
 **Stage 3 committed:** `stage(3): tape-based autograd`

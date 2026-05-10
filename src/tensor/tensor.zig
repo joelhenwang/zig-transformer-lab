@@ -64,6 +64,8 @@ const computeStrides = shape_mod.computeStrides;
 const totalElements = shape_mod.totalElements;
 const shape_isContiguous = shape_mod.isContiguous;
 const shape_equals = shape_mod.equals;
+const logicalOffsetFromLinear = shape_mod.logicalOffsetFromLinear;
+const maxLogicalOffset = shape_mod.maxLogicalOffset;
 const DType = @import("../core/dtype.zig").DType;
 const Device = @import("../core/device.zig").Device;
 
@@ -73,6 +75,71 @@ const Device = @import("../core/device.zig").Device;
 /// Declared here so the Tensor struct can hold an optional reference
 /// to its tape node without depending on the autograd module.
 pub const NodeId = u32;
+
+// ---------------------------------------------------------------------------
+// Storage (PR-δ) — "who owns the bytes, and where do they live?"
+// ---------------------------------------------------------------------------
+//
+// Pre-PR-δ the Tensor stored a single `data: []f32` slice and an `owned`
+// bool. That representation conflates three distinct ideas:
+//
+//   1. *The physical buffer* — a flat sequence of floats somewhere in
+//      memory. A given buffer is owned by exactly one object.
+//   2. *The logical view over that buffer* — a shape + strides + offset
+//      that projects a sub-rectangle of the buffer into a tensor.
+//   3. *The device* — for CUDA, the "bytes" are really a `CUdeviceptr`
+//      and no `[]f32` slice can legitimately refer to them.
+//
+// The `Storage` union here is concept (1): ownership + location. The
+// Tensor keeps its `data` / `owned` fields in sync as a convenience
+// accessor for existing CPU call sites; new code should prefer
+// `tensor.cpuData()` and `tensor.storageLen()`, which make the device
+// contract explicit. When PR-ι introduces the real `Storage.cuda`
+// variant, host code that indexes into `tensor.data[i]` on a CUDA
+// tensor will fail loudly (the slice is zero-length by construction).
+
+/// CPU-backed storage: a heap-allocated `[]f32` and whether we own it.
+pub const CpuStorage = struct {
+    /// The flat f32 buffer containing every element reachable by any
+    /// view over this storage.
+    data: []f32,
+
+    /// True when this storage should free `data` in `Storage.deinit`.
+    /// Views over the same bytes set `owned = false`.
+    owned: bool,
+};
+
+/// Device-tagged storage union.
+///
+/// Today only the `.cpu` variant carries data. The `.cuda` variant is
+/// intentionally `void` so that the shape of the type is committed —
+/// subsequent PRs can replace `void` with the real CUDA descriptor
+/// (`CUdeviceptr`, length, device id, owned flag) without any other
+/// file needing to change its top-level switches on `Storage`.
+pub const Storage = union(Device) {
+    cpu: CpuStorage,
+    cuda: void,
+
+    /// Number of f32 elements in the backing buffer.
+    /// For CPU, this is `cpu.data.len`. For CUDA (once implemented),
+    /// it will be the number of floats in the `CUdeviceptr` allocation.
+    pub fn len(self: Storage) usize {
+        return switch (self) {
+            .cpu => |s| s.data.len,
+            .cuda => 0,
+        };
+    }
+
+    /// Free any memory the storage owns.
+    pub fn deinit(self: *Storage, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .cpu => |*s| {
+                if (s.owned) allocator.free(s.data);
+            },
+            .cuda => {}, // will call cuMemFree_v2 once PR-ι fleshes this out
+        }
+    }
+};
 
 /// The core n-dimensional array type.
 ///
@@ -86,6 +153,11 @@ pub const NodeId = u32;
 pub const Tensor = struct {
     /// Flat f32 buffer holding all tensor elements in row-major order.
     /// For a view tensor, this may be a sub-slice of a larger allocation.
+    ///
+    /// PR-δ note: this field is a convenience alias for
+    /// `self.storage.cpu.data` and is only meaningful when
+    /// `self.device == .cpu`. New code should prefer `self.cpuData()`
+    /// which returns an explicit error for non-CPU tensors.
     data: []f32,
 
     /// Logical dimensions, e.g. shape (2,3) for a 2-row, 3-column matrix.
@@ -107,7 +179,25 @@ pub const Tensor = struct {
 
     /// Ownership flag. true = this tensor frees data in deinit().
     /// false = this is a view sharing another tensor's buffer.
+    ///
+    /// PR-δ note: kept in sync with `self.storage.cpu.owned` so existing
+    /// code continues to compile. A cleanup PR after ε/ζ will remove this
+    /// alias and have all sites read `self.storage.cpu.owned`.
     owned: bool,
+
+    /// Backing storage (PR-δ seam). For `device == .cpu` this carries the
+    /// real `[]f32` slice and its owned flag; the top-level `data` /
+    /// `owned` fields are kept in sync as a compatibility convenience.
+    /// For `device == .cuda` (not yet implemented) this holds the device
+    /// pointer instead of a host slice — host code that reads `self.data`
+    /// on a CUDA tensor will see a zero-length slice and fail loudly.
+    storage: Storage,
+
+    /// Starting offset into the backing storage (in f32 elements).
+    /// Always 0 in PR-δ because the current view API does not slice; it
+    /// only transposes. Future sub-view / slice operations will set this
+    /// to pick out a sub-region without allocating.
+    offset: usize,
 
     // --- Autograd fields (used in Stage 3, declared now) ---
 
@@ -124,6 +214,14 @@ pub const Tensor = struct {
     /// ID of this tensor's node in the autograd tape, if any.
     /// null for tensors that are not part of any computation graph.
     tape_node: ?NodeId,
+
+    /// Stable 32-bit identity (PR-ζ) assigned to learnable parameter
+    /// tensors via `nn.module.assignParamId`. The optimizer keys its
+    /// per-parameter state (e.g. AdamW's m/v moments) by this ID so
+    /// that replacing a parameter's backing buffer (checkpoint load,
+    /// device transfer) does not silently lose optimizer history.
+    /// Intermediate tensors never have a `param_id` — it stays null.
+    param_id: ?u32 = null,
 
     /// Create a new zero-initialized tensor with the given shape.
     ///
@@ -155,17 +253,21 @@ pub const Tensor = struct {
         // garbage floats is extremely hard to debug.
         @memset(data, 0);
 
-        return Tensor{
+        const t = Tensor{
             .data = data,
             .shape = shape,
             .strides = computeStrides(shape),
             .dtype = .f32,
             .device = .cpu,
             .owned = true,
+            .storage = .{ .cpu = .{ .data = data, .owned = true } },
+            .offset = 0,
             .requires_grad = false,
             .grad = null,
             .tape_node = null,
         };
+        debugCheckInvariants(t);
+        return t;
     }
 
     /// Free the tensor's data buffer if this tensor owns it.
@@ -186,11 +288,11 @@ pub const Tensor = struct {
     /// small (8 bytes saved per tensor — significant when we create
     /// thousands of intermediate tensors in autograd).
     pub fn deinit(self: *Tensor, allocator: std.mem.Allocator) void {
-        if (self.owned) {
-            // Only free if we own the buffer. Views share another
-            // tensor's data and must NOT free it.
-            allocator.free(self.data);
-        }
+        // Free through the Storage union — it owns the "is this allocated
+        // and who should free it?" contract. Pre-PR-δ we used the top-level
+        // `owned` bool; it is kept in sync with `storage.cpu.owned` so
+        // the two agree for every well-formed tensor.
+        self.storage.deinit(allocator);
         // Poison all fields to make use-after-deinit immediately visible
         // in debug builds. The undefined values will cause obvious crashes
         // rather than silent corruption.
@@ -295,17 +397,21 @@ pub const Tensor = struct {
     ///   // v.owned == false
     ///   // v.at(&.{1, 2}) reads the same element as t.at(&.{1, 2})
     pub fn view(self: Tensor) Tensor {
-        return Tensor{
+        const v = Tensor{
             .data = self.data,
             .shape = self.shape,
             .strides = self.strides,
             .dtype = self.dtype,
             .device = self.device,
             .owned = false,
+            .storage = nonOwningStorage(self.storage),
+            .offset = self.offset,
             .requires_grad = self.requires_grad,
             .grad = self.grad,
             .tape_node = self.tape_node,
         };
+        debugCheckInvariants(v);
+        return v;
     }
 
     /// Reshape the tensor to a new shape, returning a view if possible.
@@ -352,17 +458,21 @@ pub const Tensor = struct {
         // Return a view with the new shape and freshly computed strides.
         // The strides are always row-major for the new shape because the
         // underlying data is contiguous.
-        return Tensor{
+        const r = Tensor{
             .data = self.data,
             .shape = new_shape,
             .strides = computeStrides(new_shape),
             .dtype = self.dtype,
             .device = self.device,
             .owned = false,
+            .storage = nonOwningStorage(self.storage),
+            .offset = self.offset,
             .requires_grad = self.requires_grad,
             .grad = self.grad,
             .tape_node = self.tape_node,
         };
+        debugCheckInvariants(r);
+        return r;
     }
 
     /// Transpose a rank-2 tensor (matrix), returning a view.
@@ -408,69 +518,197 @@ pub const Tensor = struct {
         };
         _ = &new_strides;
 
-        return Tensor{
+        const tr = Tensor{
             .data = self.data,
             .shape = new_shape,
             .strides = new_strides,
             .dtype = self.dtype,
             .device = self.device,
             .owned = false,
+            .storage = nonOwningStorage(self.storage),
+            .offset = self.offset,
             .requires_grad = self.requires_grad,
             .grad = self.grad,
             .tape_node = self.tape_node,
         };
+        debugCheckInvariants(tr);
+        return tr;
     }
 
     /// Deep-copy data from this tensor into dst.
     ///
-    /// Both tensors must have the same shape. The data is copied element-
-    /// by-element using the flat buffer (not the logical indices), which
-    /// means this works correctly when both tensors are contiguous
-    /// with the same layout. For non-contiguous source tensors, the copy
-    /// iterates using flatIndex() on each element.
+    /// Both tensors must have the same shape. The fast path is a single
+    /// `@memcpy` when both sides are contiguous with identical row-major
+    /// layout. Otherwise the copy walks the logical element order of the
+    /// source and writes in the logical element order of the destination,
+    /// using `logicalOffsetFromLinear` to translate between logical index
+    /// and physical offset for each side.
+    ///
+    /// This means a transposed source copied into a contiguous destination
+    /// produces the *materialised transpose* of the source (i.e. the data
+    /// is re-ordered in memory to match the new logical layout).
     ///
     /// Worked example:
-    ///   var src = try Tensor.init(alloc, Shape.init2D(2, 3));
-    ///   defer src.deinit(alloc);
-    ///   var dst = try Tensor.init(alloc, Shape.init2D(2, 3));
-    ///   defer dst.deinit(alloc);
-    ///   try src.fill(7.0);
-    ///   try src.copyTo(alloc, &dst);
-    ///   // dst.at(&.{1, 2}) == 7.0
+    ///   var src = try Tensor.init(alloc, Shape.init2D(2, 3));   // [0,1,2,3,4,5]
+    ///   src.data = [0, 1, 2, 3, 4, 5];
+    ///   const trans = try src.transpose2d();                    // view, shape (3,2)
+    ///   var dst = try Tensor.init(alloc, Shape.init2D(3, 2));
+    ///   try trans.copyTo(alloc, &dst);
+    ///   // dst.data == [0, 3, 1, 4, 2, 5]   (logical transpose materialised)
     pub fn copyTo(self: Tensor, allocator: std.mem.Allocator, dst: *Tensor) LabError!void {
         _ = allocator;
         if (!shape_equals(self.shape, dst.shape)) {
             return error.ShapeMismatch;
         }
 
-        // For contiguous tensors, we can do a single memcpy which is
-        // much faster than per-element iteration. This covers the
-        // common case (fresh tensors, reshaped views).
+        // Fast path: both sides contiguous row-major → plain memcpy.
         if (self.isContiguous() and dst.isContiguous()) {
             @memcpy(dst.data, self.data);
-        } else {
-            // Non-contiguous copy: iterate element by element.
-            // This is slower but correct for any stride layout.
-            const n = self.data.len;
-            for (0..n) |i| {
-                dst.data[i] = self.data[i];
-            }
+            return;
+        }
+
+        // Slow path: respect strides on both sides. Walk logical indices
+        // 0..N-1, translate each to the correct physical offset for src
+        // and dst separately.
+        const n = totalElements(self.shape);
+        for (0..n) |logical| {
+            const src_off = logicalOffsetFromLinear(self.shape, self.strides, logical);
+            const dst_off = logicalOffsetFromLinear(dst.shape, dst.strides, logical);
+            dst.data[dst_off] = self.data[src_off];
         }
     }
 
     /// Fill every element of this tensor with the given value.
     ///
-    /// Uses @memset for efficiency — the compiler can vectorize this
-    /// into SIMD stores on supported platforms.
+    /// Fast path: a contiguous tensor backed by its own buffer can be
+    /// filled with a single `@memset`, which the compiler can vectorise.
+    /// For a non-contiguous view (e.g. after transpose), we walk only
+    /// the logical elements so we don't accidentally touch memory that
+    /// belongs to the parent buffer but is not part of this view's
+    /// logical extent.
+    ///
+    /// Note: because transpose views today share the full parent buffer,
+    /// @memset on a contiguous tensor and the stride-aware walk reach
+    /// the same set of f32s. The distinction will matter once PR-δ adds
+    /// offset/sub-view support; writing the correct version now prevents
+    /// a silent data-corruption bug from appearing later.
     ///
     /// Worked example:
     ///   var t = try Tensor.init(alloc, Shape.init2D(2, 3));
     ///   t.fill(42.0);
     ///   // t.at(&.{0, 0}) == 42.0, t.at(&.{1, 2}) == 42.0
     pub fn fill(self: *Tensor, value: f32) void {
-        @memset(self.data, value);
+        if (self.isContiguous()) {
+            @memset(self.data, value);
+            return;
+        }
+        const n = totalElements(self.shape);
+        for (0..n) |logical| {
+            const off = logicalOffsetFromLinear(self.shape, self.strides, logical);
+            self.data[off] = value;
+        }
+    }
+
+    /// Verify all structural invariants of this tensor.
+    ///
+    /// Called after every constructor / view-producing op when the build
+    /// is in debug or safe-release mode (see `runtime_safety` below).
+    /// Release-fast builds skip the check entirely.
+    ///
+    /// Invariants checked:
+    ///   1. `shape.rank + 1 ∈ [1, 4]`. Rank is a u2 so this is already
+    ///      structurally enforced, but a panic here catches anyone who
+    ///      built a `Shape` by hand with the wrong rank field.
+    ///   2. Every logical dimension is ≥ 1. Zero dims are not supported.
+    ///   3. The stride rank matches the shape rank.
+    ///   4. `offset + maxLogicalOffset(shape, strides)` lies inside
+    ///      `storage.len()` — i.e. no view can index past the end of its
+    ///      backing buffer.
+    ///   5. On CPU devices, the top-level `data` alias matches
+    ///      `storage.cpu.data` (the two representations must not drift).
+    ///   6. If a gradient tensor is attached, it has the same shape as
+    ///      self and lives on the same device.
+    ///
+    /// Returns `LabError.InvalidLayout`, `ShapeMismatch`, or
+    /// `DeviceMismatch` on violation.
+    pub fn checkInvariants(self: Tensor) LabError!void {
+        // 1. Rank is intrinsically in [0, 3] (u2), so ndim is [1, 4].
+
+        // 2. No dim is zero.
+        const n = self.shape.ndim();
+        for (0..n) |axis| {
+            if (self.shape.dims[axis] == 0) return error.ShapeMismatch;
+        }
+
+        // 3. Stride and shape rank agree.
+        if (self.shape.rank != self.strides.rank) return error.InvalidLayout;
+
+        // 4. Every reachable logical element fits in the backing storage
+        //    (accounting for offset). Using `storage.len()` rather than
+        //    `data.len` is forward-compatible with CUDA storage where
+        //    there is no host-visible slice to measure.
+        const max_off = maxLogicalOffset(self.shape, self.strides);
+        if (self.offset + max_off >= self.storage.len()) return error.InvalidLayout;
+
+        // 5. CPU compat alias must agree with storage.
+        switch (self.storage) {
+            .cpu => |s| {
+                if (self.data.ptr != s.data.ptr or self.data.len != s.data.len) {
+                    return error.InvalidLayout;
+                }
+                if (self.owned != s.owned) return error.InvalidLayout;
+                if (self.device != .cpu) return error.DeviceMismatch;
+            },
+            .cuda => {
+                if (self.device != .cuda) return error.DeviceMismatch;
+            },
+        }
+
+        // 6. Attached gradient, if any, matches shape and device.
+        if (self.grad) |g| {
+            if (!shape_equals(g.shape, self.shape)) return error.ShapeMismatch;
+            if (g.device != self.device) return error.DeviceMismatch;
+        }
     }
 };
+
+// ============================================================================
+// Free helpers (device check, debug invariant trigger)
+// ============================================================================
+
+/// Clone a Storage value but flip its `owned` bit to false. Used by every
+/// view-constructing op so that a view's storage metadata faithfully
+/// records that it does not own the bytes, even though it shares them.
+pub fn nonOwningStorage(src: Storage) Storage {
+    return switch (src) {
+        .cpu => |s| Storage{ .cpu = .{ .data = s.data, .owned = false } },
+        .cuda => Storage{ .cuda = {} },
+    };
+}
+
+/// Reject binary ops whose inputs live on different devices.
+///
+/// Today CPU is the only device in use, so this helper is effectively a
+/// no-op — but every `add`, `sub`, `matmul`, etc. should call it so the
+/// contract is encoded in one place. When PR-δ introduces `Storage.cuda`
+/// this function becomes the one place where the "no implicit device
+/// transfer" rule is enforced.
+pub fn requireSameDevice(a: Tensor, b: Tensor) LabError!void {
+    if (a.device != b.device) return error.DeviceMismatch;
+}
+
+/// Run `checkInvariants` on a tensor in debug / safe-release builds.
+/// In `ReleaseFast`/`ReleaseSmall`, this is a no-op and all calls
+/// compile away. Use this inside constructors / view ops to keep the
+/// invariants encoded as runtime-checked contracts without paying for
+/// the check in hot release builds.
+pub fn debugCheckInvariants(t: Tensor) void {
+    if (std.debug.runtime_safety) {
+        t.checkInvariants() catch |err| {
+            std.debug.panic("Tensor invariants violated: {s}", .{@errorName(err)});
+        };
+    }
+}
 
 // ============================================================================
 // Tests
@@ -741,4 +979,213 @@ test "Tensor isContiguous" {
     // Transposed tensor is NOT contiguous
     const tr = try t.transpose2d();
     try std.testing.expect(!tr.isContiguous());
+}
+
+test "Tensor copyTo — transposed source materialises the transpose" {
+    // (2,3) row-major buffer: [0,1,2, 3,4,5]
+    var src = try Tensor.init(std.testing.allocator, Shape.init2D(2, 3));
+    defer src.deinit(std.testing.allocator);
+    src.data[0] = 0;
+    src.data[1] = 1;
+    src.data[2] = 2;
+    src.data[3] = 3;
+    src.data[4] = 4;
+    src.data[5] = 5;
+
+    // Non-contiguous view of src with shape (3,2) — the logical
+    // transpose. Iterating view logically 0..5 yields 0,3,1,4,2,5.
+    const view = try src.transpose2d();
+
+    var dst = try Tensor.init(std.testing.allocator, Shape.init2D(3, 2));
+    defer dst.deinit(std.testing.allocator);
+
+    try view.copyTo(std.testing.allocator, &dst);
+
+    // dst must contain the logical transpose of src, laid out row-major.
+    try std.testing.expectEqual(@as(f32, 0), dst.data[0]);
+    try std.testing.expectEqual(@as(f32, 3), dst.data[1]);
+    try std.testing.expectEqual(@as(f32, 1), dst.data[2]);
+    try std.testing.expectEqual(@as(f32, 4), dst.data[3]);
+    try std.testing.expectEqual(@as(f32, 2), dst.data[4]);
+    try std.testing.expectEqual(@as(f32, 5), dst.data[5]);
+}
+
+test "Tensor copyTo — contiguous source into transposed dst preserves logical order" {
+    // src laid out row-major: [10,20,30,40,50,60] shape (3,2)
+    var src = try Tensor.init(std.testing.allocator, Shape.init3D(1, 3, 2));
+    defer src.deinit(std.testing.allocator);
+    // Use a 3D shape so we can exercise transposeInner2d indirectly:
+    // keep it simple with a (3,2) buffer and transpose via transpose2d.
+    // Actually simpler: just do a 2D test.
+    _ = &src;
+
+    var src2 = try Tensor.init(std.testing.allocator, Shape.init2D(3, 2));
+    defer src2.deinit(std.testing.allocator);
+    src2.data[0] = 10;
+    src2.data[1] = 20;
+    src2.data[2] = 30;
+    src2.data[3] = 40;
+    src2.data[4] = 50;
+    src2.data[5] = 60;
+
+    // dst starts as contiguous (2,3), then we take its transpose view
+    // to get a NON-contiguous (3,2) destination. Writing logical
+    // elements into that view should still land in the right places
+    // in the underlying buffer.
+    var dst_buf = try Tensor.init(std.testing.allocator, Shape.init2D(2, 3));
+    defer dst_buf.deinit(std.testing.allocator);
+    var dst_view = try dst_buf.transpose2d(); // shape (3,2), strides (1,3)
+
+    try src2.copyTo(std.testing.allocator, &dst_view);
+
+    // Logically, reading the (3,2) view in row-major order should match src2.
+    try std.testing.expectEqual(@as(f32, 10), dst_view.at(&.{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 20), dst_view.at(&.{ 0, 1 }));
+    try std.testing.expectEqual(@as(f32, 30), dst_view.at(&.{ 1, 0 }));
+    try std.testing.expectEqual(@as(f32, 40), dst_view.at(&.{ 1, 1 }));
+    try std.testing.expectEqual(@as(f32, 50), dst_view.at(&.{ 2, 0 }));
+    try std.testing.expectEqual(@as(f32, 60), dst_view.at(&.{ 2, 1 }));
+}
+
+test "Tensor fill — transposed view mutates only logical elements" {
+    // A fresh (3, 2) tensor has 6 buffer slots. Transposing it makes a
+    // (2, 3) view whose logical element set is the same 6 slots. Filling
+    // the view with a value should set every buffer slot — confirm via
+    // both the view and the original (they share the buffer).
+    var t = try Tensor.init(std.testing.allocator, Shape.init2D(3, 2));
+    defer t.deinit(std.testing.allocator);
+    // Seed with known junk so a bug that skips elements would show up.
+    for (t.data, 0..) |*v, i| v.* = @floatFromInt(i + 1);
+
+    var view = try t.transpose2d();
+    view.fill(7.0);
+
+    for (t.data) |v| {
+        try std.testing.expectEqual(@as(f32, 7.0), v);
+    }
+}
+
+// -- Invariants (PR-γ) -------------------------------------------------------
+
+test "Tensor.checkInvariants passes on a fresh contiguous tensor" {
+    var t = try Tensor.init(std.testing.allocator, Shape.init3D(2, 3, 4));
+    defer t.deinit(std.testing.allocator);
+    try t.checkInvariants();
+}
+
+test "Tensor.checkInvariants passes on a transposed view" {
+    var t = try Tensor.init(std.testing.allocator, Shape.init2D(2, 3));
+    defer t.deinit(std.testing.allocator);
+    const v = try t.transpose2d();
+    try v.checkInvariants();
+}
+
+test "Tensor.checkInvariants rejects out-of-range stride" {
+    // Build a tensor by hand with strides that push an element past
+    // the end of its data buffer. This simulates a bug where a view
+    // is constructed with the wrong strides.
+    var data: [6]f32 = .{ 0, 0, 0, 0, 0, 0 };
+    const bogus = Tensor{
+        .data = &data,
+        .shape = Shape.init2D(2, 3),
+        // strides (6, 2) would need offsets up to (1*6 + 2*2) = 10 > 6.
+        .strides = Strides{ .values = .{ 6, 2, 0, 0 }, .rank = 1 },
+        .dtype = .f32,
+        .device = .cpu,
+        .owned = false,
+        .storage = .{ .cpu = .{ .data = &data, .owned = false } },
+        .offset = 0,
+        .requires_grad = false,
+        .grad = null,
+        .tape_node = null,
+    };
+    try std.testing.expectError(error.InvalidLayout, bogus.checkInvariants());
+}
+
+test "Tensor.checkInvariants rejects stride/shape rank mismatch" {
+    var data: [6]f32 = .{ 0, 0, 0, 0, 0, 0 };
+    const bogus = Tensor{
+        .data = &data,
+        .shape = Shape.init2D(2, 3),
+        .strides = Strides{ .values = .{ 3, 1, 1, 0 }, .rank = 2 }, // rank 2 vs shape rank 1
+        .dtype = .f32,
+        .device = .cpu,
+        .owned = false,
+        .storage = .{ .cpu = .{ .data = &data, .owned = false } },
+        .offset = 0,
+        .requires_grad = false,
+        .grad = null,
+        .tape_node = null,
+    };
+    try std.testing.expectError(error.InvalidLayout, bogus.checkInvariants());
+}
+
+test "requireSameDevice no-op on two CPU tensors" {
+    var a = try Tensor.init(std.testing.allocator, Shape.init1D(3));
+    defer a.deinit(std.testing.allocator);
+    var b = try Tensor.init(std.testing.allocator, Shape.init1D(3));
+    defer b.deinit(std.testing.allocator);
+    try requireSameDevice(a, b);
+}
+
+test "requireSameDevice rejects differing devices" {
+    // Construct a fake 'cuda' tensor by hand (no allocation; we only
+    // exercise the device-check branch). This is why requireSameDevice
+    // must never read data — a CUDA tensor's data slice is not host-
+    // accessible once PR-ι ships the real Storage.cuda variant.
+    var data: [1]f32 = .{0};
+    const cpu_t = Tensor{
+        .data = &data,
+        .shape = Shape.init1D(1),
+        .strides = computeStrides(Shape.init1D(1)),
+        .dtype = .f32,
+        .device = .cpu,
+        .owned = false,
+        .storage = .{ .cpu = .{ .data = &data, .owned = false } },
+        .offset = 0,
+        .requires_grad = false,
+        .grad = null,
+        .tape_node = null,
+    };
+    const cuda_t = Tensor{
+        .data = &.{},
+        .shape = Shape.init1D(1),
+        .strides = computeStrides(Shape.init1D(1)),
+        .dtype = .f32,
+        .device = .cuda,
+        .owned = false,
+        .storage = .{ .cuda = {} },
+        .offset = 0,
+        .requires_grad = false,
+        .grad = null,
+        .tape_node = null,
+    };
+    try std.testing.expectError(error.DeviceMismatch, requireSameDevice(cpu_t, cuda_t));
+}
+
+test "Tensor storage is cpu-tagged after init" {
+    var t = try Tensor.init(std.testing.allocator, Shape.init2D(2, 3));
+    defer t.deinit(std.testing.allocator);
+    switch (t.storage) {
+        .cpu => |s| {
+            try std.testing.expect(s.owned);
+            try std.testing.expectEqual(@as(usize, 6), s.data.len);
+            // data and storage.cpu.data must point at the same buffer.
+            try std.testing.expect(t.data.ptr == s.data.ptr);
+        },
+        .cuda => unreachable,
+    }
+    try std.testing.expectEqual(@as(usize, 0), t.offset);
+}
+
+test "Tensor view marks storage as not owned" {
+    var t = try Tensor.init(std.testing.allocator, Shape.init2D(2, 3));
+    defer t.deinit(std.testing.allocator);
+    const v = t.view();
+    switch (v.storage) {
+        .cpu => |s| try std.testing.expect(!s.owned),
+        .cuda => unreachable,
+    }
+    // Top-level `owned` alias agrees with storage.
+    try std.testing.expect(!v.owned);
 }

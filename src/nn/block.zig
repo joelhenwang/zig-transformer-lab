@@ -96,28 +96,23 @@ pub const TransformerBlock = struct {
         // --- Attention sub-block ---
         // LN_1(x)
         var ln1_out = try self.ln1.forward(input, tape);
-        if (tape) |t| try t.keepAlive(&ln1_out);
         defer ln1_out.deinit(self.allocator);
 
         // Attention(LN_1(x))
         var attn_out = try self.attn.forward(ln1_out, tape);
-        if (tape) |t| try t.keepAlive(&attn_out);
         defer attn_out.deinit(self.allocator);
 
         // x + Attention(LN_1(x))  — residual connection
         var h = try ops_elementwise.add(self.allocator, input, attn_out, tape);
-        if (tape) |t| try t.keepAlive(&h);
         defer h.deinit(self.allocator);
 
         // --- MLP sub-block ---
         // LN_2(h)
         var ln2_out = try self.ln2.forward(h, tape);
-        if (tape) |t| try t.keepAlive(&ln2_out);
         defer ln2_out.deinit(self.allocator);
 
         // MLP(LN_2(h))
         var mlp_out = try self.mlp.forward(ln2_out, tape);
-        if (tape) |t| try t.keepAlive(&mlp_out);
         defer mlp_out.deinit(self.allocator);
 
         // h + MLP(LN_2(h))  — residual connection

@@ -266,13 +266,28 @@ pub const Tape = struct {
         const id = self.next_id;
         self.next_id += 1;
 
-        // Build the full node with the assigned ID
+        // PR-ε: the tape takes ownership of any buffer referenced by
+        // `node.saved`. Before this change, SavedData stored Tensor
+        // snapshots whose `.data` slice pointed at the caller's heap
+        // buffer; if the caller freed its tensor before backward (as
+        // happens for every intermediate produced inside an nn/ layer
+        // forward method) the saved slice dangled. The previous
+        // workaround was for layer code to call `tape.keepAlive(&t)`
+        // on every intermediate — a distributed, easy-to-forget
+        // contract that read incorrectly as "the layer author owns the
+        // tape's memory". The fix is local to record(): we walk the
+        // SavedData union, copy any referenced buffers into
+        // tape-owned memory, and rewrite the Tensor snapshots to point
+        // at those copies. Backward reads identically; the caller's
+        // tensors can be freed immediately after the op returns.
+        const owned_saved = try self.takeOwnershipOfSaved(node.saved);
+
         const full_node = Node{
             .id = id,
             .op = node.op,
             .parents = node.parents,
             .n_parents = node.n_parents,
-            .saved = node.saved,
+            .saved = owned_saved,
         };
 
         self.nodes.append(self.allocator, full_node) catch |err| switch (err) {
@@ -282,28 +297,92 @@ pub const Tape = struct {
         return id;
     }
 
+    /// Walk a SavedData value, allocate tape-owned copies of every
+    /// referenced buffer, and return a new SavedData whose tensor
+    /// snapshots point at those copies. The copies are tracked in
+    /// `self.kept_alive` so `Tape.deinit` can free them in one pass.
+    fn takeOwnershipOfSaved(self: *Tape, saved: SavedData) LabError!SavedData {
+        return switch (saved) {
+            // Variants that reference no caller-owned buffers pass
+            // through unchanged.
+            .nothing, .tensor_scalar, .reduce_info => saved,
+
+            .tensor_ref => |t| SavedData{
+                .tensor_ref = try self.cloneTensorData(t),
+            },
+            .tensor_pair => |p| SavedData{
+                .tensor_pair = .{
+                    .a = try self.cloneTensorData(p.a),
+                    .b = try self.cloneTensorData(p.b),
+                },
+            },
+            .ce_info => |info| SavedData{
+                .ce_info = .{
+                    .logits = try self.cloneTensorData(info.logits),
+                    .targets = try self.cloneSlice(info.targets),
+                },
+            },
+            .embedding_info => |info| SavedData{
+                .embedding_info = .{
+                    .weight = try self.cloneTensorData(info.weight),
+                    .indices = try self.cloneSlice(info.indices),
+                },
+            },
+        };
+    }
+
+    /// Allocate a tape-owned copy of `t.data` and return a Tensor
+    /// snapshot whose `.data` points at the copy. Shape, strides,
+    /// and device are preserved verbatim. The returned Tensor's
+    /// `owned` / `storage.cpu.owned` are set to false — the tape
+    /// owns the buffer, not this snapshot.
+    fn cloneTensorData(self: *Tape, t: Tensor) LabError!Tensor {
+        const copy = self.allocator.dupe(f32, t.data) catch return error.OutOfMemory;
+        self.kept_alive.append(self.allocator, copy) catch {
+            self.allocator.free(copy);
+            return error.OutOfMemory;
+        };
+        var c = t;
+        c.data = copy;
+        c.owned = false;
+        // Keep the Storage alias consistent: the snapshot should also
+        // claim to borrow (not own) the buffer. We point the cpu
+        // storage at the copy so anything that goes through
+        // `storage.cpu.data` sees the tape-owned memory.
+        c.storage = .{ .cpu = .{ .data = copy, .owned = false } };
+        return c;
+    }
+
+    /// Allocate a tape-owned copy of a `[]const f32` (used by ce_info
+    /// for targets and embedding_info for indices). Tracked in
+    /// `kept_alive` so deinit frees it.
+    fn cloneSlice(self: *Tape, src: []const f32) LabError![]const f32 {
+        const copy = self.allocator.dupe(f32, src) catch return error.OutOfMemory;
+        self.kept_alive.append(self.allocator, copy) catch {
+            self.allocator.free(copy);
+            return error.OutOfMemory;
+        };
+        return copy;
+    }
+
     /// Transfer ownership of a tensor's data buffer to the tape.
     ///
-    /// This prevents use-after-free when intermediate tensors are freed
-    /// before backward runs. The tensor's `data` slice remains valid
-    /// because the tape now owns the underlying buffer.
+    /// DEPRECATED (PR-ε): `tape.record()` now copies saved buffers
+    /// automatically, so layer code no longer needs to call this.
+    /// It is kept as a no-op for one transition PR so old call sites
+    /// compile while they are removed; the function will be deleted
+    /// entirely once `nn/` and `gradcheck` are clean.
     ///
-    /// After calling keepAlive, the caller should NOT free the tensor's
-    /// data (e.g., by calling tensor.deinit() or allocator.free(tensor.data)).
-    /// The tape will free it in tape.deinit().
-    ///
-    /// Worked example:
-    ///   // Intermediate tensor from a layer's forward pass:
-    ///   var h = try layer.forward(x, &tape);
-    ///   // The tape's SavedData references h.data, so keep it alive:
-    ///   try tape.keepAlive(&h);
-    ///   // Now h can be "freed" (just mark owned=false) without
-    ///   // invalidating the tape's saved data.
+    /// The old contract (transfer the tensor's buffer to the tape and
+    /// mark the tensor non-owning) is a subtle footgun: callers had
+    /// to manually reason about which intermediates would be touched
+    /// by backward and arrange for their buffers to outlive the tape.
+    /// The new design — tape owns copies of only what it needs — is
+    /// what PyTorch's `ctx.save_for_backward` does internally.
     pub fn keepAlive(self: *Tape, tensor: *Tensor) !void {
-        if (tensor.owned) {
-            try self.kept_alive.append(self.allocator, tensor.data);
-            tensor.owned = false;
-        }
+        _ = self;
+        _ = tensor;
+        // Intentionally empty. See doc comment.
     }
 
     /// Run the backward pass from the given loss tensor.
@@ -449,16 +528,16 @@ pub const Tape = struct {
                 _ = parent_id;
             }
 
-            // Free intermediate gradients if retain_graph=false
+            // Free intermediate gradients if retain_graph=false.
+            //
+            // Every entry in self.nodes is a recorded op with ≥ 1 parent;
+            // user-supplied leaf tensors reach the tape only via
+            // trackLeaf(), which creates placeholder nodes with
+            // n_parents=0. So `node.n_parents > 0` cleanly identifies
+            // intermediates. We keep the loss's gradient (the seed) until
+            // deinit so callers can still inspect loss.grad; everything
+            // else can be freed once its parents have accumulated it.
             if (!self.retain_graph) {
-                // An intermediate (non-leaf) node is one where the
-                // tape_node ID corresponds to a recorded operation.
-                // A leaf tensor has tape_node=null.
-                // We can identify intermediates by checking if the
-                // node_id is in our node list AND it has parents.
-                // Actually, ALL nodes in self.nodes are intermediates
-                // (leaves have no nodes). So if the node has parents,
-                // its output gradient can be freed after processing.
                 if (node.n_parents > 0 and node_id != loss_id) {
                     if (self.grad_map.fetchRemove(node_id)) |kv| {
                         kv.value.deinit(self.allocator);
@@ -469,34 +548,18 @@ pub const Tape = struct {
         }
 
         // Step 3: Write gradient pointers back to leaf tensors.
-        // For each tensor that was an original leaf (tape_node=null
-        // but requires_grad=true), its gradient is stored in the
-        // grad_map under a special convention.
         //
-        // Actually, we need to link gradients back to the original
-        // leaf tensors. The way our system works:
-        //   - Leaf tensors have tape_node=null and requires_grad=true
-        //   - Intermediate tensors have tape_node=NodeId
-        //   - During backward, we compute grads for NodeIds
-        //   - We need to write those grads back to the leaf tensors
+        // Leaf tensors (parameters, model inputs) enter the tape via
+        // trackLeaf(), which assigns them a fresh NodeId and stores the
+        // mapping (node_id → *Tensor) in self.leaf_map. After reverse
+        // propagation has populated grad_map for every reachable node,
+        // we walk leaf_map and copy the pointer from grad_map into
+        // each leaf's .grad field. This is what lets callers write:
         //
-        // The issue is: how do we know which leaf tensor corresponds
-        // to which NodeId? The answer: we DON'T use NodeIds for
-        // leaves. Instead, we use the parent's TAPE_NODE field.
+        //     tape.backward(&loss);
+        //     optimizer.step(params);   // reads param.grad
         //
-        // Wait — but parents in the Node struct store NodeIds, and
-        // leaves don't have NodeIds. Let me reconsider...
-        //
-        // Actually, the cleanest design is: leaf tensors that require
-        // grad DO get a NodeId when they first participate in a
-        // recorded operation. They get a "leaf node" with op=... ?
-        //
-        // No — simpler: we record leaf tensors in a separate map
-        // inside the tape, keyed by the pointer to the leaf tensor.
-        // This way, when backward finds a parent that has no entry
-        // in grad_map, it's a leaf, and we set its .grad directly.
-
-        // Step 3: Write gradient pointers back to leaf tensors.
+        // without ever interacting with NodeIds themselves.
         // For each leaf registered via trackLeaf(), check if grad_map
         // has a gradient for its node ID and set tensor.grad.
         var leaf_iter = self.leaf_map.iterator();

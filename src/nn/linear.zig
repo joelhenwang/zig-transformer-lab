@@ -45,6 +45,7 @@ const ops_matmul = @import("../tensor/ops/matmul.zig");
 const ops_elementwise = @import("../tensor/ops/elementwise.zig");
 const ops_shape = @import("../tensor/ops/shape_ops.zig");
 const ops_create = @import("../tensor/ops/create.zig");
+const module = @import("module.zig");
 
 pub const Linear = struct {
     weight: Tensor,
@@ -88,7 +89,7 @@ pub const Linear = struct {
             bias = try ops_create.zeros(allocator, Shape.init1D(d_out));
         }
 
-        return Linear{
+        var layer = Linear{
             .weight = weight,
             .bias = bias,
             .allocator = allocator,
@@ -96,6 +97,12 @@ pub const Linear = struct {
             .d_out = d_out,
             .use_bias = use_bias,
         };
+        // PR-ζ: learnable parameters get stable IDs so the optimizer's
+        // per-parameter state survives buffer replacement (checkpoint
+        // load, device transfer).
+        module.assignParamId(&layer.weight);
+        if (layer.bias) |*b| module.assignParamId(b);
+        return layer;
     }
 
     /// Compute y = x @ W^T + b.
@@ -119,15 +126,14 @@ pub const Linear = struct {
         var x = input;
         var x_flat_owned: ?Tensor = null;
         if (is_3d) {
-            var x_flat = try ops_shape.reshapeTracked(self.allocator, input, Shape.init2D(B * T, self.d_in), tape);
-            if (tape) |t| try t.keepAlive(&x_flat);
+            const x_flat = try ops_shape.reshapeTracked(self.allocator, input, Shape.init2D(B * T, self.d_in), tape);
             x = x_flat;
             x_flat_owned = x_flat;
         }
         defer {
-            // When tape!=null: keepAlive set owned=false, deinit is no-op.
-            // When tape=null: owned=true, must free AFTER matmul consumes x.
-            // defer is at function scope so this fires at the right time.
+            // The tape records an owned copy of x_flat via tape.record(),
+            // so deinit'ing x_flat here is always safe — backward reads
+            // from the tape's copy, not from the caller's buffer.
             if (x_flat_owned) |*xf| xf.deinit(self.allocator);
         }
 
@@ -138,7 +144,6 @@ pub const Linear = struct {
         // the matmul backward produces a gradient with W^T's shape,
         // which doesn't match W's shape and causes accumulation errors.
         var wt = try ops_shape.transpose2dTracked(self.allocator, self.weight, tape);
-        if (tape) |t| try t.keepAlive(&wt);
         defer wt.deinit(self.allocator);
 
         // x @ W^T → (N, D_out)
@@ -147,14 +152,13 @@ pub const Linear = struct {
         // Add bias if present
         if (self.use_bias) {
             var bias_2d = try ops_shape.reshapeTracked(self.allocator, self.bias.?, Shape.init2D(1, self.d_out), tape);
-            if (tape) |t| try t.keepAlive(&bias_2d);
-            // bias_2d is used by the add op below. With tape=null,
-            // keepAlive is skipped and bias_2d.owned stays true.
-            // We must NOT defer inside this if-block (Zig defer fires at
-            // block end, not function end). Instead, free after the add
-            // consumes it.
+            // PR-ε: bias_2d's buffer is copied into the tape by
+            // tape.record() if tape != null, so we are always free to
+            // deinit our local `bias_2d` once `add` has consumed its
+            // value. We must NOT defer inside this if-block (Zig defer
+            // fires at block end, not function end). Instead free
+            // explicitly after add returns.
             const biased = try ops_elementwise.add(self.allocator, output, bias_2d, tape);
-            if (tape) |t| try t.keepAlive(&output);
             output.deinit(self.allocator);
             output = biased;
             bias_2d.deinit(self.allocator);
@@ -166,7 +170,6 @@ pub const Linear = struct {
         // like matmulBatch) back to 2D for the matmul/add backward.
         if (is_3d) {
             const output_3d = try ops_shape.reshapeTracked(self.allocator, output, Shape.init3D(B, T, self.d_out), tape);
-            if (tape) |t| try t.keepAlive(&output);
             output.deinit(self.allocator);
             output = output_3d;
         }

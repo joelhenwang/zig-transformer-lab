@@ -281,7 +281,6 @@ pub const Trainer = struct {
 
             // --- Forward pass ---
             var logits_3d = try self.model.forward(ids, &tape);
-            try tape.keepAlive(&logits_3d);
 
             // Reshape logits from (B, T, V) to (B*T, V) — tape-tracked
             // so the gradient flows back with the correct shape.
@@ -290,7 +289,6 @@ pub const Trainer = struct {
             // shape mismatch in the matmul backward that only works
             // by accident because both shapes share row-major layout.
             var logits = try ops_shape.reshapeTracked(allocator, logits_3d, Shape.init2D(B * T, V), &tape);
-            try tape.keepAlive(&logits);
             defer logits.deinit(allocator);
 
             // --- Compute loss ---

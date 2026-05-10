@@ -41,6 +41,7 @@ const Rng = @import("../core/rng.zig").Rng;
 const ops_create = @import("../tensor/ops/create.zig");
 const ops_shape = @import("../tensor/ops/shape_ops.zig");
 const totalElements = @import("../tensor/shape.zig").totalElements;
+const module = @import("module.zig");
 
 pub const Embedding = struct {
     weight: Tensor,
@@ -65,12 +66,14 @@ pub const Embedding = struct {
         const std_dev: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(d_model))));
         const weight = try ops_create.randn(allocator, Shape.init2D(vocab_size, d_model), rng, 0.0, std_dev);
 
-        return Embedding{
+        var layer = Embedding{
             .weight = weight,
             .allocator = allocator,
             .vocab_size = vocab_size,
             .d_model = d_model,
         };
+        module.assignParamId(&layer.weight);
+        return layer;
     }
 
     /// Look up embeddings for a batch of token IDs.

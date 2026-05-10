@@ -31,7 +31,8 @@
 
 const std = @import("std");
 const LabError = @import("../../core/errors.zig").LabError;
-const Tensor = @import("../tensor.zig").Tensor;
+const tensor_mod = @import("../tensor.zig");
+const Tensor = tensor_mod.Tensor;
 const Shape = @import("../shape.zig").Shape;
 const totalElements = @import("../shape.zig").totalElements;
 const shape_equals = @import("../shape.zig").equals;
@@ -188,6 +189,10 @@ pub fn transposeInner2d(tensor: Tensor) LabError!Tensor {
         .dtype = tensor.dtype,
         .device = tensor.device,
         .owned = false,
+        // Share the parent's storage but mark this as non-owning so
+        // `deinit` on the view is a no-op. PR-δ seam.
+        .storage = tensor_mod.nonOwningStorage(tensor.storage),
+        .offset = tensor.offset,
         .requires_grad = tensor.requires_grad,
         .grad = tensor.grad,
         .tape_node = tensor.tape_node,

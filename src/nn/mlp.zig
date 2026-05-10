@@ -81,13 +81,11 @@ pub const MLP = struct {
 
         // GELU: (B, T, d_ff) → (B, T, d_ff)
         var activated = try self.gelu.forward(h, tape);
-        if (tape) |t| try t.keepAlive(&h);
         defer h.deinit(self.allocator);
         errdefer activated.deinit(self.allocator);
 
         // fc2: (B, T, d_ff) → (B, T, D)
         const output = try self.fc2.forward(activated, tape);
-        if (tape) |t| try t.keepAlive(&activated);
         defer activated.deinit(self.allocator);
 
         return output;

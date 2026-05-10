@@ -30,8 +30,18 @@
 //!   All binary ops return a new owned tensor. Caller must deinit.
 //!   addInPlace modifies a in-place and does NOT allocate.
 //!
+//! Layout policy (PR-β):
+//!   - Binary broadcast ops (add/sub/mul/div): strided inputs OK, output
+//!     is always fresh contiguous.
+//!   - Scalar ops (addScalar/mulScalar/neg): strided inputs OK, output
+//!     is always fresh contiguous.
+//!   - addInPlace: both sides MUST be contiguous. Non-contiguous input
+//!     returns `LabError.InvalidLayout` rather than silently corrupting
+//!     data through a flat-buffer loop.
+//!
 //! Error conditions:
 //!   ShapeMismatch — shapes are not broadcast-compatible
+//!   InvalidLayout — addInPlace called on a non-contiguous tensor
 //!   OutOfMemory — allocation failure
 //!
 //! TODO: rank > 3 broadcasting, SIMD vectorization
@@ -44,6 +54,7 @@ const Strides = @import("../shape.zig").Strides;
 const computeStrides = @import("../shape.zig").computeStrides;
 const totalElements = @import("../shape.zig").totalElements;
 const broadcastShapes = @import("../shape.zig").broadcastShapes;
+const logicalOffsetFromLinear = @import("../shape.zig").logicalOffsetFromLinear;
 const Tensor = @import("../tensor.zig").Tensor;
 const DType = @import("../../core/dtype.zig").DType;
 const Device = @import("../../core/device.zig").Device;
@@ -144,13 +155,18 @@ pub fn div(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Te
     return out;
 }
 
-/// Add a scalar to every element: out[i] = a[i] + scalar
+/// Add a scalar to every element: out[i] = a[i] + scalar.
+///
+/// The input `a` may be non-contiguous (e.g. a transposed view) — we
+/// translate each logical index through `a.strides` before reading.
+/// The output is a fresh contiguous tensor in row-major order.
 pub fn addScalar(allocator: std.mem.Allocator, a: Tensor, scalar: f32, tape: ?*Tape) !Tensor {
     const out_shape = a.shape;
     var out = try Tensor.init(allocator, out_shape);
     const n = totalElements(out_shape);
     for (0..n) |i| {
-        out.data[i] = a.data[i] + scalar;
+        const a_off = logicalOffsetFromLinear(a.shape, a.strides, i);
+        out.data[i] = a.data[a_off] + scalar;
     }
     if (tape) |t| {
         if (a.requires_grad) {
@@ -168,13 +184,15 @@ pub fn addScalar(allocator: std.mem.Allocator, a: Tensor, scalar: f32, tape: ?*T
     return out;
 }
 
-/// Multiply every element by a scalar: out[i] = a[i] * scalar
+/// Multiply every element by a scalar: out[i] = a[i] * scalar.
+/// Strided input `a` is handled via logical-to-physical offset translation.
 pub fn mulScalar(allocator: std.mem.Allocator, a: Tensor, scalar: f32, tape: ?*Tape) !Tensor {
     const out_shape = a.shape;
     var out = try Tensor.init(allocator, out_shape);
     const n = totalElements(out_shape);
     for (0..n) |i| {
-        out.data[i] = a.data[i] * scalar;
+        const a_off = logicalOffsetFromLinear(a.shape, a.strides, i);
+        out.data[i] = a.data[a_off] * scalar;
     }
     if (tape) |t| {
         if (a.requires_grad) {
@@ -192,22 +210,31 @@ pub fn mulScalar(allocator: std.mem.Allocator, a: Tensor, scalar: f32, tape: ?*T
     return out;
 }
 
-/// In-place addition: a += b. No broadcasting — shapes must match exactly.
+/// In-place addition: a += b. Shapes must match exactly (no broadcasting).
+///
+/// LAYOUT POLICY: both `a` and `b` must be contiguous. An in-place op that
+/// walks a non-contiguous lhs via `data[i]` would write into the wrong
+/// physical slots of the parent buffer; combined with aliasing between
+/// `a` and `b` (e.g. a view and its parent), it is a subtle data-
+/// corruption trap. We reject upfront with `error.InvalidLayout` instead.
 pub fn addInPlace(a: *Tensor, b: Tensor) !void {
     if (!equals(a.shape, b.shape)) return LabError.ShapeMismatch;
+    if (!a.isContiguous() or !b.isContiguous()) return LabError.InvalidLayout;
     const n = totalElements(a.shape);
     for (0..n) |i| {
         a.data[i] += b.data[i];
     }
 }
 
-/// Elementwise negation: out[i] = -a[i]
+/// Elementwise negation: out[i] = -a[i]. Strided input `a` is handled
+/// via logical-to-physical offset translation.
 pub fn neg(allocator: std.mem.Allocator, a: Tensor, tape: ?*Tape) !Tensor {
     const out_shape = a.shape;
     var out = try Tensor.init(allocator, out_shape);
     const n = totalElements(out_shape);
     for (0..n) |i| {
-        out.data[i] = -a.data[i];
+        const a_off = logicalOffsetFromLinear(a.shape, a.strides, i);
+        out.data[i] = -a.data[a_off];
     }
     if (tape) |t| {
         if (a.requires_grad) {
@@ -516,4 +543,101 @@ test "add broadcast (2,1) + (2,3) = (2,3)" {
     // Row 1: 200 + [4,5,6] = [204, 205, 206]
     try std.testing.expectEqual(@as(f32, 204.0), out.data[3]);
     try std.testing.expectEqual(@as(f32, 206.0), out.data[5]);
+}
+
+// -- Strided-input correctness (PR-β) ---------------------------------------
+//
+// After PR-β, the scalar/unary ops must honour the input's strides when
+// reading. These tests pin down the behaviour so a future flat-loop
+// regression fails loudly instead of silently producing wrong answers.
+
+test "addScalar on transposed view reads logical elements" {
+    const allocator = std.testing.allocator;
+    // Underlying (2,3) buffer in row-major order:
+    //   [1, 2, 3,
+    //    4, 5, 6]
+    var base = try Tensor.init(allocator, Shape.init2D(2, 3));
+    defer base.deinit(allocator);
+    base.data[0] = 1;
+    base.data[1] = 2;
+    base.data[2] = 3;
+    base.data[3] = 4;
+    base.data[4] = 5;
+    base.data[5] = 6;
+
+    // Transposed view, shape (3,2), strides (1,3). Logical row-major
+    // iteration of the view visits the original values in order
+    //   [1,4,  2,5,  3,6].
+    const view = try base.transpose2d();
+
+    var out = try addScalar(allocator, view, 10.0, null);
+    defer out.deinit(allocator);
+
+    try std.testing.expectEqual(@as(f32, 11.0), out.data[0]);
+    try std.testing.expectEqual(@as(f32, 14.0), out.data[1]);
+    try std.testing.expectEqual(@as(f32, 12.0), out.data[2]);
+    try std.testing.expectEqual(@as(f32, 15.0), out.data[3]);
+    try std.testing.expectEqual(@as(f32, 13.0), out.data[4]);
+    try std.testing.expectEqual(@as(f32, 16.0), out.data[5]);
+}
+
+test "mulScalar on transposed view reads logical elements" {
+    const allocator = std.testing.allocator;
+    var base = try Tensor.init(allocator, Shape.init2D(2, 3));
+    defer base.deinit(allocator);
+    base.data[0] = 1;
+    base.data[1] = 2;
+    base.data[2] = 3;
+    base.data[3] = 4;
+    base.data[4] = 5;
+    base.data[5] = 6;
+    const view = try base.transpose2d();
+
+    var out = try mulScalar(allocator, view, 2.0, null);
+    defer out.deinit(allocator);
+
+    const expected = [_]f32{ 2, 8, 4, 10, 6, 12 };
+    for (expected, 0..) |want, i| {
+        try std.testing.expectEqual(want, out.data[i]);
+    }
+}
+
+test "neg on transposed view reads logical elements" {
+    const allocator = std.testing.allocator;
+    var base = try Tensor.init(allocator, Shape.init2D(2, 3));
+    defer base.deinit(allocator);
+    for (base.data, 0..) |*v, i| v.* = @floatFromInt(i + 1);
+    const view = try base.transpose2d();
+
+    var out = try neg(allocator, view, null);
+    defer out.deinit(allocator);
+
+    const expected = [_]f32{ -1, -4, -2, -5, -3, -6 };
+    for (expected, 0..) |want, i| {
+        try std.testing.expectEqual(want, out.data[i]);
+    }
+}
+
+test "addInPlace rejects non-contiguous lhs with InvalidLayout" {
+    const allocator = std.testing.allocator;
+    var base = try Tensor.init(allocator, Shape.init2D(2, 3));
+    defer base.deinit(allocator);
+    var view = try base.transpose2d(); // non-contiguous (3,2)
+
+    var b = try Tensor.init(allocator, Shape.init2D(3, 2));
+    defer b.deinit(allocator);
+
+    try std.testing.expectError(LabError.InvalidLayout, addInPlace(&view, b));
+}
+
+test "addInPlace rejects non-contiguous rhs with InvalidLayout" {
+    const allocator = std.testing.allocator;
+    var a = try Tensor.init(allocator, Shape.init2D(3, 2));
+    defer a.deinit(allocator);
+
+    var base = try Tensor.init(allocator, Shape.init2D(2, 3));
+    defer base.deinit(allocator);
+    const view = try base.transpose2d(); // non-contiguous (3,2)
+
+    try std.testing.expectError(LabError.InvalidLayout, addInPlace(&a, view));
 }

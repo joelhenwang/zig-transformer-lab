@@ -125,13 +125,10 @@ pub const CausalSelfAttention = struct {
         // Step 1: Q, K, V projections
         // Linear.forward handles 3D→2D reshape internally
         var q = try self.w_q.forward(input, tape);
-        if (tape) |t| try t.keepAlive(&q);
         defer q.deinit(self.allocator);
         var k = try self.w_k.forward(input, tape);
-        if (tape) |t| try t.keepAlive(&k);
         defer k.deinit(self.allocator);
         var v = try self.w_v.forward(input, tape);
-        if (tape) |t| try t.keepAlive(&v);
         defer v.deinit(self.allocator);
 
         // q, k, v are (B, T, D). We need them as (B, T, D) for batched matmul.
@@ -144,18 +141,15 @@ pub const CausalSelfAttention = struct {
         // matmulBatch backward produces a gradient with K^T's shape,
         // which doesn't match K's shape.
         var k_t = try ops_shape.transposeInner2dTracked(self.allocator, k, tape);
-        if (tape) |t| try t.keepAlive(&k_t);
         defer k_t.deinit(self.allocator);
 
         // Q @ K^T → (B, T, T)
         var scores = try ops_matmul.matmulBatch(self.allocator, q, k_t, tape);
-        if (tape) |t| try t.keepAlive(&scores);
         defer scores.deinit(self.allocator);
 
         // Scale by 1/sqrt(D)
         const scale: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(self.d_model))));
         var scaled_scores = try ops_elementwise.mulScalar(self.allocator, scores, scale, tape);
-        if (tape) |t| try t.keepAlive(&scaled_scores);
         defer scaled_scores.deinit(self.allocator);
 
         // Step 3: Add causal mask
@@ -180,22 +174,18 @@ pub const CausalSelfAttention = struct {
         // Broadcast mask from (T,T) to (B,T,T) and add
         // We need to expand mask to (B, T, T) for elementwise add
         var mask_3d = try ops_shape.reshapeTracked(self.allocator, mask_slice, Shape.init3D(1, T, T), null);
-        if (tape) |t| try t.keepAlive(&mask_3d);
         defer mask_3d.deinit(self.allocator);
 
         var masked_scores = try ops_elementwise.add(self.allocator, scaled_scores, mask_3d, tape);
-        if (tape) |t| try t.keepAlive(&masked_scores);
         defer masked_scores.deinit(self.allocator);
 
         // Step 4: softmax along last axis (axis 2 for 3D)
         // Our softmax operates along the last axis, which is what we want
         var weights = try ops_softmax.softmax(self.allocator, masked_scores, tape);
-        if (tape) |t| try t.keepAlive(&weights);
         defer weights.deinit(self.allocator);
 
         // Step 5: attn_out = weights @ V → (B, T, D)
         var attn_out = try ops_matmul.matmulBatch(self.allocator, weights, v, tape);
-        if (tape) |t| try t.keepAlive(&attn_out);
         defer attn_out.deinit(self.allocator);
 
         // Step 6: Output projection

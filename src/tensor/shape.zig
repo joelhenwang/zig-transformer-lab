@@ -15,6 +15,10 @@
 //!   toString(shape, buf)    → []const u8 (human-readable, e.g. "(2, 3)")
 //!   broadcastShapes(a, b)   → !Shape    (NumPy-style broadcast, or error)
 //!   squeeze(shape, axis)    → Shape     (remove size-1 dim(s))
+//!   logicalOffsetFromLinear(shape, strides, linear) → usize
+//!                                       (row-major logical index → physical offset)
+//!   maxLogicalOffset(shape, strides) → usize
+//!                                       (largest physical offset any element hits)
 //!
 //! Math:
 //!   Row-major strides (C order):
@@ -90,23 +94,28 @@ pub const Shape = struct {
         return @as(usize, self.rank) + 1;
     }
 
-    /// Construct a 1D shape.
+    /// Construct a 1D shape. Debug-asserts that the dimension is non-zero;
+    /// zero-sized tensors are not supported in this project (PR-γ).
     pub fn init1D(d0: usize) Shape {
+        std.debug.assert(d0 > 0);
         return .{ .dims = .{ d0, 1, 1, 1 }, .rank = 0 };
     }
 
-    /// Construct a 2D shape.
+    /// Construct a 2D shape. Both dimensions must be non-zero.
     pub fn init2D(d0: usize, d1: usize) Shape {
+        std.debug.assert(d0 > 0 and d1 > 0);
         return .{ .dims = .{ d0, d1, 1, 1 }, .rank = 1 };
     }
 
-    /// Construct a 3D shape.
+    /// Construct a 3D shape. All three dimensions must be non-zero.
     pub fn init3D(d0: usize, d1: usize, d2: usize) Shape {
+        std.debug.assert(d0 > 0 and d1 > 0 and d2 > 0);
         return .{ .dims = .{ d0, d1, d2, 1 }, .rank = 2 };
     }
 
-    /// Construct a 4D shape.
+    /// Construct a 4D shape. All four dimensions must be non-zero.
     pub fn init4D(d0: usize, d1: usize, d2: usize, d3: usize) Shape {
+        std.debug.assert(d0 > 0 and d1 > 0 and d2 > 0 and d3 > 0);
         return .{ .dims = .{ d0, d1, d2, d3 }, .rank = 3 };
     }
 };
@@ -182,7 +191,87 @@ pub fn computeStrides(shape: Shape) Strides {
     return strides;
 }
 
-/// Compute the total number of elements in a tensor with this shape.
+/// Translate a row-major logical index into a physical data-buffer offset,
+/// honouring arbitrary strides.
+///
+/// A "logical index" is what a user-facing loop `for (0..totalElements(shape))`
+/// sees: 0, 1, 2, ... reading the tensor in row-major order (the last dim
+/// varies fastest). The physical offset is where that logical element
+/// actually lives in the flat `[]f32` buffer, which depends on the tensor's
+/// strides — and the strides of a transposed or otherwise strided view
+/// are NOT row-major.
+///
+/// Algorithm (unravel then dot):
+///   1. Walk dimensions right-to-left.
+///   2. At each dim, split the linear index into (coord along this dim,
+///      remaining prefix) via `coord = remaining % dim_size;
+///      remaining = remaining / dim_size;`.
+///   3. Accumulate `coord * strides[dim]` into the physical offset.
+///
+/// This is the inverse of the "row-major index formula" in `Tensor.flatIndex`:
+///   flatIndex(indices) uses strides to go from multi-dim indices to offset;
+///   logicalOffsetFromLinear does the same job starting from a linear
+///   logical counter instead of explicit indices.
+///
+/// Worked example:
+///   shape = (2, 3), strides = (1, 2)   (a transposed view of a (3,2) buffer)
+///   logical 0 → coord_1=0, coord_0=0 → 0*2 + 0*1 = 0
+///   logical 1 → coord_1=1, coord_0=0 → 1*2 + 0*1 = 2
+///   logical 2 → coord_1=2, coord_0=0 → 2*2 + 0*1 = 4
+///   logical 3 → coord_1=0, coord_0=1 → 0*2 + 1*1 = 1
+///
+/// Memory: no allocation.
+pub fn logicalOffsetFromLinear(shape: Shape, strides: Strides, linear: usize) usize {
+    const n = shape.ndim();
+    var remaining = linear;
+    var offset: usize = 0;
+
+    // Walk right-to-left: the last dim is the fastest-varying (row-major
+    // logical order). `i` is 1-based here so we can stop before underflow.
+    var i: usize = n;
+    while (i > 0) {
+        i -= 1;
+        const dim_size = shape.dims[i];
+        const coord = remaining % dim_size;
+        remaining = remaining / dim_size;
+        offset += coord * strides.values[i];
+    }
+    return offset;
+}
+
+/// Compute the largest physical offset reachable by any logical element of
+/// a tensor with this shape and strides. Used by `Tensor.checkInvariants`
+/// to verify that every logical element of a view lies inside its backing
+/// storage.
+///
+/// Formula:
+///   max_offset = Σ_i (dims[i] - 1) * strides[i]
+///
+/// Rationale: the physical offset of element (c0, c1, ..., c_{n-1}) is
+/// `Σ c_i * strides[i]`. Each coordinate `c_i` independently ranges over
+/// `[0, dims[i] - 1]`. Strides are non-negative (we never produce
+/// negative-stride views), so each term is maximised by picking the
+/// largest coordinate, and the sum of the per-axis maxima equals the
+/// overall maximum offset.
+///
+/// Precondition: every dim is ≥ 1 (enforced by `Shape.initND` asserts).
+/// If a dim were 0, `dims[i] - 1` would wrap; we rely on zero-dim
+/// rejection to keep this function total.
+///
+/// Worked example:
+///   shape (3, 2), strides (1, 3)   (a transposed view of a (2,3) buffer)
+///   max = (3-1)*1 + (2-1)*3 = 2 + 3 = 5 → fits in buffer of length 6 ✓
+pub fn maxLogicalOffset(shape: Shape, strides: Strides) usize {
+    const n = shape.ndim();
+    var max_off: usize = 0;
+    for (0..n) |i| {
+        std.debug.assert(shape.dims[i] >= 1);
+        max_off += (shape.dims[i] - 1) * strides.values[i];
+    }
+    return max_off;
+}
+
+
 ///
 /// Formula:
 ///   N = Π_{i=0}^{ndim-1} dims[i]
@@ -596,4 +685,48 @@ test "Shape.ndim returns correct values" {
     try std.testing.expectEqual(@as(usize, 2), Shape.init2D(2, 3).ndim());
     try std.testing.expectEqual(@as(usize, 3), Shape.init3D(2, 3, 4).ndim());
     try std.testing.expectEqual(@as(usize, 4), Shape.init4D(2, 3, 4, 5).ndim());
+}
+
+test "logicalOffsetFromLinear: contiguous row-major matches identity" {
+    // A freshly created tensor has row-major strides, so the logical
+    // index equals the physical offset exactly.
+    const shape = Shape.init3D(2, 3, 4);
+    const strides = computeStrides(shape);
+    for (0..24) |i| {
+        try std.testing.expectEqual(i, logicalOffsetFromLinear(shape, strides, i));
+    }
+}
+
+test "logicalOffsetFromLinear: transposed 2D view" {
+    // Original (3, 2) row-major buffer: indices 0..5 in row-major order.
+    // After transpose, the view has shape (2, 3) and strides (1, 2)
+    // (axis strides swapped). Iterating logically 0..5 over the view
+    // should hit the original buffer indices in this pattern:
+    //   view[0,0] → orig[0,0] = 0
+    //   view[0,1] → orig[1,0] = 2
+    //   view[0,2] → orig[2,0] = 4
+    //   view[1,0] → orig[0,1] = 1
+    //   view[1,1] → orig[1,1] = 3
+    //   view[1,2] → orig[2,1] = 5
+    const view_shape = Shape.init2D(2, 3);
+    const view_strides = Strides{ .values = .{ 1, 2, 0, 0 }, .rank = 1 };
+    const expected = [_]usize{ 0, 2, 4, 1, 3, 5 };
+    for (expected, 0..) |want, i| {
+        try std.testing.expectEqual(want, logicalOffsetFromLinear(view_shape, view_strides, i));
+    }
+}
+
+test "logicalOffsetFromLinear: 3D inner transpose" {
+    // (2, 3, 4) contiguous → strides (12, 4, 1).
+    // Inner transpose to (2, 4, 3) swaps strides[1] and strides[2] → (12, 1, 4).
+    const view_shape = Shape.init3D(2, 4, 3);
+    const view_strides = Strides{ .values = .{ 12, 1, 4, 0 }, .rank = 2 };
+    // Logical index 0 → (0, 0, 0) → 0
+    try std.testing.expectEqual(@as(usize, 0), logicalOffsetFromLinear(view_shape, view_strides, 0));
+    // Logical (0, 1, 0) = linear 3 → 0*12 + 1*1 + 0*4 = 1
+    try std.testing.expectEqual(@as(usize, 1), logicalOffsetFromLinear(view_shape, view_strides, 3));
+    // Logical (0, 0, 1) = linear 1 → 0*12 + 0*1 + 1*4 = 4
+    try std.testing.expectEqual(@as(usize, 4), logicalOffsetFromLinear(view_shape, view_strides, 1));
+    // Logical (1, 3, 2) = linear 1*12 + 3*3 + 2 = 23 → 1*12 + 3*1 + 2*4 = 23
+    try std.testing.expectEqual(@as(usize, 23), logicalOffsetFromLinear(view_shape, view_strides, 23));
 }

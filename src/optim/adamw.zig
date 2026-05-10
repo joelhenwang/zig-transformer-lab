@@ -40,6 +40,7 @@ const std = @import("std");
 const LabError = @import("../core/errors.zig").LabError;
 const Tensor = @import("../tensor/tensor.zig").Tensor;
 const Optimizer = @import("optimizer.zig").Optimizer;
+const ParamId = @import("../nn/module.zig").ParamId;
 
 pub const AdamWConfig = struct {
     lr: f32 = 1e-3,
@@ -59,7 +60,15 @@ pub const AdamW = struct {
     config: AdamWConfig,
 
     /// Per-parameter state: first and second moment estimates.
-    state: std.AutoHashMap(usize, ParamState),
+    ///
+    /// PR-ζ: keyed by the parameter's stable `ParamId` rather than by
+    /// `@intFromPtr(param.data.ptr)`. The pointer key was a latent bug:
+    /// checkpoint loads that allocate a fresh buffer (or future device
+    /// transfers that move the tensor to CUDA) would silently change
+    /// the key, and the optimizer would start again with zero moments
+    /// for that parameter. A `ParamId` is assigned once at layer init
+    /// and persists across buffer replacements.
+    state: std.AutoHashMap(ParamId, ParamState),
 
     /// Step counter for bias correction.
     t: usize,
@@ -74,7 +83,7 @@ pub const AdamW = struct {
         return AdamW{
             .allocator = allocator,
             .config = config,
-            .state = std.AutoHashMap(usize, ParamState).init(allocator),
+            .state = std.AutoHashMap(ParamId, ParamState).init(allocator),
             .t = 0,
         };
     }
@@ -103,7 +112,11 @@ pub const AdamW = struct {
 
         for (params) |param| {
             const grad = param.grad orelse continue;
-            const key = @intFromPtr(param.data.ptr);
+            // PR-ζ: every parameter must carry a stable ParamId. Nil
+            // would mean the caller passed a non-parameter tensor (or
+            // forgot to call `nn.module.assignParamId`); fail loudly
+            // rather than silently key on an unstable pointer.
+            const key = param.param_id orelse return error.InvalidArgument;
 
             // Get or create state
             if (!self.state.contains(key)) {
@@ -187,6 +200,8 @@ test "AdamW step — decreases parameter magnitude" {
     param.data[0] = 5.0;
     param.data[1] = -3.0;
     param.data[2] = 0.0;
+    // PR-ζ: assign a ParamId so the optimizer can key state.
+    @import("../nn/module.zig").assignParamId(&param);
 
     var grad = try Tensor.init(alloc, @import("../tensor/shape.zig").Shape.init1D(3));
     defer grad.deinit(alloc);
@@ -203,4 +218,72 @@ test "AdamW step — decreases parameter magnitude" {
     // Update should move param in the direction of -grad
     try std.testing.expect(param.data[0] < 5.0);
     try std.testing.expect(param.data[1] > -3.0);
+}
+
+test "AdamW step — rejects parameter without ParamId" {
+    const alloc = std.testing.allocator;
+
+    var adam = try AdamW.init(alloc, .{ .lr = 0.01 });
+    defer adam.deinit(alloc);
+
+    var param = try Tensor.init(alloc, @import("../tensor/shape.zig").Shape.init1D(2));
+    defer param.deinit(alloc);
+    var grad = try Tensor.init(alloc, @import("../tensor/shape.zig").Shape.init1D(2));
+    defer grad.deinit(alloc);
+    param.grad = &grad;
+    // Intentionally do NOT call assignParamId.
+
+    var opt = adam.optimizer();
+    const params = [_]*Tensor{&param};
+    try std.testing.expectError(error.InvalidArgument, opt.step(&params));
+}
+
+test "AdamW state persists across buffer replacement (same ParamId)" {
+    // PR-ζ guarantee: if a parameter keeps its ParamId but its
+    // backing buffer is replaced (e.g. by a checkpoint load that
+    // allocates a fresh Tensor), the optimizer must NOT lose state.
+    // A pointer-keyed optimizer would silently start fresh; an ID-
+    // keyed one continues with the existing m/v moments.
+    const alloc = std.testing.allocator;
+
+    var adam = try AdamW.init(alloc, .{ .lr = 0.01 });
+    defer adam.deinit(alloc);
+    var opt = adam.optimizer();
+
+    const Shape = @import("../tensor/shape.zig").Shape;
+    const assignParamId = @import("../nn/module.zig").assignParamId;
+
+    // First parameter lifetime.
+    var p1 = try Tensor.init(alloc, Shape.init1D(2));
+    assignParamId(&p1);
+    const id = p1.param_id.?;
+
+    var g1 = try Tensor.init(alloc, Shape.init1D(2));
+    g1.data[0] = 1.0;
+    g1.data[1] = -0.5;
+    p1.grad = &g1;
+    try opt.step(&.{&p1});
+    try std.testing.expect(adam.state.contains(id));
+
+    p1.deinit(alloc);
+    g1.deinit(alloc);
+
+    // Replacement parameter with the same ID (simulating checkpoint
+    // reload). The buffer is different; if we were keying by
+    // `@intFromPtr(p2.data.ptr)` the new key wouldn't match and the
+    // optimizer would allocate new m/v buffers. With ParamId keying,
+    // the existing state is reused.
+    var p2 = try Tensor.init(alloc, Shape.init1D(2));
+    defer p2.deinit(alloc);
+    p2.param_id = id;
+    var g2 = try Tensor.init(alloc, Shape.init1D(2));
+    defer g2.deinit(alloc);
+    g2.data[0] = 0.3;
+    g2.data[1] = 0.1;
+    p2.grad = &g2;
+
+    const state_before = adam.state.count();
+    try opt.step(&.{&p2});
+    const state_after = adam.state.count();
+    try std.testing.expectEqual(state_before, state_after);
 }

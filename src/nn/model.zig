@@ -113,12 +113,10 @@ pub const TinyWordTransformer = struct {
 
         // Token embeddings: (B, T) → (B, T, D)
         var tok = try self.tok_embed.forward(ids, tape);
-        if (tape) |t| try t.keepAlive(&tok);
         defer tok.deinit(self.allocator);
 
         // Position IDs: [0, 1, ..., T-1], shape (1, T) or (T,)
         var pos_ids = try Tensor.init(self.allocator, Shape.init2D(1, T));
-        if (tape) |t| try t.keepAlive(&pos_ids);
         defer pos_ids.deinit(self.allocator);
         for (0..T) |t| {
             pos_ids.data[t] = @floatFromInt(t);
@@ -126,22 +124,18 @@ pub const TinyWordTransformer = struct {
 
         // Position embeddings: (1, T) → (1, T, D)
         var pos = try self.pos_embed.forward(pos_ids, tape);
-        if (tape) |t| try t.keepAlive(&pos);
         defer pos.deinit(self.allocator);
 
         // x = tok_embed + pos_embed  (pos broadcasts over B)
         var x = try ops_elementwise.add(self.allocator, tok, pos, tape);
-        if (tape) |t| try t.keepAlive(&x);
         defer x.deinit(self.allocator);
 
         // Transformer block
         var block_out = try self.block.forward(x, tape);
-        if (tape) |t| try t.keepAlive(&block_out);
         defer block_out.deinit(self.allocator);
 
         // Final LayerNorm
         var ln_out = try self.ln_f.forward(block_out, tape);
-        if (tape) |t| try t.keepAlive(&ln_out);
         defer ln_out.deinit(self.allocator);
 
         // Output projection: (B, T, D) → (B, T, V)
@@ -173,13 +167,38 @@ pub const TinyWordTransformer = struct {
         return te + pe + ln_f;
     }
 
-    /// Save model checkpoint to a binary file.
+    /// Save model checkpoint to a binary file (format v2, PR-η).
     ///
-    /// Format: see plan.md Appendix H:
-    ///   magic "TWTL" (4 bytes)
-    ///   version: u32 = 1
-    ///   num_params: u32
-    ///   For each param: name_len(u32), name([]u8), rank(u8), dims([4]u32), data_len(u32), data([]f32)
+    /// Format — little-endian throughout, f32 payloads written as raw
+    /// IEEE 754 bytes. All padding fields are zeros.
+    ///
+    /// Header:
+    ///     magic        [4]u8  = "ZTLC"
+    ///     version      u32    = 2
+    ///     model_kind   u32    = 1  (TinyWordTransformer)
+    ///     vocab_size   u32
+    ///     max_seq_len  u32
+    ///     d_model      u32
+    ///     d_ff         u32
+    ///     bias         u8     (0 or 1)
+    ///     _pad         [3]u8  (zeros, aligns next field to 4)
+    ///     param_count  u32
+    ///
+    /// Per-parameter record (repeated param_count times):
+    ///     name_len     u32   (1..=255)
+    ///     name         [name_len]u8
+    ///     rank         u8
+    ///     _pad         [3]u8
+    ///     dims         [4]u32  (entries beyond rank are zero)
+    ///     data_len     u32     (payload bytes; total_elements * 4)
+    ///     data         [data_len]u8  (f32 little-endian)
+    ///
+    /// Trailer:
+    ///     end_magic    [4]u8  = "END."
+    ///
+    /// The trailer lets the loader detect truncation: if we read
+    /// param_count successfully but the trailer is missing, the file
+    /// was cut short and we refuse to use it.
     ///
     /// Worked example:
     ///   try model.save(io, "checkpoint.bin");
@@ -189,40 +208,68 @@ pub const TinyWordTransformer = struct {
         defer file.close(io);
         var buf: [4096]u8 = undefined;
         var writer = file.writer(io, &buf);
+        const w = &writer.interface;
 
-        // Magic
-        try writer.interface.writeAll("TWTL");
-        // Version
-        try writer.interface.writeInt(u32, 1, .little);
+        // Header
+        try w.writeAll("ZTLC");
+        try w.writeInt(u32, 2, .little); // version
+        try w.writeInt(u32, 1, .little); // model_kind = TinyWordTransformer
+        try w.writeInt(u32, @intCast(self.cfg.vocab_size), .little);
+        try w.writeInt(u32, @intCast(self.cfg.max_seq_len), .little);
+        try w.writeInt(u32, @intCast(self.cfg.d_model), .little);
+        try w.writeInt(u32, @intCast(self.cfg.d_ff), .little);
+        try w.writeInt(u8, @intFromBool(self.cfg.bias), .little);
+        try w.writeAll(&.{ 0, 0, 0 }); // 3-byte pad
 
         // Collect parameters with names
         var param_list: std.ArrayList(NamedParam) = .empty;
         defer param_list.deinit(self.allocator);
         try self.collectNamedParams(&param_list);
 
-        try writer.interface.writeInt(u32, @intCast(param_list.items.len), .little);
+        try w.writeInt(u32, @intCast(param_list.items.len), .little);
 
         for (param_list.items) |entry| {
             const t = entry.tensor;
-            try writer.interface.writeInt(u32, @intCast(entry.name.len), .little);
-            try writer.interface.writeAll(entry.name);
-            try writer.interface.writeInt(u8, @intCast(t.shape.ndim()), .little);
+            if (entry.name.len == 0 or entry.name.len > 255) return error.IoError;
+            try w.writeInt(u32, @intCast(entry.name.len), .little);
+            try w.writeAll(entry.name);
+            try w.writeInt(u8, @intCast(t.shape.ndim()), .little);
+            try w.writeAll(&.{ 0, 0, 0 }); // 3-byte pad
             for (0..4) |i| {
                 const dim: u32 = if (i < t.shape.ndim()) @intCast(t.shape.dims[i]) else 0;
-                try writer.interface.writeInt(u32, dim, .little);
+                try w.writeInt(u32, dim, .little);
             }
             const data_len: u32 = @intCast(t.data.len * 4);
-            try writer.interface.writeInt(u32, data_len, .little);
-            // Write f32 data as little-endian bytes
+            try w.writeInt(u32, data_len, .little);
+            // Raw f32 bytes. Target platforms are little-endian; if we
+            // ever port to a big-endian system we would byte-swap here.
             const bytes = std.mem.sliceAsBytes(t.data);
-            try writer.interface.writeAll(bytes);
+            try w.writeAll(bytes);
         }
+
+        // Trailer.
+        try w.writeAll("END.");
         try writer.flush();
     }
 
-    /// Load model checkpoint from a binary file.
+    /// Load model checkpoint from a binary file (format v2, PR-η).
     ///
-    /// Verifies magic and version. Overwrites existing parameter data.
+    /// Validates every header field, rejects:
+    ///   - wrong magic               → error.IoError
+    ///   - unsupported version       → error.IoError
+    ///   - wrong model_kind          → error.IoError
+    ///   - config mismatch           → error.ShapeMismatch
+    ///   - wrong param_count         → error.ShapeMismatch
+    ///   - duplicate param name      → error.IoError
+    ///   - unknown param name        → error.IoError
+    ///   - missing expected param    → error.ShapeMismatch
+    ///   - rank/dim/data_len mismatch for an expected param
+    ///                              → error.ShapeMismatch
+    ///   - missing or wrong trailer → error.IoError
+    ///
+    /// This strictness is deliberately noisy: a silently-mismatched
+    /// checkpoint is the single most common way to waste a day of
+    /// training on the wrong weights.
     ///
     /// Worked example:
     ///   try model.load(io, "checkpoint.bin");
@@ -232,57 +279,107 @@ pub const TinyWordTransformer = struct {
         defer file.close(io);
         var read_buf: [4096]u8 = undefined;
         var reader = file.reader(io, &read_buf);
+        const r = &reader.interface;
 
-        // Verify magic
+        // --- Header ---
         var magic: [4]u8 = undefined;
-        try reader.interface.readNoEof(&magic);
-        if (!std.mem.eql(u8, &magic, "TWTL")) return error.IoError;
+        try r.readSliceAll(&magic);
+        if (!std.mem.eql(u8, &magic, "ZTLC")) return error.IoError;
 
-        // Verify version
-        const version = try reader.interface.readInt(u32, .little);
-        if (version != 1) return error.IoError;
+        const version = try r.takeInt(u32, .little);
+        if (version != 2) return error.IoError;
 
-        const num_params = try reader.interface.readInt(u32, .little);
+        const model_kind = try r.takeInt(u32, .little);
+        if (model_kind != 1) return error.IoError;
 
-        // Collect parameters with names for matching
+        const vocab_size = try r.takeInt(u32, .little);
+        const max_seq_len = try r.takeInt(u32, .little);
+        const d_model = try r.takeInt(u32, .little);
+        const d_ff = try r.takeInt(u32, .little);
+        const bias_byte = try r.takeInt(u8, .little);
+        var pad3: [3]u8 = undefined;
+        try r.readSliceAll(&pad3);
+
+        if (vocab_size != self.cfg.vocab_size or
+            max_seq_len != self.cfg.max_seq_len or
+            d_model != self.cfg.d_model or
+            d_ff != self.cfg.d_ff or
+            (bias_byte != 0) != self.cfg.bias)
+        {
+            return error.ShapeMismatch;
+        }
+
+        const param_count = try r.takeInt(u32, .little);
+
+        // Collect expected params.
         var param_list: std.ArrayList(NamedParam) = .empty;
         defer param_list.deinit(self.allocator);
         try self.collectNamedParams(&param_list);
 
-        for (0..num_params) |_| {
-            const name_len = try reader.interface.readInt(u32, .little);
-            var name_buf: [256]u8 = undefined;
-            try reader.interface.readNoEof(name_buf[0..name_len]);
+        if (param_count != param_list.items.len) return error.ShapeMismatch;
+
+        // Track which expected params we've seen; reject duplicates and
+        // unknown names.
+        const seen = try self.allocator.alloc(bool, param_list.items.len);
+        defer self.allocator.free(seen);
+        @memset(seen, false);
+
+        var name_buf: [256]u8 = undefined;
+
+        for (0..param_count) |_| {
+            const name_len = try r.takeInt(u32, .little);
+            if (name_len == 0 or name_len > 255) return error.IoError;
+            try r.readSliceAll(name_buf[0..name_len]);
             const name = name_buf[0..name_len];
 
-            _ = try reader.interface.readInt(u8, .little); // rank (unused for validation)
+            const rank = try r.takeInt(u8, .little);
+            var rec_pad3: [3]u8 = undefined;
+            try r.readSliceAll(&rec_pad3);
 
-            // Read dims
             var dims: [4]u32 = undefined;
             for (0..4) |i| {
-                dims[i] = try reader.interface.readInt(u32, .little);
+                dims[i] = try r.takeInt(u32, .little);
             }
 
-            const data_len: usize = try reader.interface.readInt(u32, .little);
+            const data_len = try r.takeInt(u32, .little);
 
-            // Find matching parameter by name
-            for (param_list.items) |entry| {
+            // Locate the expected parameter with this name.
+            var matched_index: ?usize = null;
+            for (param_list.items, 0..) |entry, idx| {
                 if (std.mem.eql(u8, name, entry.name)) {
-                    const bytes = std.mem.sliceAsBytes(entry.tensor.data);
-                    try reader.interface.readNoEof(bytes);
+                    matched_index = idx;
                     break;
                 }
-            } else {
-                // Unknown parameter — skip its data
-                var skip_buf: [4096]u8 = undefined;
-                var remaining: usize = data_len;
-                while (remaining > 0) {
-                    const to_read = @min(remaining, skip_buf.len);
-                    try reader.interface.readNoEof(skip_buf[0..to_read]);
-                    remaining -= to_read;
-                }
+            }
+            const idx = matched_index orelse return error.IoError;
+            if (seen[idx]) return error.IoError; // duplicate
+            seen[idx] = true;
+
+            const t = param_list.items[idx].tensor;
+            if (rank != t.shape.ndim()) return error.ShapeMismatch;
+            for (0..4) |i| {
+                const expected_dim: u32 = if (i < t.shape.ndim()) @intCast(t.shape.dims[i]) else 0;
+                if (dims[i] != expected_dim) return error.ShapeMismatch;
+            }
+            const expected_bytes: u32 = @intCast(t.data.len * 4);
+            if (data_len != expected_bytes) return error.ShapeMismatch;
+
+            const bytes = std.mem.sliceAsBytes(t.data);
+            try r.readSliceAll(bytes);
+        }
+
+        // Every expected parameter must have been written.
+        for (seen, 0..) |was_seen, idx| {
+            if (!was_seen) {
+                _ = idx;
+                return error.ShapeMismatch;
             }
         }
+
+        // Trailer.
+        var trailer: [4]u8 = undefined;
+        try r.readSliceAll(&trailer);
+        if (!std.mem.eql(u8, &trailer, "END.")) return error.IoError;
     }
 
     /// Collect parameters with their names (for debugging / grad checking).
@@ -390,3 +487,133 @@ test "TinyWordTransformer parameters — non-empty list" {
 
     try std.testing.expect(param_list.items.len > 0);
 }
+
+// -- Checkpoint round-trip + strict validation (PR-η) -----------------------
+
+fn testIo() !std.Io {
+    const T = struct {
+        var instance: ?std.Io.Threaded = null;
+    };
+    if (T.instance == null) {
+        T.instance = std.Io.Threaded.init(std.testing.allocator, .{});
+    }
+    return T.instance.?.io();
+}
+
+fn tmpCheckpointPath(comptime name: []const u8) []const u8 {
+    return "zig-out/tmp-" ++ name ++ ".ckpt";
+}
+
+test "Checkpoint save/load round-trip" {
+    const alloc = std.testing.allocator;
+    const io = try testIo();
+    // Ensure zig-out/ exists for test artefacts.
+    std.Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
+
+    var rng = Rng.init(7);
+    const cfg = TransformerConfig{ .vocab_size = 8, .d_model = 4, .max_seq_len = 4, .d_ff = 8 };
+    var model_a = try TinyWordTransformer.init(alloc, cfg, &rng);
+    defer model_a.deinit();
+
+    const path = tmpCheckpointPath("roundtrip");
+    try model_a.save(io, path);
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    var rng2 = Rng.init(99); // different init — weights should be overwritten.
+    var model_b = try TinyWordTransformer.init(alloc, cfg, &rng2);
+    defer model_b.deinit();
+    try model_b.load(io, path);
+
+    // Compare token-embedding weights — they came from rng(7) on save
+    // and rng(99) on init, so if load worked, they are now equal.
+    for (model_a.tok_embed.weight.data, model_b.tok_embed.weight.data) |x, y| {
+        try std.testing.expectEqual(x, y);
+    }
+}
+
+test "Checkpoint load rejects wrong config" {
+    const alloc = std.testing.allocator;
+    const io = try testIo();
+    std.Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
+
+    var rng = Rng.init(1);
+    const saved_cfg = TransformerConfig{ .vocab_size = 8, .d_model = 4, .max_seq_len = 4, .d_ff = 8 };
+    var saver = try TinyWordTransformer.init(alloc, saved_cfg, &rng);
+    defer saver.deinit();
+    const path = tmpCheckpointPath("cfg-mismatch");
+    try saver.save(io, path);
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    // Different vocab_size — load must fail.
+    var rng2 = Rng.init(2);
+    const load_cfg = TransformerConfig{ .vocab_size = 16, .d_model = 4, .max_seq_len = 4, .d_ff = 8 };
+    var loader = try TinyWordTransformer.init(alloc, load_cfg, &rng2);
+    defer loader.deinit();
+    try std.testing.expectError(error.ShapeMismatch, loader.load(io, path));
+}
+
+test "Checkpoint load rejects corrupt magic" {
+    const alloc = std.testing.allocator;
+    const io = try testIo();
+    std.Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
+
+    const cwd = std.Io.Dir.cwd();
+    const path = tmpCheckpointPath("bad-magic");
+
+    // Write a file that starts with the wrong magic.
+    const bad = try cwd.createFile(io, path, .{});
+    defer cwd.deleteFile(io, path) catch {};
+    defer bad.close(io);
+    var wbuf: [64]u8 = undefined;
+    var bw = bad.writer(io, &wbuf);
+    try bw.interface.writeAll("WRONG");
+    try bw.flush();
+
+    var rng = Rng.init(3);
+    const cfg = TransformerConfig{ .vocab_size = 8, .d_model = 4, .max_seq_len = 4, .d_ff = 8 };
+    var loader = try TinyWordTransformer.init(alloc, cfg, &rng);
+    defer loader.deinit();
+
+    try std.testing.expectError(error.IoError, loader.load(io, path));
+}
+
+test "Checkpoint load rejects truncated file (missing trailer)" {
+    const alloc = std.testing.allocator;
+    const io = try testIo();
+    std.Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
+
+    var rng = Rng.init(4);
+    const cfg = TransformerConfig{ .vocab_size = 8, .d_model = 4, .max_seq_len = 4, .d_ff = 8 };
+    var model = try TinyWordTransformer.init(alloc, cfg, &rng);
+    defer model.deinit();
+
+    const cwd = std.Io.Dir.cwd();
+    const good_path = tmpCheckpointPath("trunc-source");
+    try model.save(io, good_path);
+    defer cwd.deleteFile(io, good_path) catch {};
+
+    // Read the full file, write back everything EXCEPT the 4-byte trailer.
+    const bytes = try cwd.readFileAlloc(io, good_path, alloc, .limited(1 << 20));
+    defer alloc.free(bytes);
+
+    const bad_path = tmpCheckpointPath("trunc-bad");
+    const bad = try cwd.createFile(io, bad_path, .{});
+    defer cwd.deleteFile(io, bad_path) catch {};
+    defer bad.close(io);
+    var wbuf: [4096]u8 = undefined;
+    var bw = bad.writer(io, &wbuf);
+    try bw.interface.writeAll(bytes[0 .. bytes.len - 4]);
+    try bw.flush();
+
+    var rng2 = Rng.init(5);
+    var loader = try TinyWordTransformer.init(alloc, cfg, &rng2);
+    defer loader.deinit();
+
+    // Truncated → we successfully read all params but the trailer read
+    // hits EOF, which comes back as end-of-stream.
+    const result = loader.load(io, bad_path);
+    try std.testing.expect(std.meta.isError(result));
+}
+
+
+

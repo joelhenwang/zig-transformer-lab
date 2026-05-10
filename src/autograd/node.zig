@@ -228,22 +228,19 @@ const max_parents = 2;
 /// parent input, and accumulate into the grad map.
 ///
 /// Worked example — building a tape for (a * b + c):
-///   Node 0: op=add,  parents=[0,1], saved=nothing     // a*b + c
-///   Node 1: op=mul,  parents=[2,3], saved=tensor_pair   // a * b
-///   Node 2: op=leaf, parents=[],   saved=nothing       // a (leaf)
-///   Node 3: op=leaf, parents=[],   saved=nothing       // b (leaf)
-///   Node 4: op=leaf, parents=[],   saved=nothing       // c (leaf)
 ///
-/// Wait — leaves don't have nodes. Let me correct:
 ///   The tape only records COMPUTATION nodes, not leaf tensors.
-///   Leaf tensors have tape_node=null and requires_grad=true.
-///   The tape records the operations that produce intermediate tensors.
+///   Leaf tensors (a, b, c) have tape_node=null and requires_grad=true
+///   until they first participate in a recorded op, at which point
+///   trackLeaf() assigns them a placeholder node. The tape records
+///   the actual operations that produce intermediate tensors:
 ///
-///   Node 0: op=mul,  parents=[a.id, b.id], saved=tensor_pair  // a * b → d
-///   Node 1: op=add,  parents=[d.id, c.id], saved=nothing      // d + c → loss
+///     Node 0: op=mul,  parents=[a.id, b.id], saved=tensor_pair  // a * b → d
+///     Node 1: op=add,  parents=[d.id, c.id], saved=nothing      // d + c → loss
 ///
-///   Where a.id, b.id, c.id are the tape_node IDs of the input tensors,
-///   and d.id is the tape_node ID of the mul output (Node 0's ID).
+///   Where a.id, b.id, c.id are the placeholder NodeIds assigned by
+///   trackLeaf, and d.id is the id of Node 0 (stored back onto the
+///   mul output tensor as tensor.tape_node).
 pub const Node = struct {
     /// Unique ID for this node, assigned by the tape.
     /// This is also the tape_node value stored on the output tensor.

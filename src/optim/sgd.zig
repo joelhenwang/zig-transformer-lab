@@ -34,6 +34,7 @@ const std = @import("std");
 const LabError = @import("../core/errors.zig").LabError;
 const Tensor = @import("../tensor/tensor.zig").Tensor;
 const Optimizer = @import("optimizer.zig").Optimizer;
+const ParamId = @import("../nn/module.zig").ParamId;
 
 pub const SGDConfig = struct {
     lr: f32 = 0.01,
@@ -45,9 +46,11 @@ pub const SGD = struct {
     allocator: std.mem.Allocator,
     config: SGDConfig,
 
-    /// Velocity buffers: keyed by param data pointer (as usize).
-    /// v[i] = momentum * v[i] + grad[i] + weight_decay * param[i]
-    velocity: std.AutoHashMap(usize, Tensor),
+    /// Velocity buffers, keyed by the parameter's stable `ParamId`.
+    /// PR-ζ: previously keyed by `@intFromPtr(param.data.ptr)` which
+    /// breaks silently when a parameter's backing buffer is replaced
+    /// (checkpoint load, future device transfer).
+    velocity: std.AutoHashMap(ParamId, Tensor),
 
     /// Create an SGD optimizer.
     ///
@@ -59,7 +62,7 @@ pub const SGD = struct {
         return SGD{
             .allocator = allocator,
             .config = config,
-            .velocity = std.AutoHashMap(usize, Tensor).init(allocator),
+            .velocity = std.AutoHashMap(ParamId, Tensor).init(allocator),
         };
     }
 
@@ -72,7 +75,8 @@ pub const SGD = struct {
         const self: *SGD = @ptrCast(@alignCast(ctx));
         for (params) |param| {
             const grad = param.grad orelse continue;
-            const key = @intFromPtr(param.data.ptr);
+            // PR-ζ: require a stable ID. See AdamW.step for rationale.
+            const key = param.param_id orelse return error.InvalidArgument;
 
             // Get or create velocity buffer
             if (!self.velocity.contains(key)) {
@@ -149,6 +153,8 @@ test "SGD step — decreases parameter magnitude" {
     param.data[0] = 5.0;
     param.data[1] = -3.0;
     param.data[2] = 0.0;
+    // PR-ζ: assign a ParamId so the optimizer can key state.
+    @import("../nn/module.zig").assignParamId(&param);
 
     var grad = try Tensor.init(alloc, @import("../tensor/shape.zig").Shape.init1D(3));
     defer grad.deinit(alloc);

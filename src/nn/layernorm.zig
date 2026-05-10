@@ -50,6 +50,7 @@ const ops_elementwise = @import("../tensor/ops/elementwise.zig");
 const ops_unary = @import("../tensor/ops/unary.zig");
 const ops_create = @import("../tensor/ops/create.zig");
 const ops_shape = @import("../tensor/ops/shape_ops.zig");
+const module = @import("module.zig");
 
 pub const LayerNorm = struct {
     gamma: Tensor,
@@ -78,13 +79,16 @@ pub const LayerNorm = struct {
         const gamma = try ops_create.ones(allocator, Shape.init1D(d_model));
         const beta = try ops_create.zeros(allocator, Shape.init1D(d_model));
 
-        return LayerNorm{
+        var layer = LayerNorm{
             .gamma = gamma,
             .beta = beta,
             .allocator = allocator,
             .d_model = d_model,
             .eps = eps,
         };
+        module.assignParamId(&layer.gamma);
+        module.assignParamId(&layer.beta);
+        return layer;
     }
 
     /// Compute LayerNorm(x) by composing existing tape-tracked ops.
@@ -104,37 +108,30 @@ pub const LayerNorm = struct {
 
         // Step 1: mu = mean(x, last_axis)  → shape (..., 1)
         var mu = try ops_reduce.mean(self.allocator, input, last_axis, tape);
-        if (tape) |t| try t.keepAlive(&mu);
         defer mu.deinit(self.allocator);
 
         // Step 2: x_centered = x - mu  (mu broadcasts along last axis)
         var x_centered = try ops_elementwise.sub(self.allocator, input, mu, tape);
-        if (tape) |t| try t.keepAlive(&x_centered);
         defer x_centered.deinit(self.allocator);
 
         // Step 3: x_centered_sq = x_centered * x_centered
         var x_centered_sq = try ops_elementwise.mul(self.allocator, x_centered, x_centered, tape);
-        if (tape) |t| try t.keepAlive(&x_centered_sq);
         defer x_centered_sq.deinit(self.allocator);
 
         // Step 4: variance = mean(x_centered_sq, last_axis)  → shape (..., 1)
         var variance = try ops_reduce.mean(self.allocator, x_centered_sq, last_axis, tape);
-        if (tape) |t| try t.keepAlive(&variance);
         defer variance.deinit(self.allocator);
 
         // Step 5: var_eps = variance + eps
         var var_eps = try ops_elementwise.addScalar(self.allocator, variance, self.eps, tape);
-        if (tape) |t| try t.keepAlive(&var_eps);
         defer var_eps.deinit(self.allocator);
 
         // Step 6: std_val = sqrt(var_eps)
         // x_norm = x_centered / std_val  (std_val broadcasts from (...,1))
         var std_val = try ops_unary.sqrt(self.allocator, var_eps, tape);
-        if (tape) |t| try t.keepAlive(&std_val);
         defer std_val.deinit(self.allocator);
 
         var x_norm = try ops_elementwise.div(self.allocator, x_centered, std_val, tape);
-        if (tape) |t| try t.keepAlive(&x_norm);
         defer x_norm.deinit(self.allocator);
 
         // Step 7: gamma * x_norm (gamma broadcasts from (D,) to (...,D))
@@ -142,18 +139,15 @@ pub const LayerNorm = struct {
         // the mul's gradient for the broadcast gamma back to (D,),
         // matching the original gamma's shape.
         var gamma_2d = try ops_shape.reshapeTracked(self.allocator, self.gamma, Shape.init2D(1, self.d_model), tape);
-        if (tape) |t| try t.keepAlive(&gamma_2d);
         defer gamma_2d.deinit(self.allocator);
 
         var scaled = try ops_elementwise.mul(self.allocator, x_norm, gamma_2d, tape);
-        if (tape) |t| try t.keepAlive(&scaled);
         defer scaled.deinit(self.allocator);
 
         // Step 8: scaled + beta (beta broadcasts from (D,) to (...,D))
         // Same reasoning as gamma: track the reshape so backward can
         // convert the add's gradient back to (D,) for beta.
         var beta_2d = try ops_shape.reshapeTracked(self.allocator, self.beta, Shape.init2D(1, self.d_model), tape);
-        if (tape) |t| try t.keepAlive(&beta_2d);
         defer beta_2d.deinit(self.allocator);
 
         const y = try ops_elementwise.add(self.allocator, scaled, beta_2d, tape);

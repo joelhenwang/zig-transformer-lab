@@ -370,7 +370,6 @@ test "gradCheck — Linear layer weight gradient (transpose2d path)" {
     _ = try tape.trackLeaf(&layer.weight);
 
     var out = try layer.forward(x, &tape);
-    try tape.keepAlive(&out);
     defer out.deinit(allocator);
 
     var loss = try ops_reduce.sumAll(allocator, out, &tape);
@@ -442,7 +441,6 @@ test "gradCheck — Linear layer 3D input (reshape path)" {
     _ = try tape.trackLeaf(&layer.weight);
 
     var out = try layer.forward(x, &tape);
-    try tape.keepAlive(&out);
     defer out.deinit(allocator);
 
     var loss = try ops_reduce.sumAll(allocator, out, &tape);
@@ -512,11 +510,9 @@ test "gradCheck — Linear in residual path (add + identity)" {
 
     // residual: out = x + Linear(x)
     var lin_out = try layer.forward(x, &tape);
-    try tape.keepAlive(&lin_out);
     defer lin_out.deinit(allocator);
 
     var output = try ops_elementwise.add(allocator, x, lin_out, &tape);
-    try tape.keepAlive(&output);
     defer output.deinit(allocator);
 
     var loss = try ops_reduce.sumAll(allocator, output, &tape);
@@ -586,7 +582,6 @@ test "gradCheck — Linear bias gradient (3D input)" {
     _ = try tape.trackLeaf(&layer.bias.?);
 
     var out = try layer.forward(x, &tape);
-    try tape.keepAlive(&out);
     defer out.deinit(allocator);
 
     var loss = try ops_reduce.sumAll(allocator, out, &tape);
@@ -689,7 +684,6 @@ test "gradCheck — full TinyWordTransformer model (sumAll loss)" {
     }
 
     var logits = try model.forward(ids, &tape);
-    try tape.keepAlive(&logits);
     defer logits.deinit(allocator);
 
     var loss = try ops_reduce.sumAll(allocator, logits, &tape);
@@ -792,7 +786,6 @@ test "gradCheck — TransformerBlock (residual connections)" {
     }
 
     var out = try block.forward(x, &tape);
-    try tape.keepAlive(&out);
     defer out.deinit(allocator);
 
     var loss = try ops_reduce.sumAll(allocator, out, &tape);
@@ -878,7 +871,6 @@ test "gradCheck — LayerNorm alone (3D input)" {
     _ = try tape.trackLeaf(&ln.beta);
 
     var out = try ln.forward(x, &tape);
-    try tape.keepAlive(&out);
     defer out.deinit(allocator);
 
     var loss = try ops_reduce.sumAll(allocator, out, &tape);
@@ -977,11 +969,9 @@ test "gradCheck — matmulBatch backward (Q @ K^T pattern)" {
 
     // Replicate attention forward pattern
     var k_t = try ops_shape.transposeInner2dTracked(allocator, K, &tape);
-    try tape.keepAlive(&k_t);
     defer k_t.deinit(allocator);
 
     var scores = try ops_matmul.matmulBatch(allocator, Q, k_t, &tape);
-    try tape.keepAlive(&scores);
     defer scores.deinit(allocator);
 
     var loss = try ops_reduce.sumAll(allocator, scores, &tape);
@@ -1107,22 +1097,18 @@ test "gradCheck — attention Q@K^T path without softmax" {
 
     // Q = w_q.forward(x)
     var q = try w_q.forward(x, &tape);
-    try tape.keepAlive(&q);
     defer q.deinit(allocator);
 
     // K = w_k.forward(x)
     var k = try w_k.forward(x, &tape);
-    try tape.keepAlive(&k);
     defer k.deinit(allocator);
 
     // K^T = transposeInner2dTracked(K)
     var k_t = try ops_shape.transposeInner2dTracked(allocator, k, &tape);
-    try tape.keepAlive(&k_t);
     defer k_t.deinit(allocator);
 
     // scores = matmulBatch(Q, K^T)
     var scores = try ops_matmul.matmulBatch(allocator, q, k_t, &tape);
-    try tape.keepAlive(&scores);
     defer scores.deinit(allocator);
 
     // loss = sumAll(scores)
@@ -1203,7 +1189,6 @@ test "gradCheck — add broadcast 3D + 3D(1,T,T) backward" {
     _ = try tape.trackLeaf(&a);
 
     var c = try ops_elementwise.add(allocator, a, b, &tape);
-    try tape.keepAlive(&c);
     defer c.deinit(allocator);
 
     var loss = try ops_reduce.sumAll(allocator, c, &tape);
@@ -1293,19 +1278,15 @@ test "gradCheck — attention pipeline step-by-step" {
         _ = try tape.trackLeaf(&w_q.weight);
 
         var q = try w_q.forward(x, &tape);
-        try tape.keepAlive(&q);
         defer q.deinit(allocator);
 
         var k = try w_k.forward(x, &tape);
-        try tape.keepAlive(&k);
         defer k.deinit(allocator);
 
         var k_t = try ops_shape.transposeInner2dTracked(allocator, k, &tape);
-        try tape.keepAlive(&k_t);
         defer k_t.deinit(allocator);
 
         var scores = try ops_matmul.matmulBatch(allocator, q, k_t, &tape);
-        try tape.keepAlive(&scores);
         defer scores.deinit(allocator);
 
         var loss: Tensor = undefined;
@@ -1318,14 +1299,12 @@ test "gradCheck — attention pipeline step-by-step" {
             .scaled => {
                 const scale: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
                 var scaled = try ops_elementwise.mulScalar(allocator, scores, scale, &tape);
-                try tape.keepAlive(&scaled);
                 defer scaled.deinit(allocator);
                 loss = try ops_reduce.sumAll(allocator, scaled, &tape);
             },
             .masked => {
                 const scale: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
                 var scaled = try ops_elementwise.mulScalar(allocator, scores, scale, &tape);
-                try tape.keepAlive(&scaled);
                 defer scaled.deinit(allocator);
                 var mask = try Tensor.init(allocator, Shape.init3D(1, 3, 3));
                 defer mask.deinit(allocator);
@@ -1335,14 +1314,12 @@ test "gradCheck — attention pipeline step-by-step" {
                     }
                 }
                 var masked = try ops_elementwise.add(allocator, scaled, mask, &tape);
-                try tape.keepAlive(&masked);
                 defer masked.deinit(allocator);
                 loss = try ops_reduce.sumAll(allocator, masked, &tape);
             },
             .softmaxed => {
                 const scale: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
                 var scaled = try ops_elementwise.mulScalar(allocator, scores, scale, &tape);
-                try tape.keepAlive(&scaled);
                 defer scaled.deinit(allocator);
                 var mask = try Tensor.init(allocator, Shape.init3D(1, 3, 3));
                 defer mask.deinit(allocator);
@@ -1352,17 +1329,14 @@ test "gradCheck — attention pipeline step-by-step" {
                     }
                 }
                 var masked = try ops_elementwise.add(allocator, scaled, mask, &tape);
-                try tape.keepAlive(&masked);
                 defer masked.deinit(allocator);
                 var weights = try ops_softmax.softmax(allocator, masked, &tape);
-                try tape.keepAlive(&weights);
                 defer weights.deinit(allocator);
                 loss = try ops_reduce.sumAll(allocator, weights, &tape);
             },
             .full_attn => {
                 const scale: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
                 var scaled = try ops_elementwise.mulScalar(allocator, scores, scale, &tape);
-                try tape.keepAlive(&scaled);
                 defer scaled.deinit(allocator);
                 var mask = try Tensor.init(allocator, Shape.init3D(1, 3, 3));
                 defer mask.deinit(allocator);
@@ -1372,19 +1346,14 @@ test "gradCheck — attention pipeline step-by-step" {
                     }
                 }
                 var masked = try ops_elementwise.add(allocator, scaled, mask, &tape);
-                try tape.keepAlive(&masked);
                 defer masked.deinit(allocator);
                 var weights = try ops_softmax.softmax(allocator, masked, &tape);
-                try tape.keepAlive(&weights);
                 defer weights.deinit(allocator);
                 var v_tensor = try w_v.forward(x, &tape);
-                try tape.keepAlive(&v_tensor);
                 defer v_tensor.deinit(allocator);
                 var attn_out = try ops_matmul.matmulBatch(allocator, weights, v_tensor, &tape);
-                try tape.keepAlive(&attn_out);
                 defer attn_out.deinit(allocator);
                 var output = try w_o.forward(attn_out, &tape);
-                try tape.keepAlive(&output);
                 defer output.deinit(allocator);
                 loss = try ops_reduce.sumAll(allocator, output, &tape);
             },
@@ -1651,7 +1620,6 @@ test "gradCheck — CausalSelfAttention alone" {
     }
 
     var out = try attn.forward(x, &tape);
-    try tape.keepAlive(&out);
     defer out.deinit(allocator);
 
     var loss = try ops_reduce.sumAll(allocator, out, &tape);
@@ -1736,7 +1704,6 @@ test "gradCheck — softmax backward produces zero when loss=sumAll(softmax)" {
     _ = try tape.trackLeaf(&x);
 
     var s = try ops_softmax.softmax(allocator, x, &tape);
-    try tape.keepAlive(&s);
     defer s.deinit(allocator);
 
     var loss = try ops_reduce.sumAll(allocator, s, &tape);
@@ -1788,25 +1755,20 @@ test "gradCheck — softmax with mask then sumAll (pipeline softmaxed)" {
     _ = try tape.trackLeaf(&w_q.weight);
 
     var q = try w_q.forward(x, &tape);
-    try tape.keepAlive(&q);
     defer q.deinit(allocator);
 
     var k = try w_k.forward(x, &tape);
-    try tape.keepAlive(&k);
     defer k.deinit(allocator);
 
     var k_t = try ops_shape.transposeInner2dTracked(allocator, k, &tape);
-    try tape.keepAlive(&k_t);
     defer k_t.deinit(allocator);
 
     var scores = try ops_matmul.matmulBatch(allocator, q, k_t, &tape);
-    try tape.keepAlive(&scores);
     defer scores.deinit(allocator);
 
     const D: usize = 4;
     const scale: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
     var scaled = try ops_elementwise.mulScalar(allocator, scores, scale, &tape);
-    try tape.keepAlive(&scaled);
     defer scaled.deinit(allocator);
 
     var mask = try Tensor.init(allocator, Shape.init3D(1, 3, 3));
@@ -1817,11 +1779,9 @@ test "gradCheck — softmax with mask then sumAll (pipeline softmaxed)" {
         }
     }
     var masked = try ops_elementwise.add(allocator, scaled, mask, &tape);
-    try tape.keepAlive(&masked);
     defer masked.deinit(allocator);
 
     var weights = try ops_softmax.softmax(allocator, masked, &tape);
-    try tape.keepAlive(&weights);
     defer weights.deinit(allocator);
 
     var loss = try ops_reduce.sumAll(allocator, weights, &tape);
@@ -1863,11 +1823,9 @@ test "gradCheck — softmax backward (2D, non-trivial loss)" {
     _ = try tape.trackLeaf(&x);
 
     var s = try ops_softmax.softmax(allocator, x, &tape);
-    try tape.keepAlive(&s);
     defer s.deinit(allocator);
 
     var weighted = try ops_elementwise.mul(allocator, s, target, &tape);
-    try tape.keepAlive(&weighted);
     defer weighted.deinit(allocator);
 
     var loss = try ops_reduce.sumAll(allocator, weighted, &tape);
@@ -1937,11 +1895,9 @@ test "gradCheck — softmax backward (3D, non-trivial loss)" {
     _ = try tape.trackLeaf(&x);
 
     var s = try ops_softmax.softmax(allocator, x, &tape);
-    try tape.keepAlive(&s);
     defer s.deinit(allocator);
 
     var weighted = try ops_elementwise.mul(allocator, s, target, &tape);
-    try tape.keepAlive(&weighted);
     defer weighted.deinit(allocator);
 
     var loss = try ops_reduce.sumAll(allocator, weighted, &tape);
@@ -2019,11 +1975,9 @@ test "gradCheck — softmax→matmulBatch (weights@V path)" {
     _ = try tape.trackLeaf(&x);
 
     var weights = try ops_softmax.softmax(allocator, x, &tape);
-    try tape.keepAlive(&weights);
     defer weights.deinit(allocator);
 
     var attn_out = try ops_matmul.matmulBatch(allocator, weights, v_tensor, &tape);
-    try tape.keepAlive(&attn_out);
     defer attn_out.deinit(allocator);
 
     var loss = try ops_reduce.sumAll(allocator, attn_out, &tape);
