@@ -1718,8 +1718,10 @@ test "cuda dispatch embeddingForward: oracle embedding_3d forward parity" {
 
     var y_cpu = try y_gpu.toCpu(alloc);
     defer y_cpu.deinit(alloc);
-    // embedding is a plain gather; bit-exact under f32.
-    try oracle.expectClose(y_cpu, expect_y, .{ .rel_tol = 0.0, .abs_tol = 0.0 });
+    // embedding is a plain gather; bit-exact under f32. Use a small
+    // epsilon so the OR condition `max_abs_diff < abs_tol` passes
+    // when diff == 0 (expectClose uses strict inequality).
+    try oracle.expectClose(y_cpu, expect_y, .{ .rel_tol = 1e-6, .abs_tol = 1e-6 });
 }
 
 test "cuda dispatch embeddingBackward: scatter-add with repeated ids" {
@@ -1812,7 +1814,7 @@ test "cuda Embedding.forward: oracle embedding_3d forward + backward parity" {
     {
         var y_cpu_back = try y.toCpu(alloc);
         defer y_cpu_back.deinit(alloc);
-        try oracle.expectClose(y_cpu_back, expect_y, .{ .rel_tol = 0.0, .abs_tol = 0.0 });
+        try oracle.expectClose(y_cpu_back, expect_y, .{ .rel_tol = 1e-6, .abs_tol = 1e-6 });
     }
 
     // Backward via sumAll loss.
