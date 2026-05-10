@@ -759,6 +759,17 @@ fn backwardEmbedding(
             result[0] = try heapAlloc(allocator, grad_weight);
             // result[1] remains null — indices don't require grad
         },
+        .tensor_pair => |tp| {
+            // PR-mu: CUDA embedding path. tp.a = weight (CUDA snapshot),
+            // tp.b = ids (CUDA snapshot). grad_output is CUDA too.
+            const V = tp.a.shape.dims[0];
+            // Flatten grad_output's leading dims into (N, D). The
+            // existing shape is (...ids.shape..., D) which the scatter
+            // kernel treats as a flat (N, D); tape-snapshot of tp.b
+            // already has the ids.shape we need.
+            const grad_weight = try cuda_dispatch.embeddingBackward(tp.b, grad_output.*, V);
+            result[0] = try heapAlloc(allocator, grad_weight);
+        },
         else => return error.InvalidArgument,
     }
 }

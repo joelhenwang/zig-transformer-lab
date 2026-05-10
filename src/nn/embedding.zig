@@ -42,6 +42,9 @@ const ops_create = @import("../tensor/ops/create.zig");
 const ops_shape = @import("../tensor/ops/shape_ops.zig");
 const totalElements = @import("../tensor/shape.zig").totalElements;
 const module = @import("module.zig");
+// PR-mu: embedding routes CUDA inputs to GPU gather / scatter-add
+// kernels via backend.cuda.dispatch.
+const cuda_dispatch = @import("../backend/cuda/dispatch.zig");
 
 pub const Embedding = struct {
     weight: Tensor,
@@ -86,6 +89,37 @@ pub const Embedding = struct {
     ///   var output = try embed.forward(ids, &tape);
     ///   // output.shape == (2, 4, 32)
     pub fn forward(self: Embedding, ids: Tensor, tape: ?*Tape) LabError!Tensor {
+        // PR-mu: route to CUDA when both tensors live on GPU. ids is
+        // an integer lookup key stored as f32 (our Tensor type is
+        // f32-only); the GPU kernel rounds to int with rintf.
+        if (self.weight.device == .cuda) {
+            var output = try cuda_dispatch.embeddingForward(self.weight, ids);
+            if (tape) |t| {
+                if (self.weight.requires_grad) {
+                    // Embedding backward uses the indices and the
+                    // weight's SHAPE (not its values). We store the
+                    // weight snapshot so tape cloneTensorData makes a
+                    // DtoD copy; the backward reads only shape + ctx
+                    // off it. For the indices we need to snapshot the
+                    // ids TENSOR (CUDA) because its host slice is
+                    // empty. The existing .embedding_info variant
+                    // stores indices as []const f32 which works for
+                    // CPU only; for CUDA we store the ids tensor in
+                    // a .tensor_pair together with weight so
+                    // backward can see both device buffers.
+                    const node_id = try t.record(Node{
+                        .id = undefined,
+                        .op = .embedding,
+                        .parents = .{ self.weight.tape_node, null },
+                        .n_parents = 1,
+                        .saved = .{ .tensor_pair = .{ .a = self.weight, .b = ids } },
+                    });
+                    output.requires_grad = true;
+                    output.tape_node = node_id;
+                }
+            }
+            return output;
+        }
         const n_ids = totalElements(ids.shape);
         const output_shape = switch (ids.shape.ndim()) {
             1 => Shape.init2D(n_ids, self.d_model),

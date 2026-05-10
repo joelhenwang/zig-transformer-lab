@@ -48,6 +48,7 @@ const ops_reduce = lab.ops.reduce;
 const ops_matmul = lab.ops.matmul;
 const ops_softmax = lab.ops.softmax;
 const Tape = lab.Tape;
+const Embedding = lab.nn.embedding.Embedding;
 
 // -- Io plumbing (shared with oracle tests; see tests/integration_oracle.zig) -----
 //
@@ -1682,4 +1683,207 @@ test "cuda ops_softmax.softmax: oracle softmax_3d_last_axis forward + backward p
     var dx_cpu = try x_gpu.grad.?.*.toCpu(alloc);
     defer dx_cpu.deinit(alloc);
     try oracle.expectClose(dx_cpu, expect_dx, .{ .rel_tol = 1e-4, .abs_tol = 1e-4 });
+}
+
+// ---------------------------------------------------------------------------
+// PR-mu: embedding (forward gather + backward scatter-add) and AdamW
+// ---------------------------------------------------------------------------
+
+test "cuda dispatch embeddingForward: oracle embedding_3d forward parity" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "embedding");
+
+    const alloc = testing.allocator;
+
+    // Oracle fixture: weight (6, 4), ids (2, 3), output (2, 3, 4).
+    // Note: input_0 is the weight; input_1 is the ids.
+    var weight_cpu = try oracle.loadTensor(alloc, io, fixturePath("embedding_3d", "input_0.ztlt"));
+    defer weight_cpu.deinit(alloc);
+    var ids_cpu = try oracle.loadTensor(alloc, io, fixturePath("embedding_3d", "input_1.ztlt"));
+    defer ids_cpu.deinit(alloc);
+    var expect_y = try oracle.loadTensor(alloc, io, fixturePath("embedding_3d", "output.ztlt"));
+    defer expect_y.deinit(alloc);
+
+    var weight_gpu = try weight_cpu.toCuda(&ctx);
+    defer weight_gpu.storage.deinit(alloc);
+    var ids_gpu = try ids_cpu.toCuda(&ctx);
+    defer ids_gpu.storage.deinit(alloc);
+
+    var y_gpu = try dispatch.embeddingForward(weight_gpu, ids_gpu);
+    defer y_gpu.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    var y_cpu = try y_gpu.toCpu(alloc);
+    defer y_cpu.deinit(alloc);
+    // embedding is a plain gather; bit-exact under f32.
+    try oracle.expectClose(y_cpu, expect_y, .{ .rel_tol = 0.0, .abs_tol = 0.0 });
+}
+
+test "cuda dispatch embeddingBackward: scatter-add with repeated ids" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "embedding");
+
+    const alloc = testing.allocator;
+
+    // Hand-crafted: ids = [1, 0, 1] (id 1 appears twice — stresses atomicAdd).
+    // grad_out[0] = [1, 2, 3, 4]   -> adds to grad_weight[1]
+    // grad_out[1] = [10, 20, 30, 40] -> adds to grad_weight[0]
+    // grad_out[2] = [100, 200, 300, 400] -> adds to grad_weight[1]
+    // Expected grad_weight:
+    //   row 0 = [10, 20, 30, 40]
+    //   row 1 = [101, 202, 303, 404]
+    //   row 2 = [0, 0, 0, 0]
+    const V: usize = 3;
+    const D: usize = 4;
+
+    var ids = try cudaFromSlice(&ctx, Shape.init1D(3), &[_]f32{ 1, 0, 1 });
+    defer ids.storage.deinit(alloc);
+    var grad_out = try cudaFromSlice(&ctx, Shape.init2D(3, 4), &[_]f32{
+        1, 2, 3, 4,
+        10, 20, 30, 40,
+        100, 200, 300, 400,
+    });
+    defer grad_out.storage.deinit(alloc);
+
+    var grad_weight = try dispatch.embeddingBackward(ids, grad_out, V);
+    defer grad_weight.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    var gw_cpu = try grad_weight.toCpu(alloc);
+    defer gw_cpu.deinit(alloc);
+    const expected = [_]f32{
+        10, 20, 30, 40,
+        101, 202, 303, 404,
+        0, 0, 0, 0,
+    };
+    for (0..V * D) |i| try testing.expectEqual(expected[i], gw_cpu.data[i]);
+}
+
+test "cuda Embedding.forward: oracle embedding_3d forward + backward parity" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+    _ = try module.loadPtxFromFile(&ctx, io, "embedding");
+
+    const alloc = testing.allocator;
+
+    var weight_cpu = try oracle.loadTensor(alloc, io, fixturePath("embedding_3d", "input_0.ztlt"));
+    defer weight_cpu.deinit(alloc);
+    var ids_cpu = try oracle.loadTensor(alloc, io, fixturePath("embedding_3d", "input_1.ztlt"));
+    defer ids_cpu.deinit(alloc);
+    var expect_y = try oracle.loadTensor(alloc, io, fixturePath("embedding_3d", "output.ztlt"));
+    defer expect_y.deinit(alloc);
+    var expect_dw = try oracle.loadTensor(alloc, io, fixturePath("embedding_3d", "grad_input_0.ztlt"));
+    defer expect_dw.deinit(alloc);
+
+    // Build an Embedding by hand with CUDA weight (init does CPU randn).
+    var weight_gpu = try weight_cpu.toCuda(&ctx);
+    defer weight_gpu.storage.deinit(alloc);
+    weight_gpu.requires_grad = true;
+    weight_gpu.param_id = 7;
+
+    var ids_gpu = try ids_cpu.toCuda(&ctx);
+    defer ids_gpu.storage.deinit(alloc);
+
+    var tape = Tape.init(alloc);
+    defer tape.deinit();
+    _ = try tape.trackLeaf(&weight_gpu);
+
+    const embed = Embedding{
+        .weight = weight_gpu,
+        .allocator = alloc,
+        .vocab_size = weight_gpu.shape.dims[0],
+        .d_model = weight_gpu.shape.dims[1],
+    };
+
+    var y = try embed.forward(ids_gpu, &tape);
+    defer y.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    {
+        var y_cpu_back = try y.toCpu(alloc);
+        defer y_cpu_back.deinit(alloc);
+        try oracle.expectClose(y_cpu_back, expect_y, .{ .rel_tol = 0.0, .abs_tol = 0.0 });
+    }
+
+    // Backward via sumAll loss.
+    var loss = try ops_reduce.sumAll(alloc, y, &tape);
+    defer loss.storage.deinit(alloc);
+    try tape.backward(&loss);
+    try ctx.synchronize();
+
+    var dw_cpu = try weight_gpu.grad.?.*.toCpu(alloc);
+    defer dw_cpu.deinit(alloc);
+    try oracle.expectClose(dw_cpu, expect_dw, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
+}
+
+test "cuda dispatch adamwStep: one update matches CPU reference" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "adamw");
+
+    const alloc = testing.allocator;
+
+    // Deterministic inputs.
+    const N: usize = 8;
+    const param_init = [_]f32{ 0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7, -0.8 };
+    const grad_vals = [_]f32{ 0.01, 0.02, -0.03, 0.04, -0.05, 0.06, -0.07, 0.08 };
+
+    // GPU step.
+    var p_gpu = try cudaFromSlice(&ctx, Shape.init1D(N), &param_init);
+    defer p_gpu.storage.deinit(alloc);
+    var g_gpu = try cudaFromSlice(&ctx, Shape.init1D(N), &grad_vals);
+    defer g_gpu.storage.deinit(alloc);
+    var m_gpu = try dispatch.zerosOn(&ctx, Shape.init1D(N));
+    defer m_gpu.storage.deinit(alloc);
+    var v_gpu = try dispatch.zerosOn(&ctx, Shape.init1D(N));
+    defer v_gpu.storage.deinit(alloc);
+
+    const lr: f32 = 1e-3;
+    const beta1: f32 = 0.9;
+    const beta2: f32 = 0.999;
+    const eps: f32 = 1e-8;
+    const wd: f32 = 0.1;
+    const t: u32 = 1;
+    const bc1: f32 = @floatCast(1.0 / (1.0 - std.math.pow(f64, @floatCast(beta1), @floatFromInt(t))));
+    const bc2: f32 = @floatCast(1.0 / (1.0 - std.math.pow(f64, @floatCast(beta2), @floatFromInt(t))));
+
+    try dispatch.adamwStep(p_gpu, g_gpu, m_gpu, v_gpu, .{
+        .lr = lr,
+        .beta1 = beta1,
+        .beta2 = beta2,
+        .eps = eps,
+        .weight_decay = wd,
+        .bc1 = bc1,
+        .bc2 = bc2,
+    });
+    try ctx.synchronize();
+
+    // CPU reference (same formula as AdamW.step's CPU branch).
+    var p_ref: [N]f32 = param_init;
+    var m_ref: [N]f32 = [_]f32{0} ** N;
+    var v_ref: [N]f32 = [_]f32{0} ** N;
+    for (0..N) |i| {
+        const g = grad_vals[i];
+        m_ref[i] = beta1 * m_ref[i] + (1.0 - beta1) * g;
+        v_ref[i] = beta2 * v_ref[i] + (1.0 - beta2) * g * g;
+        const m_hat = m_ref[i] * bc1;
+        const v_hat = v_ref[i] * bc2;
+        p_ref[i] -= lr * (m_hat / (@sqrt(v_hat) + eps) + wd * p_ref[i]);
+    }
+
+    var p_back = try p_gpu.toCpu(alloc);
+    defer p_back.deinit(alloc);
+    for (0..N) |i| try testing.expectApproxEqAbs(p_ref[i], p_back.data[i], 1e-6);
 }

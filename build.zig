@@ -200,13 +200,13 @@ const kernel_names = [_][]const u8{
     "elementwise",
     "reduce",
     "softmax",
+    "embedding",
+    "adamw",
     // Future PRs will add:
     // "layernorm",
     // "gelu",
-    // "embedding",
     // "causal_mask",
     // "ce_loss",
-    // "adamw",
 };
 
 /// Creates nvcc compile commands for each kernel in kernel_names,

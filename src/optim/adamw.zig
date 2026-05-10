@@ -41,6 +41,11 @@ const LabError = @import("../core/errors.zig").LabError;
 const Tensor = @import("../tensor/tensor.zig").Tensor;
 const Optimizer = @import("optimizer.zig").Optimizer;
 const ParamId = @import("../nn/module.zig").ParamId;
+// PR-mu: AdamW.step routes CUDA params to a single-kernel update
+// (backend.cuda.dispatch.adamwStep). Moment state (m, v) is
+// allocated on the same device as the param on first encounter.
+const ops_create = @import("../tensor/ops/create.zig");
+const cuda_dispatch = @import("../backend/cuda/dispatch.zig");
 
 pub const AdamWConfig = struct {
     lr: f32 = 1e-3,
@@ -118,17 +123,31 @@ pub const AdamW = struct {
             // rather than silently key on an unstable pointer.
             const key = param.param_id orelse return error.InvalidArgument;
 
-            // Get or create state
+            // Get or create state. Moment tensors live on the same
+            // device as the parameter (PR-mu) — zerosLike routes to
+            // cuMemsetD32_v2 for CUDA params.
             if (!self.state.contains(key)) {
-                var m = try Tensor.init(self.allocator, param.shape);
-                m.fill(0.0);
-                var v = try Tensor.init(self.allocator, param.shape);
-                v.fill(0.0);
+                const m = try ops_create.zerosLike(self.allocator, param.*);
+                const v = try ops_create.zerosLike(self.allocator, param.*);
                 try self.state.put(key, .{ .m = m, .v = v });
             }
             const s = self.state.getPtr(key).?;
 
-            // Update moments: m = β₁m + (1-β₁)g, v = β₂v + (1-β₂)g²
+            // PR-mu: CUDA path uses a single kernel launch per param.
+            if (param.device == .cuda) {
+                try cuda_dispatch.adamwStep(param.*, grad.*, s.m, s.v, .{
+                    .lr = lr,
+                    .beta1 = beta1,
+                    .beta2 = beta2,
+                    .eps = eps,
+                    .weight_decay = wd,
+                    .bc1 = bc1,
+                    .bc2 = bc2,
+                });
+                continue;
+            }
+
+            // CPU path.
             for (param.data, grad.data, s.m.data, s.v.data) |*p, g, *m, *vel| {
                 m.* = beta1 * m.* + (1.0 - beta1) * g;
                 vel.* = beta2 * vel.* + (1.0 - beta2) * g * g;
@@ -147,7 +166,17 @@ pub const AdamW = struct {
     pub fn zeroGrad(_: *anyopaque, params: []const *Tensor) void {
         for (params) |param| {
             if (param.grad) |g| {
-                g.fill(0.0);
+                if (g.device == .cuda) {
+                    // PR-mu: zero CUDA gradient buffer via
+                    // cuMemsetD32_v2 (bit pattern 0 = f32 0.0).
+                    // Errors from memset are unreachable in practice
+                    // (no new alloc); we log and continue.
+                    cuda_dispatch.fillZeros(g.*) catch |err| {
+                        std.log.warn("AdamW.zeroGrad: fillZeros failed: {s}", .{@errorName(err)});
+                    };
+                } else {
+                    g.fill(0.0);
+                }
             }
         }
     }

@@ -529,6 +529,13 @@ pub fn zerosOn(ctx: *const CudaContext, s: Shape) LabError!Tensor {
     return wrapContiguousOutput(out_buf, s, false);
 }
 
+/// Fill an existing CUDA tensor with zeros in-place. Intended for
+/// gradient buffers between optimizer steps (AdamW.zeroGrad).
+pub fn fillZeros(t: Tensor) LabError!void {
+    const buf = try requireCudaBuffer(t);
+    try fillBits(buf, 0, buf.len);
+}
+
 /// Allocate a fresh CUDA Tensor of the given shape on `ctx`, initialised
 /// to 1.0. The bit pattern of f32 1.0 is 0x3f800000; cuMemsetD32_v2
 /// writes the same 4-byte pattern to every element, which is a valid
@@ -849,4 +856,209 @@ pub fn logSoftmaxLastAxis(x: Tensor) LabError!Tensor {
 
     try launchSoftmaxKernel(ctx, "log_softmax_last", x_buf, out_buf, num_rows, C);
     return wrapContiguousOutput(out_buf, x.shape, x.requires_grad);
+}
+
+// ---------------------------------------------------------------------------
+// Embedding (PR-mu)
+// ---------------------------------------------------------------------------
+//
+// Forward: out[i, j] = weight[round(ids[i]), j]
+// Backward: grad_weight[round(ids[i]), j] += grad_out[i, j]   (atomicAdd)
+//
+// Inputs must be contiguous. `ids` is a flat f32 tensor (our Tensor
+// is f32-only) of any rank; the kernel treats it as length N =
+// totalElements(ids.shape) and produces output of shape (..., D)
+// where the leading dims come from ids and D is the inner dim of
+// weight.
+
+const EMBEDDING_BLOCK_X: c_uint = 256;
+
+/// Forward gather. `weight : (V, D)`, `ids : (...,)`. Output shape
+/// is `ids.shape ++ (D,)`; i.e. one extra trailing axis.
+pub fn embeddingForward(weight: Tensor, ids: Tensor) LabError!Tensor {
+    try requireSameDevice(weight, ids);
+    if (weight.shape.ndim() != 2) return error.ShapeMismatch;
+    if (!shape_isContiguous(weight.shape, weight.strides)) return error.InvalidLayout;
+    if (!shape_isContiguous(ids.shape, ids.strides)) return error.InvalidLayout;
+
+    const V = weight.shape.dims[0];
+    const D = weight.shape.dims[1];
+    const N = totalElements(ids.shape);
+
+    // Build output shape: ids.shape ++ (D,).
+    const ids_ndim = ids.shape.ndim();
+    if (ids_ndim + 1 > 4) return error.ShapeMismatch; // Shape max rank = 4
+    var out_dims: [4]usize = .{ 1, 1, 1, 1 };
+    for (0..ids_ndim) |i| out_dims[i] = ids.shape.dims[i];
+    out_dims[ids_ndim] = D;
+    const out_shape = Shape{ .dims = out_dims, .rank = @intCast(ids_ndim) };
+
+    const w_buf = try requireCudaBuffer(weight);
+    const id_buf = try requireCudaBuffer(ids);
+    const ctx = w_buf.ctx;
+    const mut_ctx: *CudaContext = @constCast(ctx);
+
+    var out_buf = try DeviceBuffer.alloc(ctx, N * D);
+    errdefer out_buf.deinit();
+
+    const kfn = try module.getKernel(mut_ctx, "embedding", "embedding_forward");
+    const N_arg: c_uint = @intCast(N);
+    const D_arg: c_uint = @intCast(D);
+    const V_arg: c_uint = @intCast(V);
+    const args = [_]?*anyopaque{
+        @constCast(@as(*const anyopaque, @ptrCast(&w_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&id_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&out_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&N_arg))),
+        @constCast(@as(*const anyopaque, @ptrCast(&D_arg))),
+        @constCast(@as(*const anyopaque, @ptrCast(&V_arg))),
+    };
+    const total = N * D;
+    const grid_x: c_uint = @intCast((total + EMBEDDING_BLOCK_X - 1) / EMBEDDING_BLOCK_X);
+    try module.launch(
+        mut_ctx,
+        kfn,
+        .{ grid_x, 1, 1 },
+        .{ EMBEDDING_BLOCK_X, 1, 1 },
+        0,
+        &args,
+    );
+    return wrapContiguousOutput(out_buf, out_shape, weight.requires_grad);
+}
+
+/// Backward scatter-add. Takes `ids : (...,)`, `grad_out : (..., D)`,
+/// and vocabulary size `V`. Returns `grad_weight : (V, D)`
+/// zero-initialised + scatter-added.
+pub fn embeddingBackward(ids: Tensor, grad_out: Tensor, V: usize) LabError!Tensor {
+    try requireSameDevice(ids, grad_out);
+    if (!shape_isContiguous(ids.shape, ids.strides)) return error.InvalidLayout;
+    if (!shape_isContiguous(grad_out.shape, grad_out.strides)) return error.InvalidLayout;
+    const grad_ndim = grad_out.shape.ndim();
+    if (grad_ndim < 1) return error.ShapeMismatch;
+    const D = grad_out.shape.dims[grad_ndim - 1];
+    const N = totalElements(grad_out.shape) / D;
+
+    const ids_n = totalElements(ids.shape);
+    if (ids_n != N) return error.ShapeMismatch;
+
+    const id_buf = try requireCudaBuffer(ids);
+    const g_buf = try requireCudaBuffer(grad_out);
+    const ctx = id_buf.ctx;
+    const mut_ctx: *CudaContext = @constCast(ctx);
+
+    var gw_buf = try DeviceBuffer.alloc(ctx, V * D);
+    errdefer gw_buf.deinit();
+    try fillBits(gw_buf, 0, V * D);
+
+    const kfn = try module.getKernel(mut_ctx, "embedding", "embedding_backward");
+    const N_arg: c_uint = @intCast(N);
+    const D_arg: c_uint = @intCast(D);
+    const V_arg: c_uint = @intCast(V);
+    const args = [_]?*anyopaque{
+        @constCast(@as(*const anyopaque, @ptrCast(&id_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&g_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&gw_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&N_arg))),
+        @constCast(@as(*const anyopaque, @ptrCast(&D_arg))),
+        @constCast(@as(*const anyopaque, @ptrCast(&V_arg))),
+    };
+    const total = N * D;
+    const grid_x: c_uint = @intCast((total + EMBEDDING_BLOCK_X - 1) / EMBEDDING_BLOCK_X);
+    try module.launch(
+        mut_ctx,
+        kfn,
+        .{ grid_x, 1, 1 },
+        .{ EMBEDDING_BLOCK_X, 1, 1 },
+        0,
+        &args,
+    );
+    return wrapContiguousOutput(gw_buf, Shape.init2D(V, D), false);
+}
+
+// ---------------------------------------------------------------------------
+// AdamW step (PR-mu)
+// ---------------------------------------------------------------------------
+//
+// In-place per-parameter AdamW update. The host computes the bias-
+// correction scalars `bc1 = 1 / (1 - beta1^t)` and `bc2 = 1 / (1 - beta2^t)`
+// from the current step count, then launches this kernel once per
+// parameter with its (param, grad, m, v) buffers and the four
+// hyperparameters.
+
+const ADAMW_BLOCK_X: c_uint = 256;
+
+pub const AdamwConfig = struct {
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    weight_decay: f32,
+    /// Bias-correction scalars for the current step t. Computed on
+    /// the host (simple pow loop) and passed in by value.
+    bc1: f32,
+    bc2: f32,
+};
+
+/// One AdamW step over `param`, `grad`, `m`, `v`. All four must be
+/// contiguous, same-shape CUDA tensors. Updates `param`, `m`, `v`
+/// in place. `grad` is read-only.
+pub fn adamwStep(
+    param: Tensor,
+    grad: Tensor,
+    m: Tensor,
+    v: Tensor,
+    cfg: AdamwConfig,
+) LabError!void {
+    try requireSameDevice(param, grad);
+    try requireSameDevice(param, m);
+    try requireSameDevice(param, v);
+    if (!shape_equals(param.shape, grad.shape)) return error.ShapeMismatch;
+    if (!shape_equals(param.shape, m.shape)) return error.ShapeMismatch;
+    if (!shape_equals(param.shape, v.shape)) return error.ShapeMismatch;
+    if (!shape_isContiguous(param.shape, param.strides)) return error.InvalidLayout;
+    if (!shape_isContiguous(grad.shape, grad.strides)) return error.InvalidLayout;
+    if (!shape_isContiguous(m.shape, m.strides)) return error.InvalidLayout;
+    if (!shape_isContiguous(v.shape, v.strides)) return error.InvalidLayout;
+
+    const p_buf = try requireCudaBuffer(param);
+    const g_buf = try requireCudaBuffer(grad);
+    const m_buf = try requireCudaBuffer(m);
+    const v_buf = try requireCudaBuffer(v);
+    const ctx = p_buf.ctx;
+    const mut_ctx: *CudaContext = @constCast(ctx);
+
+    const N = totalElements(param.shape);
+    const kfn = try module.getKernel(mut_ctx, "adamw", "adamw_step");
+
+    const lr = cfg.lr;
+    const b1 = cfg.beta1;
+    const b2 = cfg.beta2;
+    const eps = cfg.eps;
+    const wd = cfg.weight_decay;
+    const bc1 = cfg.bc1;
+    const bc2 = cfg.bc2;
+    const N_arg: c_uint = @intCast(N);
+    const args = [_]?*anyopaque{
+        @constCast(@as(*const anyopaque, @ptrCast(&p_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&g_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&m_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&v_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&lr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&b1))),
+        @constCast(@as(*const anyopaque, @ptrCast(&b2))),
+        @constCast(@as(*const anyopaque, @ptrCast(&eps))),
+        @constCast(@as(*const anyopaque, @ptrCast(&wd))),
+        @constCast(@as(*const anyopaque, @ptrCast(&bc1))),
+        @constCast(@as(*const anyopaque, @ptrCast(&bc2))),
+        @constCast(@as(*const anyopaque, @ptrCast(&N_arg))),
+    };
+    const grid_x: c_uint = @intCast((N + ADAMW_BLOCK_X - 1) / ADAMW_BLOCK_X);
+    try module.launch(
+        mut_ctx,
+        kfn,
+        .{ grid_x, 1, 1 },
+        .{ ADAMW_BLOCK_X, 1, 1 },
+        0,
+        &args,
+    );
 }
