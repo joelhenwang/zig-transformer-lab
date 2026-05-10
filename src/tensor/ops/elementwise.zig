@@ -64,6 +64,10 @@ const Node = @import("../../autograd/node.zig").Node;
 const OpKind = @import("../../autograd/node.zig").OpKind;
 const SavedData = @import("../../autograd/node.zig").SavedData;
 const NodeId = @import("../tensor.zig").NodeId;
+// PR-η.2: elementwise dispatch routes CUDA inputs to GPU kernels via
+// src/backend/cuda/dispatch.zig. The CPU ops fall back to this file's
+// loop-based implementations when inputs live on CPU.
+const cuda_dispatch = @import("../../backend/cuda/dispatch.zig");
 
 /// Map a flat output index to a multi-dimensional input index,
 /// accounting for broadcasting. For each dimension: if the input
@@ -99,7 +103,21 @@ fn broadcastIndex(out_idx: usize, out_shape: Shape, in_shape: Shape, in_strides:
 }
 
 /// Broadcast elementwise addition: out[i,j,...] = a[i,j,...] + b[i,j,...]
+///
+/// Device dispatch (PR-η.2):
+///   - CPU inputs  -> CPU loop below.
+///   - CUDA inputs -> forward the call to backend.cuda.dispatch.add
+///     and record the result on the tape. The CUDA dispatch path
+///     requires same-shape contiguous inputs for now; broadcast
+///     inputs on CUDA are PR-θ territory.
 pub fn add(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Tensor {
+    if (a.device == .cuda or b.device == .cuda) {
+        var out = try cuda_dispatch.add(a, b);
+        // Tape recording uses the same path as CPU — cloneTensorData
+        // now handles CUDA snapshots via DtoD copy.
+        try recordBinaryOp(tape, &out, &a, &b, .add);
+        return out;
+    }
     const out_shape = try broadcastShapes(a.shape, b.shape);
     var out = try Tensor.init(allocator, out_shape);
     const n = totalElements(out_shape);

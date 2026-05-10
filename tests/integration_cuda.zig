@@ -42,6 +42,8 @@ const Storage = lab.Storage;
 const Shape = lab.shape.Shape;
 const computeStrides = lab.shape.computeStrides;
 const oracle = lab.testing_utils.oracle;
+const ops_elementwise = lab.ops.elementwise;
+const Tape = lab.Tape;
 
 // -- Io plumbing (shared with oracle tests; see tests/integration_oracle.zig) -----
 //
@@ -922,4 +924,128 @@ test "cuda dispatch add: CPU input returns DeviceMismatch" {
     defer b.storage.deinit(testing.allocator);
 
     try testing.expectError(error.DeviceMismatch, dispatch.add(a, b));
+}
+
+// ---------------------------------------------------------------------------
+// PR-eta.2: ops_elementwise.add routes to CUDA dispatch + tape records
+// ---------------------------------------------------------------------------
+//
+// PR-eta shipped CUDA kernels behind a separate dispatch module
+// (backend.cuda.dispatch). PR-eta.2 wires the CPU-facing op surface
+// (src/tensor/ops/elementwise.zig) so existing call sites get CUDA
+// execution transparently when they pass CUDA tensors. It also
+// extends tape.cloneTensorData to DtoD-copy CUDA saved tensors into
+// tape-owned DeviceBuffers (so backward can read them after the
+// caller frees the sources).
+//
+// Full backward parity vs oracle add_2d grad_input_*.ztlt requires
+// (a) a CUDA code path through ops_reduce.sumToShape for the
+// identity case and (b) either a CUDA sumAll kernel for the
+// standard backwardThroughSum idiom or a manual grad_seed injection
+// helper. Both are scoped to a later PR; this test asserts only the
+// forward-with-tape plumbing.
+
+test "cuda ops_elementwise.add: routes to CUDA and records on tape" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+
+    const alloc = testing.allocator;
+
+    // Build two CUDA tensors with requires_grad=true so ops_elementwise.add
+    // records on the tape.
+    var a_gpu = try cudaFromSlice(&ctx, Shape.init2D(2, 3), &[_]f32{ 1, 2, 3, 4, 5, 6 });
+    defer a_gpu.storage.deinit(alloc);
+    a_gpu.requires_grad = true;
+    var b_gpu = try cudaFromSlice(&ctx, Shape.init2D(2, 3), &[_]f32{ 10, 20, 30, 40, 50, 60 });
+    defer b_gpu.storage.deinit(alloc);
+    b_gpu.requires_grad = true;
+
+    var tape = Tape.init(alloc);
+    defer tape.deinit();
+    _ = try tape.trackLeaf(&a_gpu);
+    _ = try tape.trackLeaf(&b_gpu);
+
+    // The call routes to cuda_dispatch.add (PR-eta.2) and then
+    // recordBinaryOp clones the inputs into tape-owned DeviceBuffers
+    // via cloneTensorData's new .cuda branch.
+    var out = try ops_elementwise.add(alloc, a_gpu, b_gpu, &tape);
+    defer out.storage.deinit(alloc);
+
+    // Output is a CUDA tensor of the same shape.
+    try testing.expect(out.device == .cuda);
+    try testing.expect(out.requires_grad);
+    try testing.expect(out.tape_node != null);
+
+    // Sanity-check forward math by round-tripping to host.
+    try ctx.synchronize();
+    var out_cpu = try out.toCpu(alloc);
+    defer out_cpu.deinit(alloc);
+    for (0..6) |i| {
+        const a_vals = [_]f32{ 1, 2, 3, 4, 5, 6 };
+        const b_vals = [_]f32{ 10, 20, 30, 40, 50, 60 };
+        try testing.expectEqual(a_vals[i] + b_vals[i], out_cpu.data[i]);
+    }
+
+    // Tape state: 2 leaf nodes + 1 add node = 3 total.
+    try testing.expectEqual(@as(usize, 3), tape.nodes.items.len);
+    // The add node owns two kept-alive CUDA buffers (copies of a, b).
+    try testing.expectEqual(@as(usize, 2), tape.kept_alive_cuda.items.len);
+    // No CPU buffers kept alive on this purely-CUDA path.
+    try testing.expectEqual(@as(usize, 0), tape.kept_alive.items.len);
+}
+
+test "cuda ops_elementwise.add: tape keeps CUDA buffers alive after source deinit" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+
+    const alloc = testing.allocator;
+
+    var tape = Tape.init(alloc);
+    defer tape.deinit();
+
+    // Scope: build sources, add with tape, then destroy sources. The
+    // tape-owned snapshots in kept_alive_cuda must still be readable
+    // after the scope exits (compute-sanitizer catches the
+    // use-after-free otherwise).
+    {
+        var a_gpu = try cudaFromSlice(&ctx, Shape.init1D(4), &[_]f32{ 1, 2, 3, 4 });
+        defer a_gpu.storage.deinit(alloc);
+        a_gpu.requires_grad = true;
+        var b_gpu = try cudaFromSlice(&ctx, Shape.init1D(4), &[_]f32{ 10, 20, 30, 40 });
+        defer b_gpu.storage.deinit(alloc);
+        b_gpu.requires_grad = true;
+
+        _ = try tape.trackLeaf(&a_gpu);
+        _ = try tape.trackLeaf(&b_gpu);
+
+        var out = try ops_elementwise.add(alloc, a_gpu, b_gpu, &tape);
+        out.storage.deinit(alloc); // free the output eagerly too
+    }
+
+    // After the inner scope returns:
+    //  - a_gpu and b_gpu are deinited (their device buffers freed).
+    //  - The tape's kept_alive_cuda still owns copies. If
+    //    cloneTensorData had forgotten to allocate a fresh buffer
+    //    and instead aliased the caller's, the next line would
+    //    dereference a freed CUdeviceptr.
+    try testing.expectEqual(@as(usize, 2), tape.kept_alive_cuda.items.len);
+
+    // Read one of the kept-alive buffers back via a non-owning
+    // DeviceBuffer view to confirm it still holds the original bytes.
+    const saved = tape.kept_alive_cuda.items[0];
+    var host_back: [4]f32 = undefined;
+    const view = DeviceBuffer{
+        .ctx = saved.ctx,
+        .ptr = saved.ptr,
+        .len = saved.len,
+        .owned = false,
+    };
+    try view.copyToHost(&host_back);
+    try testing.expectEqualSlices(f32, &[_]f32{ 1, 2, 3, 4 }, &host_back);
 }

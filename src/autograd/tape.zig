@@ -78,6 +78,11 @@ const OpKind = node_mod.OpKind;
 const Node = node_mod.Node;
 const SavedData = node_mod.SavedData;
 const backward_mod = @import("backward.zig");
+// PR-η.2: the tape DtoD-copies CUDA saved tensors into tape-owned
+// DeviceBuffers so backward can read them even after the caller's
+// source tensors have been freed. DeviceBuffer owns the CUdeviceptr
+// and routes deinit through cuMemFree_v2.
+const DeviceBuffer = @import("../backend/cuda/mem.zig").DeviceBuffer;
 
 // ---------------------------------------------------------------------------
 // Tape — the autograd engine
@@ -129,6 +134,14 @@ pub const Tape = struct {
     /// until tape.deinit() — the tape takes ownership.
     kept_alive: std.ArrayList([]f32),
 
+    /// CUDA counterpart of `kept_alive`: DeviceBuffers owned by the
+    /// tape, freed in `deinit` via `DeviceBuffer.deinit` (which calls
+    /// cuMemFree_v2). Every CUDA tensor snapshot stored in SavedData
+    /// points at one of these tape-owned buffers; caller tensors can
+    /// be freed immediately after the forward op returns, same
+    /// contract as the CPU path.
+    kept_alive_cuda: std.ArrayList(DeviceBuffer),
+
     /// The allocator used for all tape allocations (nodes, gradient tensors).
     allocator: std.mem.Allocator,
 
@@ -160,6 +173,7 @@ pub const Tape = struct {
             .grad_map = std.AutoHashMap(NodeId, *Tensor).init(allocator),
             .leaf_map = std.AutoHashMap(NodeId, *Tensor).init(allocator),
             .kept_alive = .empty,
+            .kept_alive_cuda = .empty,
             .allocator = allocator,
             .next_id = 0,
             .retain_graph = false,
@@ -191,6 +205,13 @@ pub const Tape = struct {
             self.allocator.free(buf);
         }
         self.kept_alive.deinit(self.allocator);
+        // Free kept-alive CUDA buffers. DeviceBuffer.deinit only frees
+        // when `owned` is true, and we always allocate our copies as
+        // owning in cloneTensorData's CUDA branch.
+        for (self.kept_alive_cuda.items) |*buf| {
+            buf.deinit();
+        }
+        self.kept_alive_cuda.deinit(self.allocator);
         self.nodes.deinit(self.allocator);
     }
 
@@ -336,31 +357,56 @@ pub const Tape = struct {
     /// and device are preserved verbatim. The returned Tensor's
     /// `owned` / `storage.cpu.owned` are set to false — the tape
     /// owns the buffer, not this snapshot.
+    ///
+    /// CUDA branch (PR-η.2): for a CUDA tensor we allocate a new
+    /// DeviceBuffer sized to the source buffer, DtoD-copy, track it
+    /// in `kept_alive_cuda`, and return a snapshot whose
+    /// `storage.cuda` is a non-owning view of the tape-owned buffer.
+    /// The top-level `owned` compat alias stays false (PR-δ
+    /// invariant for CUDA tensors).
     fn cloneTensorData(self: *Tape, t: Tensor) LabError!Tensor {
-        // PR-δ guard: CUDA saved-tensor copies require a
-        // DeviceBuffer DtoD copy into a tape-owned device buffer, not
-        // `allocator.dupe` on a host slice. PR-η (first CUDA op PR)
-        // wires the CUDA branch. Reaching this path with a CUDA
-        // tensor today means an autograd op was registered on a CUDA
-        // input without the corresponding CUDA save-path support —
-        // return NotImplemented loudly so the gap is visible instead
-        // of silently snapshotting an empty slice and corrupting
-        // backward.
-        if (t.device == .cuda) return error.NotImplemented;
-        const copy = self.allocator.dupe(f32, t.data) catch return error.OutOfMemory;
-        self.kept_alive.append(self.allocator, copy) catch {
-            self.allocator.free(copy);
-            return error.OutOfMemory;
+        return switch (t.storage) {
+            .cpu => |s| blk: {
+                const copy = self.allocator.dupe(f32, s.data) catch return error.OutOfMemory;
+                self.kept_alive.append(self.allocator, copy) catch {
+                    self.allocator.free(copy);
+                    return error.OutOfMemory;
+                };
+                var c = t;
+                c.data = copy;
+                c.owned = false;
+                // Keep the Storage alias consistent: the snapshot
+                // should also claim to borrow (not own) the buffer.
+                c.storage = .{ .cpu = .{ .data = copy, .owned = false } };
+                break :blk c;
+            },
+            .cuda => |src_buf| blk: {
+                // Allocate a fresh owning DeviceBuffer on the same
+                // context the source lives on, DtoD copy its bytes,
+                // and transfer ownership into kept_alive_cuda.
+                var tape_buf = try DeviceBuffer.alloc(src_buf.ctx, src_buf.len);
+                errdefer tape_buf.deinit();
+                try tape_buf.copyFromDevice(src_buf);
+                self.kept_alive_cuda.append(self.allocator, tape_buf) catch {
+                    tape_buf.deinit();
+                    return error.OutOfMemory;
+                };
+                // The snapshot returned to SavedData must be
+                // non-owning (the tape owns the buffer). We recover
+                // the stored pointer/len/ctx and set owned=false.
+                const stored = self.kept_alive_cuda.items[self.kept_alive_cuda.items.len - 1];
+                var c = t;
+                c.data = &.{}; // CUDA tensors keep an empty compat alias
+                c.owned = false;
+                c.storage = .{ .cuda = .{
+                    .ctx = stored.ctx,
+                    .ptr = stored.ptr,
+                    .len = stored.len,
+                    .owned = false,
+                } };
+                break :blk c;
+            },
         };
-        var c = t;
-        c.data = copy;
-        c.owned = false;
-        // Keep the Storage alias consistent: the snapshot should also
-        // claim to borrow (not own) the buffer. We point the cpu
-        // storage at the copy so anything that goes through
-        // `storage.cpu.data` sees the tape-owned memory.
-        c.storage = .{ .cpu = .{ .data = copy, .owned = false } };
-        return c;
     }
 
     /// Allocate a tape-owned copy of a `[]const f32` (used by ce_info
