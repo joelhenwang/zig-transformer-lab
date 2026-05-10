@@ -114,16 +114,32 @@ pub fn loadPtxFromFile(
     };
     defer ctx.allocator.free(ptx_bytes);
 
-    // cuModuleLoadData wants a null-terminated blob pointer. Zig
-    // slices are not null-terminated, but the driver treats the
-    // input as PTX *text* and stops at the end-of-text marker in
-    // the PTX itself — the pointer type is `const void *`. We pass
-    // the slice pointer as a void pointer.
+    // cuModuleLoadData requires a null-terminated PTX text blob. The
+    // driver scans from the given pointer until it hits a NUL byte to
+    // determine where the PTX ends. Without the explicit terminator
+    // the driver reads past our slice end (returning error 218,
+    // "PTX JIT compilation failed", when the trailing garbage fails
+    // to parse as PTX) — exactly the first-kernel-launch failure we
+    // hit on the remote before this fix landed.
+    //
+    // We allocate a separate buffer rather than relying on ambient
+    // null bytes in the allocator's slack: Zig's GPA deliberately
+    // poisons unused bytes in safety mode, and even benign allocators
+    // give no guarantee about the byte past `ptr[len-1]`.
+    const nt = ctx.allocator.alloc(u8, ptx_bytes.len + 1) catch return error.OutOfMemory;
+    defer ctx.allocator.free(nt);
+    @memcpy(nt[0..ptx_bytes.len], ptx_bytes);
+    nt[ptx_bytes.len] = 0;
+
+    // cuModuleLoadData takes a `const void *`. The driver parses the
+    // PTX text, compiles it (PTX JIT) to SASS for the current device,
+    // and internally retains whatever it needs — we can safely free
+    // `nt` after this call returns.
     const L = bindings.loader.?;
     var module: bindings.CUmodule = null;
     try bindings.check(L.cuModuleLoadData(
         &module,
-        @ptrCast(ptx_bytes.ptr),
+        @ptrCast(nt.ptr),
     ));
     errdefer _ = L.cuModuleUnload(module);
 
