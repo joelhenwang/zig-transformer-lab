@@ -1049,3 +1049,105 @@ test "cuda ops_elementwise.add: tape keeps CUDA buffers alive after source deini
     try view.copyToHost(&host_back);
     try testing.expectEqualSlices(f32, &[_]f32{ 1, 2, 3, 4 }, &host_back);
 }
+
+// ---------------------------------------------------------------------------
+// PR-theta: broadcasting elementwise ops on CUDA (forward)
+// ---------------------------------------------------------------------------
+
+test "cuda dispatch addBroadcast: oracle add_broadcast_2d_1d forward parity" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+
+    const alloc = testing.allocator;
+
+    // Oracle fixture: (2,3) + (3,) -> (2,3) broadcast add
+    var a_cpu = try oracle.loadTensor(alloc, io, fixturePath("add_broadcast_2d_1d", "input_0.ztlt"));
+    defer a_cpu.deinit(alloc);
+    var b_cpu = try oracle.loadTensor(alloc, io, fixturePath("add_broadcast_2d_1d", "input_1.ztlt"));
+    defer b_cpu.deinit(alloc);
+    var expect_y = try oracle.loadTensor(alloc, io, fixturePath("add_broadcast_2d_1d", "output.ztlt"));
+    defer expect_y.deinit(alloc);
+
+    var a_gpu = try a_cpu.toCuda(&ctx);
+    defer a_gpu.storage.deinit(alloc);
+    var b_gpu = try b_cpu.toCuda(&ctx);
+    defer b_gpu.storage.deinit(alloc);
+
+    var y_gpu = try dispatch.addBroadcast(a_gpu, b_gpu);
+    defer y_gpu.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    var y_cpu = try y_gpu.toCpu(alloc);
+    defer y_cpu.deinit(alloc);
+
+    try oracle.expectClose(y_cpu, expect_y, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
+}
+
+test "cuda ops_elementwise.add: picks fast path vs broadcast path" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+
+    const alloc = testing.allocator;
+
+    // Same-shape contiguous: fast path.
+    {
+        var a = try cudaFromSlice(&ctx, Shape.init2D(2, 3), &[_]f32{ 1, 2, 3, 4, 5, 6 });
+        defer a.storage.deinit(alloc);
+        var b = try cudaFromSlice(&ctx, Shape.init2D(2, 3), &[_]f32{ 10, 20, 30, 40, 50, 60 });
+        defer b.storage.deinit(alloc);
+        var y = try ops_elementwise.add(alloc, a, b, null);
+        defer y.storage.deinit(alloc);
+        var y_cpu = try y.toCpu(alloc);
+        defer y_cpu.deinit(alloc);
+        for (0..6) |i| {
+            const a_vals = [_]f32{ 1, 2, 3, 4, 5, 6 };
+            const b_vals = [_]f32{ 10, 20, 30, 40, 50, 60 };
+            try testing.expectEqual(a_vals[i] + b_vals[i], y_cpu.data[i]);
+        }
+    }
+
+    // (2,3) + (3,) broadcast: stride-aware path.
+    {
+        var a = try cudaFromSlice(&ctx, Shape.init2D(2, 3), &[_]f32{ 1, 2, 3, 4, 5, 6 });
+        defer a.storage.deinit(alloc);
+        var b = try cudaFromSlice(&ctx, Shape.init1D(3), &[_]f32{ 100, 200, 300 });
+        defer b.storage.deinit(alloc);
+        var y = try ops_elementwise.add(alloc, a, b, null);
+        defer y.storage.deinit(alloc);
+        var y_cpu = try y.toCpu(alloc);
+        defer y_cpu.deinit(alloc);
+        // Expected: [1+100, 2+200, 3+300, 4+100, 5+200, 6+300]
+        const expected = [_]f32{ 101, 202, 303, 104, 205, 306 };
+        for (0..6) |i| try testing.expectEqual(expected[i], y_cpu.data[i]);
+    }
+}
+
+test "cuda dispatch mulBroadcast: (1,3) * (2,3) expands the size-1 axis" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+
+    const alloc = testing.allocator;
+    var a = try cudaFromSlice(&ctx, Shape.init2D(1, 3), &[_]f32{ 2, 3, 5 });
+    defer a.storage.deinit(alloc);
+    var b = try cudaFromSlice(&ctx, Shape.init2D(2, 3), &[_]f32{ 1, 10, 100, 1000, 10000, 100000 });
+    defer b.storage.deinit(alloc);
+
+    var y = try dispatch.mulBroadcast(a, b);
+    defer y.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    var y_cpu = try y.toCpu(alloc);
+    defer y_cpu.deinit(alloc);
+    // Expected: [2*1, 3*10, 5*100, 2*1000, 3*10000, 5*100000]
+    const expected = [_]f32{ 2, 30, 500, 2000, 30000, 500000 };
+    for (0..6) |i| try testing.expectEqual(expected[i], y_cpu.data[i]);
+}

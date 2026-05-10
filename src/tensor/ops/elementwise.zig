@@ -68,6 +68,34 @@ const NodeId = @import("../tensor.zig").NodeId;
 // src/backend/cuda/dispatch.zig. The CPU ops fall back to this file's
 // loop-based implementations when inputs live on CPU.
 const cuda_dispatch = @import("../../backend/cuda/dispatch.zig");
+const shape_isContiguous = @import("../shape.zig").isContiguous;
+
+/// Pick the right CUDA elementwise entry point based on input
+/// shape / layout. Same-shape + contiguous inputs take the fast
+/// flat-index path; anything else (broadcast, transposed, sliced)
+/// goes through the stride-aware rank-4 kernel.
+///
+/// `op` is one of "add" / "sub" / "mul" / "div" and selects which
+/// fast-path / broadcast-path pair to use.
+fn cudaBinary(op: enum { add, sub, mul, div }, a: Tensor, b: Tensor) !Tensor {
+    const fast = equals(a.shape, b.shape) and
+        shape_isContiguous(a.shape, a.strides) and
+        shape_isContiguous(b.shape, b.strides);
+    if (fast) {
+        return switch (op) {
+            .add => cuda_dispatch.add(a, b),
+            .sub => cuda_dispatch.sub(a, b),
+            .mul => cuda_dispatch.mul(a, b),
+            .div => cuda_dispatch.div(a, b),
+        };
+    }
+    return switch (op) {
+        .add => cuda_dispatch.addBroadcast(a, b),
+        .sub => cuda_dispatch.subBroadcast(a, b),
+        .mul => cuda_dispatch.mulBroadcast(a, b),
+        .div => cuda_dispatch.divBroadcast(a, b),
+    };
+}
 
 /// Map a flat output index to a multi-dimensional input index,
 /// accounting for broadcasting. For each dimension: if the input
@@ -112,7 +140,7 @@ fn broadcastIndex(out_idx: usize, out_shape: Shape, in_shape: Shape, in_strides:
 ///     inputs on CUDA are PR-θ territory.
 pub fn add(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Tensor {
     if (a.device == .cuda or b.device == .cuda) {
-        var out = try cuda_dispatch.add(a, b);
+        var out = try cudaBinary(.add, a, b);
         // Tape recording uses the same path as CPU — cloneTensorData
         // now handles CUDA snapshots via DtoD copy.
         try recordBinaryOp(tape, &out, &a, &b, .add);
@@ -133,7 +161,7 @@ pub fn add(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Te
 /// Broadcast elementwise subtraction: out = a - b
 pub fn sub(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Tensor {
     if (a.device == .cuda or b.device == .cuda) {
-        var out = try cuda_dispatch.sub(a, b);
+        var out = try cudaBinary(.sub, a, b);
         try recordBinaryOp(tape, &out, &a, &b, .sub);
         return out;
     }
@@ -152,7 +180,7 @@ pub fn sub(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Te
 /// Broadcast elementwise multiplication (Hadamard product, NOT matmul).
 pub fn mul(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Tensor {
     if (a.device == .cuda or b.device == .cuda) {
-        var out = try cuda_dispatch.mul(a, b);
+        var out = try cudaBinary(.mul, a, b);
         try recordBinaryOp(tape, &out, &a, &b, .mul);
         return out;
     }
@@ -172,7 +200,7 @@ pub fn mul(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Te
 /// Division by zero produces Inf or NaN — let IEEE 754 happen, document it.
 pub fn div(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Tensor {
     if (a.device == .cuda or b.device == .cuda) {
-        var out = try cuda_dispatch.div(a, b);
+        var out = try cudaBinary(.div, a, b);
         try recordBinaryOp(tape, &out, &a, &b, .div);
         return out;
     }

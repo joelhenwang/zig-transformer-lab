@@ -345,3 +345,163 @@ pub fn mulScalar(a: Tensor, s: f32) LabError!Tensor {
     try launchScalar(ctx, "elw_mul_scalar", a_buf, s, out_buf, n);
     return wrapContiguousOutput(out_buf, a.shape, a.requires_grad);
 }
+
+// ---------------------------------------------------------------------------
+// Broadcast dispatch (PR-theta)
+// ---------------------------------------------------------------------------
+//
+// Rank-4 stride-aware broadcast for add / sub / mul / div. Host
+// computes output shape via broadcastShapes, pads both inputs' axis
+// strides to rank 4 (left-aligned with 0s for missing axes and
+// size-1 broadcast axes), and launches the general kernel.
+//
+// Non-contiguous input strides are fine here — the kernel walks
+// inputs through their own strides and output through contiguous
+// strides. The only remaining constraint is that output offset = 0
+// and input layouts pack within their buffers; Storage invariants
+// already guarantee that.
+
+/// Effective stride of input `t` at output axis `out_axis`, where the
+/// output has rank `out_ndim`. Input axes are right-aligned; any
+/// leading output axis that has no counterpart, or a size-1 input
+/// axis that gets broadcast, contributes zero stride.
+fn effectiveStride(t: Tensor, out_ndim: usize, out_axis: usize) i32 {
+    const in_ndim = t.shape.ndim();
+    if (out_axis + in_ndim < out_ndim) return 0; // output has leading extra dims
+    const in_axis = out_axis + in_ndim - out_ndim;
+    if (t.shape.dims[in_axis] == 1) return 0; // broadcast size-1 axis
+    return @intCast(t.strides.values[in_axis]);
+}
+
+/// Output shape padded / strides aligned for the rank-4 broadcast
+/// kernel. `d0..d3` are output dims (left-padded with 1s), `a_s*`
+/// and `b_s*` are effective strides (zero for broadcasted / missing
+/// axes).
+const BroadcastLayout = struct {
+    d: [4]c_uint,
+    a_s: [4]c_int,
+    b_s: [4]c_int,
+    n: usize,
+};
+
+fn computeBroadcastLayout(a: Tensor, b: Tensor, out_shape: Shape) BroadcastLayout {
+    const out_ndim = out_shape.ndim();
+    const pad = 4 - out_ndim;
+    var L: BroadcastLayout = .{
+        .d = .{ 1, 1, 1, 1 },
+        .a_s = .{ 0, 0, 0, 0 },
+        .b_s = .{ 0, 0, 0, 0 },
+        .n = totalElements(out_shape),
+    };
+    for (0..out_ndim) |i| {
+        L.d[i + pad] = @intCast(out_shape.dims[i]);
+        L.a_s[i + pad] = effectiveStride(a, out_ndim, i);
+        L.b_s[i + pad] = effectiveStride(b, out_ndim, i);
+    }
+    return L;
+}
+
+/// Launch a broadcast binary kernel. The kernel signature is
+/// `(const float*, const float*, float*, unsigned int,
+///   unsigned int x4 output dims, int x4 a strides, int x4 b strides)`.
+fn launchBroadcastBinary(
+    ctx: *const CudaContext,
+    kernel_name: [:0]const u8,
+    a: DeviceBuffer,
+    b: DeviceBuffer,
+    out: DeviceBuffer,
+    L: BroadcastLayout,
+) LabError!void {
+    const mut_ctx: *CudaContext = @constCast(ctx);
+    const kfn = try module.getKernel(mut_ctx, "elementwise", kernel_name);
+
+    const n_arg: c_uint = @intCast(L.n);
+    const d = L.d;
+    const asv = L.a_s;
+    const bsv = L.b_s;
+    const args = [_]?*anyopaque{
+        @constCast(@as(*const anyopaque, @ptrCast(&a.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&b.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&out.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&n_arg))),
+        @constCast(@as(*const anyopaque, @ptrCast(&d[0]))),
+        @constCast(@as(*const anyopaque, @ptrCast(&d[1]))),
+        @constCast(@as(*const anyopaque, @ptrCast(&d[2]))),
+        @constCast(@as(*const anyopaque, @ptrCast(&d[3]))),
+        @constCast(@as(*const anyopaque, @ptrCast(&asv[0]))),
+        @constCast(@as(*const anyopaque, @ptrCast(&asv[1]))),
+        @constCast(@as(*const anyopaque, @ptrCast(&asv[2]))),
+        @constCast(@as(*const anyopaque, @ptrCast(&asv[3]))),
+        @constCast(@as(*const anyopaque, @ptrCast(&bsv[0]))),
+        @constCast(@as(*const anyopaque, @ptrCast(&bsv[1]))),
+        @constCast(@as(*const anyopaque, @ptrCast(&bsv[2]))),
+        @constCast(@as(*const anyopaque, @ptrCast(&bsv[3]))),
+    };
+    const grid_x: c_uint = @intCast((L.n + BLOCK_X - 1) / BLOCK_X);
+    try module.launch(
+        mut_ctx,
+        kfn,
+        .{ grid_x, 1, 1 },
+        .{ BLOCK_X, 1, 1 },
+        0,
+        &args,
+    );
+}
+
+/// Shared preamble for every broadcast binary op: device check,
+/// broadcast-shape derivation, output buffer alloc, stride
+/// computation. Returns (ctx, a_buf, b_buf, out_buf, layout).
+fn broadcastPreamble(
+    a: Tensor,
+    b: Tensor,
+) LabError!struct { ctx: *const CudaContext, a_buf: DeviceBuffer, b_buf: DeviceBuffer, out_buf: DeviceBuffer, layout: BroadcastLayout, out_shape: Shape } {
+    try requireSameDevice(a, b);
+    const out_shape = shape_mod.broadcastShapes(a.shape, b.shape) catch return error.ShapeMismatch;
+
+    const a_buf = try requireCudaBuffer(a);
+    const b_buf = try requireCudaBuffer(b);
+    const ctx = a_buf.ctx;
+
+    const layout = computeBroadcastLayout(a, b, out_shape);
+    const out_buf = try DeviceBuffer.alloc(ctx, layout.n);
+    return .{
+        .ctx = ctx,
+        .a_buf = a_buf,
+        .b_buf = b_buf,
+        .out_buf = out_buf,
+        .layout = layout,
+        .out_shape = out_shape,
+    };
+}
+
+/// out = a + b with NumPy broadcasting, rank <= 4.
+pub fn addBroadcast(a: Tensor, b: Tensor) LabError!Tensor {
+    var p = try broadcastPreamble(a, b);
+    errdefer p.out_buf.deinit();
+    try launchBroadcastBinary(p.ctx, "elw_broadcast_add", p.a_buf, p.b_buf, p.out_buf, p.layout);
+    return wrapContiguousOutput(p.out_buf, p.out_shape, a.requires_grad or b.requires_grad);
+}
+
+/// out = a - b with broadcasting.
+pub fn subBroadcast(a: Tensor, b: Tensor) LabError!Tensor {
+    var p = try broadcastPreamble(a, b);
+    errdefer p.out_buf.deinit();
+    try launchBroadcastBinary(p.ctx, "elw_broadcast_sub", p.a_buf, p.b_buf, p.out_buf, p.layout);
+    return wrapContiguousOutput(p.out_buf, p.out_shape, a.requires_grad or b.requires_grad);
+}
+
+/// out = a * b with broadcasting.
+pub fn mulBroadcast(a: Tensor, b: Tensor) LabError!Tensor {
+    var p = try broadcastPreamble(a, b);
+    errdefer p.out_buf.deinit();
+    try launchBroadcastBinary(p.ctx, "elw_broadcast_mul", p.a_buf, p.b_buf, p.out_buf, p.layout);
+    return wrapContiguousOutput(p.out_buf, p.out_shape, a.requires_grad or b.requires_grad);
+}
+
+/// out = a / b with broadcasting.
+pub fn divBroadcast(a: Tensor, b: Tensor) LabError!Tensor {
+    var p = try broadcastPreamble(a, b);
+    errdefer p.out_buf.deinit();
+    try launchBroadcastBinary(p.ctx, "elw_broadcast_div", p.a_buf, p.b_buf, p.out_buf, p.layout);
+    return wrapContiguousOutput(p.out_buf, p.out_shape, a.requires_grad or b.requires_grad);
+}
