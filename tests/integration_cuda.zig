@@ -34,12 +34,14 @@ const bindings = lab.backend.cuda.bindings;
 const context = lab.backend.cuda.context;
 const mem = lab.backend.cuda.mem;
 const module = lab.backend.cuda.module;
+const dispatch = lab.backend.cuda.dispatch;
 const CudaContext = context.CudaContext;
 const DeviceBuffer = mem.DeviceBuffer;
 const Tensor = lab.Tensor;
 const Storage = lab.Storage;
 const Shape = lab.shape.Shape;
 const computeStrides = lab.shape.computeStrides;
+const oracle = lab.testing_utils.oracle;
 
 // -- Io plumbing (shared with oracle tests; see tests/integration_oracle.zig) -----
 //
@@ -714,4 +716,210 @@ test "cuda vector_add kernel: bounds check prevents OOB for N not divisible by b
         const expected = @as(f32, @floatFromInt(i)) + @as(f32, @floatFromInt(i * 2));
         try testing.expectEqual(expected, c_host[i]);
     }
+}
+
+// ---------------------------------------------------------------------------
+// PR-eta: elementwise CUDA ops (forward-only)
+// ---------------------------------------------------------------------------
+//
+// These tests exercise src/backend/cuda/dispatch.zig. Every test
+// pre-loads the "elementwise" PTX module (dispatch does not auto-load
+// per the design decision in dispatch.zig's header) and then runs a
+// CUDA op against small tensors, comparing against either a PyTorch
+// oracle fixture (for the add_2d case) or a CPU-computed reference
+// (for the other six ops, which do not have dedicated oracle
+// fixtures yet — those land in a follow-up oracle expansion).
+
+const FIXTURE_ROOT = "tests/fixtures";
+
+fn fixturePath(comptime case: []const u8, comptime file: []const u8) []const u8 {
+    return FIXTURE_ROOT ++ "/" ++ case ++ "/" ++ file;
+}
+
+/// Helper: build a small contiguous CPU tensor from a fixed slice,
+/// push it to CUDA, and return the CUDA tensor. Caller must
+/// `storage.deinit(alloc)` the returned tensor.
+fn cudaFromSlice(
+    ctx: *const CudaContext,
+    s: Shape,
+    values: []const f32,
+) !Tensor {
+    var cpu = try Tensor.init(testing.allocator, s);
+    defer cpu.deinit(testing.allocator);
+    std.debug.assert(cpu.data.len == values.len);
+    @memcpy(cpu.data, values);
+    return try cpu.toCuda(ctx);
+}
+
+test "cuda dispatch add: oracle add_2d forward parity" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+
+    const alloc = testing.allocator;
+
+    // Load the PyTorch fixtures (same inputs as the CPU oracle test
+    // "oracle add_2d: forward and backward parity" in
+    // tests/integration_oracle.zig).
+    var a_cpu = try oracle.loadTensor(alloc, io, fixturePath("add_2d", "input_0.ztlt"));
+    defer a_cpu.deinit(alloc);
+    var b_cpu = try oracle.loadTensor(alloc, io, fixturePath("add_2d", "input_1.ztlt"));
+    defer b_cpu.deinit(alloc);
+    var expect_y = try oracle.loadTensor(alloc, io, fixturePath("add_2d", "output.ztlt"));
+    defer expect_y.deinit(alloc);
+
+    // Transfer inputs to CUDA.
+    var a_gpu = try a_cpu.toCuda(&ctx);
+    defer a_gpu.storage.deinit(alloc);
+    var b_gpu = try b_cpu.toCuda(&ctx);
+    defer b_gpu.storage.deinit(alloc);
+
+    // Run CUDA add, bring result back to host.
+    var y_gpu = try dispatch.add(a_gpu, b_gpu);
+    defer y_gpu.storage.deinit(alloc);
+    // Debug: synchronise before reading back so any async launch
+    // error surfaces at this line. Release builds would skip this.
+    try ctx.synchronize();
+
+    var y_cpu = try y_gpu.toCpu(alloc);
+    defer y_cpu.deinit(alloc);
+
+    // Elementwise parity vs oracle. FADD on sm_89 without fast-math
+    // is IEEE compliant; tolerance mirrors docs/stage7_plan.md
+    // Section 7.2 "Elementwise" row.
+    try oracle.expectClose(y_cpu, expect_y, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
+}
+
+test "cuda dispatch sub/mul/div: small fixed inputs match CPU reference" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+
+    const s = Shape.init2D(2, 3);
+    const a_vals = [_]f32{ 1, 2, 3, 4, 5, 6 };
+    const b_vals = [_]f32{ 10, 20, 30, 40, 50, 60 };
+
+    // sub: a - b
+    {
+        var a = try cudaFromSlice(&ctx, s, &a_vals);
+        defer a.storage.deinit(testing.allocator);
+        var b = try cudaFromSlice(&ctx, s, &b_vals);
+        defer b.storage.deinit(testing.allocator);
+        var r = try dispatch.sub(a, b);
+        defer r.storage.deinit(testing.allocator);
+        var r_cpu = try r.toCpu(testing.allocator);
+        defer r_cpu.deinit(testing.allocator);
+        for (0..6) |i| {
+            try testing.expectEqual(a_vals[i] - b_vals[i], r_cpu.data[i]);
+        }
+    }
+    // mul: a * b
+    {
+        var a = try cudaFromSlice(&ctx, s, &a_vals);
+        defer a.storage.deinit(testing.allocator);
+        var b = try cudaFromSlice(&ctx, s, &b_vals);
+        defer b.storage.deinit(testing.allocator);
+        var r = try dispatch.mul(a, b);
+        defer r.storage.deinit(testing.allocator);
+        var r_cpu = try r.toCpu(testing.allocator);
+        defer r_cpu.deinit(testing.allocator);
+        for (0..6) |i| {
+            try testing.expectEqual(a_vals[i] * b_vals[i], r_cpu.data[i]);
+        }
+    }
+    // div: a / b
+    {
+        var a = try cudaFromSlice(&ctx, s, &a_vals);
+        defer a.storage.deinit(testing.allocator);
+        var b = try cudaFromSlice(&ctx, s, &b_vals);
+        defer b.storage.deinit(testing.allocator);
+        var r = try dispatch.div(a, b);
+        defer r.storage.deinit(testing.allocator);
+        var r_cpu = try r.toCpu(testing.allocator);
+        defer r_cpu.deinit(testing.allocator);
+        for (0..6) |i| {
+            // FDIV is not guaranteed bit-identical between hardware
+            // FPUs; allow a tiny ulp slack. The values we picked
+            // (1/10, 2/20, 3/30, ...) all simplify to 0.1 which
+            // round-trips the same on any IEEE implementation, but
+            // we leave headroom for robustness.
+            const expected = a_vals[i] / b_vals[i];
+            try testing.expectApproxEqAbs(expected, r_cpu.data[i], 1e-6);
+        }
+    }
+}
+
+test "cuda dispatch neg / addScalar / mulScalar: small fixed inputs" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+
+    const s = Shape.init1D(5);
+    const a_vals = [_]f32{ -2.0, -1.0, 0.0, 1.0, 2.0 };
+
+    {
+        var a = try cudaFromSlice(&ctx, s, &a_vals);
+        defer a.storage.deinit(testing.allocator);
+        var r = try dispatch.neg(a);
+        defer r.storage.deinit(testing.allocator);
+        var r_cpu = try r.toCpu(testing.allocator);
+        defer r_cpu.deinit(testing.allocator);
+        for (0..5) |i| try testing.expectEqual(-a_vals[i], r_cpu.data[i]);
+    }
+    {
+        var a = try cudaFromSlice(&ctx, s, &a_vals);
+        defer a.storage.deinit(testing.allocator);
+        var r = try dispatch.addScalar(a, 3.5);
+        defer r.storage.deinit(testing.allocator);
+        var r_cpu = try r.toCpu(testing.allocator);
+        defer r_cpu.deinit(testing.allocator);
+        for (0..5) |i| try testing.expectEqual(a_vals[i] + 3.5, r_cpu.data[i]);
+    }
+    {
+        var a = try cudaFromSlice(&ctx, s, &a_vals);
+        defer a.storage.deinit(testing.allocator);
+        var r = try dispatch.mulScalar(a, -0.5);
+        defer r.storage.deinit(testing.allocator);
+        var r_cpu = try r.toCpu(testing.allocator);
+        defer r_cpu.deinit(testing.allocator);
+        for (0..5) |i| try testing.expectEqual(a_vals[i] * -0.5, r_cpu.data[i]);
+    }
+}
+
+test "cuda dispatch add: shape mismatch returns ShapeMismatch" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+
+    var a = try cudaFromSlice(&ctx, Shape.init1D(3), &[_]f32{ 1, 2, 3 });
+    defer a.storage.deinit(testing.allocator);
+    var b = try cudaFromSlice(&ctx, Shape.init1D(4), &[_]f32{ 1, 2, 3, 4 });
+    defer b.storage.deinit(testing.allocator);
+
+    try testing.expectError(error.ShapeMismatch, dispatch.add(a, b));
+}
+
+test "cuda dispatch add: CPU input returns DeviceMismatch" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+
+    // a lives on CPU, b on CUDA. The mismatch check fires before any
+    // shape / layout checks.
+    var a = try Tensor.init(testing.allocator, Shape.init1D(3));
+    defer a.deinit(testing.allocator);
+    var b = try cudaFromSlice(&ctx, Shape.init1D(3), &[_]f32{ 1, 2, 3 });
+    defer b.storage.deinit(testing.allocator);
+
+    try testing.expectError(error.DeviceMismatch, dispatch.add(a, b));
 }

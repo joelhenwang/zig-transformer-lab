@@ -197,8 +197,8 @@ fn linkCudaRuntime(
 const kernel_names = [_][]const u8{
     // Stage 7 additions (PR-zeta onward):
     "vector_add",
+    "elementwise",
     // Future PRs will add:
-    // "elementwise",
     // "softmax",
     // "layernorm",
     // "gelu",
