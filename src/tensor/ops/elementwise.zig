@@ -132,6 +132,11 @@ pub fn add(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Te
 
 /// Broadcast elementwise subtraction: out = a - b
 pub fn sub(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Tensor {
+    if (a.device == .cuda or b.device == .cuda) {
+        var out = try cuda_dispatch.sub(a, b);
+        try recordBinaryOp(tape, &out, &a, &b, .sub);
+        return out;
+    }
     const out_shape = try broadcastShapes(a.shape, b.shape);
     var out = try Tensor.init(allocator, out_shape);
     const n = totalElements(out_shape);
@@ -146,6 +151,11 @@ pub fn sub(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Te
 
 /// Broadcast elementwise multiplication (Hadamard product, NOT matmul).
 pub fn mul(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Tensor {
+    if (a.device == .cuda or b.device == .cuda) {
+        var out = try cuda_dispatch.mul(a, b);
+        try recordBinaryOp(tape, &out, &a, &b, .mul);
+        return out;
+    }
     const out_shape = try broadcastShapes(a.shape, b.shape);
     var out = try Tensor.init(allocator, out_shape);
     const n = totalElements(out_shape);
@@ -161,6 +171,11 @@ pub fn mul(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Te
 /// Broadcast elementwise division: out = a / b
 /// Division by zero produces Inf or NaN — let IEEE 754 happen, document it.
 pub fn div(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Tensor {
+    if (a.device == .cuda or b.device == .cuda) {
+        var out = try cuda_dispatch.div(a, b);
+        try recordBinaryOp(tape, &out, &a, &b, .div);
+        return out;
+    }
     const out_shape = try broadcastShapes(a.shape, b.shape);
     var out = try Tensor.init(allocator, out_shape);
     const n = totalElements(out_shape);
@@ -179,6 +194,23 @@ pub fn div(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Te
 /// translate each logical index through `a.strides` before reading.
 /// The output is a fresh contiguous tensor in row-major order.
 pub fn addScalar(allocator: std.mem.Allocator, a: Tensor, scalar: f32, tape: ?*Tape) !Tensor {
+    if (a.device == .cuda) {
+        var out = try cuda_dispatch.addScalar(a, scalar);
+        if (tape) |t| {
+            if (a.requires_grad) {
+                const node_id = try t.record(Node{
+                    .id = undefined,
+                    .op = .add_scalar,
+                    .parents = .{ a.tape_node, null },
+                    .n_parents = 1,
+                    .saved = .{ .tensor_scalar = .{ .shape = a.shape, .scalar = scalar } },
+                });
+                out.requires_grad = true;
+                out.tape_node = node_id;
+            }
+        }
+        return out;
+    }
     const out_shape = a.shape;
     var out = try Tensor.init(allocator, out_shape);
     const n = totalElements(out_shape);
@@ -205,6 +237,23 @@ pub fn addScalar(allocator: std.mem.Allocator, a: Tensor, scalar: f32, tape: ?*T
 /// Multiply every element by a scalar: out[i] = a[i] * scalar.
 /// Strided input `a` is handled via logical-to-physical offset translation.
 pub fn mulScalar(allocator: std.mem.Allocator, a: Tensor, scalar: f32, tape: ?*Tape) !Tensor {
+    if (a.device == .cuda) {
+        var out = try cuda_dispatch.mulScalar(a, scalar);
+        if (tape) |t| {
+            if (a.requires_grad) {
+                const node_id = try t.record(Node{
+                    .id = undefined,
+                    .op = .mul_scalar,
+                    .parents = .{ a.tape_node, null },
+                    .n_parents = 1,
+                    .saved = .{ .tensor_scalar = .{ .shape = a.shape, .scalar = scalar } },
+                });
+                out.requires_grad = true;
+                out.tape_node = node_id;
+            }
+        }
+        return out;
+    }
     const out_shape = a.shape;
     var out = try Tensor.init(allocator, out_shape);
     const n = totalElements(out_shape);
@@ -247,6 +296,23 @@ pub fn addInPlace(a: *Tensor, b: Tensor) !void {
 /// Elementwise negation: out[i] = -a[i]. Strided input `a` is handled
 /// via logical-to-physical offset translation.
 pub fn neg(allocator: std.mem.Allocator, a: Tensor, tape: ?*Tape) !Tensor {
+    if (a.device == .cuda) {
+        var out = try cuda_dispatch.neg(a);
+        if (tape) |t| {
+            if (a.requires_grad) {
+                const node_id = try t.record(Node{
+                    .id = undefined,
+                    .op = .neg,
+                    .parents = .{ a.tape_node, null },
+                    .n_parents = 1,
+                    .saved = .nothing,
+                });
+                out.requires_grad = true;
+                out.tape_node = node_id;
+            }
+        }
+        return out;
+    }
     const out_shape = a.shape;
     var out = try Tensor.init(allocator, out_shape);
     const n = totalElements(out_shape);

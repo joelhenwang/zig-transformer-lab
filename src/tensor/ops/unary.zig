@@ -55,6 +55,11 @@ const totalElements = @import("../shape.zig").totalElements;
 const Tape = @import("../../autograd/tape.zig").Tape;
 const Node = @import("../../autograd/node.zig").Node;
 const OpKind = @import("../../autograd/node.zig").OpKind;
+// PR-eta.2 follow-up: unary.neg routes CUDA inputs to the CUDA
+// elementwise dispatch. backward.zig's backwardSub / backwardDiv
+// call this function; without CUDA routing here the backward chain
+// would silently operate on empty CPU slices for CUDA tensors.
+const cuda_dispatch = @import("../../backend/cuda/dispatch.zig");
 
 // ---------------------------------------------------------------------------
 // erf — Polynomial approximation (Abramowitz & Stegun, formula 7.1.26)
@@ -242,6 +247,23 @@ pub fn log(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!
 ///
 /// Memory: caller owns the returned tensor; must call deinit(allocator).
 pub fn neg(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!Tensor {
+    if (tensor.device == .cuda) {
+        var out = try cuda_dispatch.neg(tensor);
+        if (tape) |t| {
+            if (tensor.requires_grad) {
+                const node_id = try t.record(Node{
+                    .id = undefined,
+                    .op = .neg,
+                    .parents = .{ tensor.tape_node, null },
+                    .n_parents = 1,
+                    .saved = .nothing,
+                });
+                out.requires_grad = true;
+                out.tape_node = node_id;
+            }
+        }
+        return out;
+    }
     const n = totalElements(tensor.shape);
     var out = try Tensor.init(allocator, tensor.shape);
     errdefer out.deinit(allocator);
