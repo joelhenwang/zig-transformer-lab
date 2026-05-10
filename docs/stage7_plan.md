@@ -188,7 +188,7 @@ append an entry in Section 10.
 | 9 | ι | CUDA reductions (sum, mean, sumAll) + parity | θ | `[x]` 43a2f1e (sum/sumAll/broadcastTo/sumToShape + full add_2d fwd+bwd oracle parity) |
 | 10 | κ | cuBLAS row-major GEMM + docs/08 | γ | `[x]` 42e917f (+4e40453 transpose fix) |
 | 11 | λ | Softmax + causal mask CUDA + parity | η | `[x]` 52abdf7 (softmax + log_softmax; causal mask reuses ops_elementwise.add) |
-| 12 | μ | Embedding + cross-entropy + AdamW CUDA + parity | κ, λ | `[ ]` |
+| 12 | μ | Embedding + cross-entropy + AdamW CUDA + parity | κ, λ | `[~]` 75d4914 (embedding + AdamW; +9b96189 tol fix); CE deferred |
 | 13 | ν | Full-model CUDA parity (uses `full_model_forward` fixture) | all prior | `[ ]` |
 | 14 | ξ | Training speed benchmarks | ν | `[ ]` |
 
@@ -1671,6 +1671,7 @@ Appended to as PRs land. Format: `- [x] PR-X — <scope> (commit HASH, YYYY-MM-D
 - [x] PR-ι — CUDA reductions (43a2f1e, 2026-05-10) — sumAll (atomicAdd), sumAxis (row-major contiguous), bcast_copy + broadcastTo + sumToShape; device-aware zerosLike/onesLike + tape.backward seeds on the same device as loss; **full oracle add_2d forward+backward parity end-to-end on GPU**; 40/40 CUDA pass; compute-sanitizer 0 leaks, 0 memory errors.
 - [x] PR-κ — cuBLAS GEMM + docs/08 (42e917f + fix 4e40453, 2026-05-10) — docs/08_backends_cuda.md (330 lines) with full row-major ↔ col-major derivation; gemm.zig wraps cublasSgemm_v2 and cublasSgemmStridedBatched using the operand-swap trick; ops_matmul.matmul routes CUDA inputs; **oracle matmul_2d forward+backward parity and matmul_batch_3d forward parity within rel_tol=1e-4, abs_tol=5e-5**; 45/45 CUDA tests pass; compute-sanitizer 0 leaks, 0 memory errors.
 - [x] PR-λ — Softmax + log-softmax CUDA (52abdf7, 2026-05-10) — softmax_last/log_softmax_last kernels (block-per-row, 3-pass shared-memory reduction); ops_softmax routes CUDA inputs; oracle softmax_3d_last_axis forward+backward parity + log_softmax_3d forward parity + large-C (D=64) stress test; 49/49 CUDA tests pass; compute-sanitizer 0 leaks, 0 memory errors. Causal mask reuses ops_elementwise.add (no dedicated kernel needed).
+- [~] PR-μ — Embedding + AdamW (75d4914 + fix 9b96189, 2026-05-10) — embedding forward (gather) and backward (atomicAdd scatter-add) kernels; Embedding.forward + backwardEmbedding route CUDA; oracle embedding_3d forward + backward parity. AdamW step kernel; AdamW.step + zeroGrad route CUDA. 53/53 CUDA tests pass; compute-sanitizer 0 leaks, 0 memory errors. **Cross-entropy CUDA deferred** to follow-up (needs a fused forward kernel + tape-saved grad_logits — scoped out to keep this commit review-sized).
 - [ ] PR-θ — Broadcasting / scalar CUDA ops + parity
 - [ ] PR-ι — CUDA reductions + parity
 - [ ] PR-κ — cuBLAS row-major GEMM + docs/08
