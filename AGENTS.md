@@ -34,7 +34,7 @@ Exit criteria:
 - Autograd saved data is operation-owned; no manual `keepAlive` in `src/nn/`. ✓
 - Optimizer state keyed by stable `ParamId`, not by data pointer. ✓
 - Checkpoint loading validates metadata strictly (magic, version, shape, dtype). ✓
-- `zig build test` passes on Windows and Linux; exact output recorded. ✓ (259 tests on Windows)
+- `zig build test` passes on Windows and Linux; exact output recorded. ✓ (263 tests on both platforms)
 - Teaching docs for each architectural PR exist under `docs/`. In progress.
 
 Only after this gate passes may Stage 7 CUDA wrapper work begin.
@@ -68,6 +68,105 @@ loads 15 per-parameter `.ztlt` files into a fresh `TinyWordTransformer`
 and asserts that the forward logits match PyTorch within `5e-4`
 absolute. All 14 pass on Windows. See `docs/oracle.md` for how to
 add new cases.
+
+## Remote RTX workflow (Stage 7 and beyond)
+
+The RTX 4060 Ti box at `joelwang-rtx@192.168.1.197` is the CUDA
+development target. Two bash helpers at the repo root wrap the SSH
+plumbing so the Windows host (where OpenCode runs) can drive work on
+the remote Linux machine without manual SSH sessions.
+
+### Scripts
+
+- `run_remote_example.sh` — run any command on the remote, with the
+  PyTorch venv active and CWD at the repo root. Callers pass a
+  single quoted string as the argument.
+- `sync_remote_example.sh` — rsync the working tree to the remote.
+  Excludes `.git/`, build artefacts, venv, and pyc caches. Uses
+  `--delete` to mirror (files deleted locally are removed from the
+  remote too).
+
+Both scripts embed the remote user@host and repo path. Update them
+if the target changes.
+
+### When to use which
+
+**Committed-work workflow (primary, matches our git habit):**
+
+```
+git push                                             # from Windows
+bash run_remote_example.sh "git pull --ff-only"      # pull on remote
+bash run_remote_example.sh "zig build test -Dcuda=true"
+```
+
+**Uncommitted iteration workflow (for rapid debugging):**
+
+```
+bash sync_remote_example.sh                           # rsync .
+bash run_remote_example.sh "zig build test-oracle"
+```
+
+After landing a fix via the iteration path, commit locally and push
+through the primary path so remote history stays in sync with origin.
+
+### Pre-Stage-7 smoke test
+
+One invocation verifies every toolchain component we need:
+
+```
+bash run_remote_example.sh "git pull --ff-only 2>&1 | tail -3 && zig version && nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv && nvcc --version | tail -1 && which compute-sanitizer"
+```
+
+Confirmed state on first run (`joelwang-rtx-MS-7C56`):
+
+| Component | Value |
+|---|---|
+| OS | Ubuntu 24.04.4 LTS |
+| CPU | AMD Ryzen 9 5900XT (32 threads) |
+| GPU | NVIDIA GeForce RTX 4060 Ti, 16 GB |
+| Driver | 595.58.03 |
+| CUDA Toolkit | 13.2 (`/usr/local/cuda-13.2/bin/nvcc`) |
+| compute-sanitizer | `/usr/local/cuda-13.2/bin/compute-sanitizer` |
+| Zig | 0.16.0 (exact) |
+| `zig build test` | 263/263 pass (matches Windows count) |
+| `zig build test-oracle` | 14/14 pass — fixtures generated on Windows match on Linux within tolerance |
+
+### CUDA 13 note
+
+The remote has CUDA Toolkit 13.2, not the 12.x the original plan
+assumed. 13.2 is a superset API-wise for what we need (dlopen the
+Driver API + cuBLAS, compile `.ptx` with `nvcc -ptx -arch=sm_89`).
+Monitor for:
+
+- Any deprecated symbol removals at dlopen time — we resolve
+  specific `cu*` / `cublas*` entry points and a missing one surfaces
+  as `error.CudaError` from `bindings.zig`.
+- Any `.ptx` format change across CUDA major versions — our kernels
+  target `sm_89` (Ada Lovelace, matches the RTX 4060 Ti) so this is
+  unlikely to matter.
+
+### Common pitfalls
+
+- **Line endings.** `.sh` files committed with CRLF fail on Linux
+  (`/bin/bash^M: bad interpreter`). If you edit `.sh` files on
+  Windows and they stop working on remote, check with
+  `file ./run_remote_example.sh` — it should say LF.
+- **Bash `$@` inside ssh double-quotes.** The wrapper passes `$@`
+  through to the remote shell via a double-quoted heredoc.
+  Callers should pass a single quoted string (e.g. `bash
+  run_remote_example.sh "zig build test"`); multi-word unquoted
+  arguments get re-joined by bash's word-splitting.
+- **SSH banner noise.** The remote has a fancy login banner
+  (neofetch-style system info) that prints on every SSH connect.
+  It clutters stdout but does not affect command exit codes.
+  Filter with `| Select-Object -Last N` if noise is a problem.
+- **SSH multiplexing not configured.** Each command pays ~1s of
+  TCP setup cost. Fine for dozens of commands; if a session does
+  hundreds we'd add `ControlMaster auto` to `~/.ssh/config`.
+- **Long-running commands (>120s).** OpenCode's bash tool has a
+  default 2-minute timeout. For `compute-sanitizer` on a full
+  training step or for long training runs, pass an explicit higher
+  timeout or split the command.
 
 ## Hard rules
 

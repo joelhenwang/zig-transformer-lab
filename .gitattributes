@@ -1,0 +1,14 @@
+# Enforce LF line endings on files that Linux tools must execute.
+# Without this, Windows checkouts (core.autocrlf=true) convert these
+# to CRLF on checkout, and shell scripts stop working on the remote
+# (`/bin/bash^M: bad interpreter`).
+#
+# The `eol=lf` directive applies on checkout regardless of platform;
+# the local working copy on Windows will therefore also be LF. Git
+# Bash tolerates LF files on Windows without issue.
+*.sh    text eol=lf
+*.py    text eol=lf
+
+# Binary fixtures for the PyTorch oracle. Marked binary so git does
+# not attempt text diffs or line-ending normalisation.
+*.ztlt  binary
