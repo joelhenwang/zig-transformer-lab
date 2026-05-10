@@ -182,7 +182,7 @@ append an entry in Section 10.
 | 3 | γ | `DeviceBuffer` alloc/free/copy | β | `[x]` be977ea (+6b918e6 fix) |
 | 4 | δ | Tensor `Storage.cuda` variant | γ | `[x]` fe269ef |
 | 5 | ε | `Tensor.toCuda` / `toCpu` + roundtrip | δ | `[x]` be6e0f8 |
-| 6 | ζ | PTX loader + vector-add smoke kernel | β | `[ ]` |
+| 6 | ζ | PTX loader + vector-add smoke kernel | β | `[x]` d2b458f (+6c8b630, 3d73ef0 fixes) |
 | 7 | η | Elementwise CUDA ops (same-shape) + parity | ε, ζ | `[ ]` |
 | 8 | θ | Broadcasting + scalar CUDA ops + parity | η | `[ ]` |
 | 9 | ι | CUDA reductions (sum, mean, sumAll) + parity | θ | `[ ]` |
@@ -1665,7 +1665,7 @@ Appended to as PRs land. Format: `- [x] PR-X — <scope> (commit HASH, YYYY-MM-D
 - [x] PR-γ — DeviceBuffer alloc/free/copy (be977ea + fix 6b918e6, 2026-05-10) — 12/12 pass on RTX 4060 Ti, compute-sanitizer clean (0 leaks, 0 errors)
 - [x] PR-δ — Tensor Storage.cuda variant (fe269ef, 2026-05-10) — 267/267 CPU + 14/14 CUDA pass on RTX 4060 Ti, compute-sanitizer clean (0 leaks, 0 errors)
 - [x] PR-ε — Tensor.toCuda / toCpu (be6e0f8, 2026-05-10) — 267 CPU + 19/19 CUDA pass on RTX 4060 Ti, compute-sanitizer clean (0 leaks, 0 errors)
-- [ ] PR-ζ — PTX loader + vector-add smoke kernel
+- [x] PR-ζ — PTX loader + vector-add smoke kernel (d2b458f + null-term fix 6c8b630 + log-level fix 3d73ef0, 2026-05-10) — 267 CPU + 24/24 CUDA pass on RTX 4060 Ti (includes two real kernel launches with bit-identical CPU parity on 1024 elements); compute-sanitizer: 0 memory leaks, 0 memory-access errors (1 API-level error is the deliberate `expectError` on cuModuleGetFunction with a non-existent symbol)
 - [ ] PR-η — Elementwise CUDA ops (same-shape) + parity
 - [ ] PR-θ — Broadcasting / scalar CUDA ops + parity
 - [ ] PR-ι — CUDA reductions + parity

@@ -197,7 +197,7 @@ Monitor for:
 | 6 — End-to-end CPU Training | **Done** | Commit `015da3c` — Trainer, generation, gradient clipping, bug fixes |
 | 6.5 — CPU Hardening | **Done** | Commits `f9c1d3b`, `28e73e1`, `97b0aaa`, `3331801` (refactor + docs + oracle + oracle expansion) |
 | 7-setup — Remote RTX workflow | **Done** | Commit `1e3b540` — SSH scripts, `.gitattributes`, smoke test confirmed |
-| 7 — CUDA Backend | **In progress** | PR-α (07bd274), PR-β (3c409a1), PR-γ (be977ea + fix 6b918e6), PR-δ (fe269ef), PR-ε (be6e0f8) landed — Storage seam closed + device transfer working end-to-end, 267/267 CPU + 19/19 CUDA tests pass on RTX 4060 Ti, compute-sanitizer clean. Next: PR-ζ (PTX loader + vector-add kernel). See `docs/stage7_plan.md`. |
+| 7 — CUDA Backend | **In progress** | PR-α (07bd274), PR-β (3c409a1), PR-γ (be977ea + fix 6b918e6), PR-δ (fe269ef), PR-ε (be6e0f8), PR-ζ (d2b458f + fixes 6c8b630, 3d73ef0) landed — first CUDA kernel launching with bit-identical CPU parity, 267/267 CPU + 24/24 CUDA tests pass on RTX 4060 Ti, compute-sanitizer memory-clean. Next: PR-η (elementwise CUDA ops + oracle parity). See `docs/stage7_plan.md`. |
 | 8–9 | Not started | |
 
 **Stage 3 committed:** `stage(3): tape-based autograd`
