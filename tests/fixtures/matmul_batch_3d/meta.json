@@ -1,0 +1,25 @@
+{
+  "backward_tol": 0.0001,
+  "description": "(B, M, K) @ (B, K, N) batched matmul \u2014 the Q@K^T and A@V shape in attention",
+  "forward_tol": 0.0001,
+  "loss": "sumAll",
+  "name": "matmul_batch_3d",
+  "op": "matmul_batch",
+  "output_shape": [
+    2,
+    3,
+    5
+  ],
+  "shapes": [
+    [
+      2,
+      3,
+      4
+    ],
+    [
+      2,
+      4,
+      5
+    ]
+  ]
+}

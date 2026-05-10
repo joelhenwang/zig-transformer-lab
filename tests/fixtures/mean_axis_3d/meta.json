@@ -1,0 +1,22 @@
+{
+  "axis": -1,
+  "backward_tol": 1e-05,
+  "description": "mean over last axis of (2,3,4) with keepdim=True",
+  "forward_tol": 1e-05,
+  "keepdim": true,
+  "loss": "sumAll",
+  "name": "mean_axis_3d",
+  "op": "mean",
+  "output_shape": [
+    2,
+    3,
+    1
+  ],
+  "shapes": [
+    [
+      2,
+      3,
+      4
+    ]
+  ]
+}

@@ -397,3 +397,260 @@ test "oracle layernorm_3d: composed LayerNorm forward and backward parity" {
     try oracle.expectClose(ln.gamma.grad.?.*, expect_dgamma, .{ .rel_tol = 1e-3, .abs_tol = 2e-4 });
     try oracle.expectClose(ln.beta.grad.?.*, expect_dbeta, .{ .rel_tol = 1e-3, .abs_tol = 2e-4 });
 }
+
+// -- Case: embedding_3d ---------------------------------------------------
+//
+// Forward is a row gather; backward is scatter-add (the gradient for
+// weight row `id` gets incremented by the output gradient at every
+// position with that id). The fixture uses ids with DELIBERATE
+// repeats — without scatter-add, each repeat's gradient contribution
+// would overwrite the others, and the test would fail on a row with
+// multiple references.
+
+test "oracle embedding_3d: forward gather + scatter-add backward parity" {
+    const alloc = std.testing.allocator;
+    const io = try testIo();
+
+    var weight = try oracle.loadTensor(alloc, io, fixturePath("embedding_3d", "input_0.ztlt"));
+    defer weight.deinit(alloc);
+    var ids = try oracle.loadTensor(alloc, io, fixturePath("embedding_3d", "input_1.ztlt"));
+    defer ids.deinit(alloc);
+    var expect_y = try oracle.loadTensor(alloc, io, fixturePath("embedding_3d", "output.ztlt"));
+    defer expect_y.deinit(alloc);
+    var expect_dweight = try oracle.loadTensor(alloc, io, fixturePath("embedding_3d", "grad_input_0.ztlt"));
+    defer expect_dweight.deinit(alloc);
+
+    // Build an Embedding whose `weight` is the oracle's exact bytes.
+    // The Embedding.init allocator does randn initialisation, but we
+    // then overwrite with oracle bytes so our forward sees the same
+    // input as PyTorch.
+    const Embedding = ztl.nn.embedding.Embedding;
+    const Rng = ztl.rng.Rng;
+    var rng = Rng.init(0);
+    const V = weight.shape.dims[0];
+    const D = weight.shape.dims[1];
+    var emb = try Embedding.init(alloc, V, D, &rng);
+    defer emb.deinit();
+    @memcpy(emb.weight.data, weight.data);
+    emb.weight.requires_grad = true;
+
+    var tape = Tape.init(alloc);
+    defer tape.deinit();
+    _ = try tape.trackLeaf(&emb.weight);
+
+    var y = try emb.forward(ids, &tape);
+    defer y.deinit(alloc);
+
+    try oracle.expectClose(y, expect_y, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
+
+    try backwardThroughSum(&tape, &y);
+
+    try oracle.expectClose(emb.weight.grad.?.*, expect_dweight, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
+}
+
+// -- Case: matmul_batch_3d ------------------------------------------------
+//
+// Batched matmul (B, M, K) @ (B, K, N). Asymmetric shape means a
+// row/column-major bug in the stride arithmetic produces wrong
+// outputs, not accidentally-correct-by-symmetry ones.
+
+test "oracle matmul_batch_3d: batched (B,M,K) @ (B,K,N) parity" {
+    const alloc = std.testing.allocator;
+    const io = try testIo();
+
+    var a = try oracle.loadTensor(alloc, io, fixturePath("matmul_batch_3d", "input_0.ztlt"));
+    defer a.deinit(alloc);
+    var b = try oracle.loadTensor(alloc, io, fixturePath("matmul_batch_3d", "input_1.ztlt"));
+    defer b.deinit(alloc);
+    var expect_y = try oracle.loadTensor(alloc, io, fixturePath("matmul_batch_3d", "output.ztlt"));
+    defer expect_y.deinit(alloc);
+    var expect_da = try oracle.loadTensor(alloc, io, fixturePath("matmul_batch_3d", "grad_input_0.ztlt"));
+    defer expect_da.deinit(alloc);
+    var expect_db = try oracle.loadTensor(alloc, io, fixturePath("matmul_batch_3d", "grad_input_1.ztlt"));
+    defer expect_db.deinit(alloc);
+
+    a.requires_grad = true;
+    b.requires_grad = true;
+    var tape = Tape.init(alloc);
+    defer tape.deinit();
+    _ = try tape.trackLeaf(&a);
+    _ = try tape.trackLeaf(&b);
+
+    var y = try ops_matmul.matmulBatch(alloc, a, b, &tape);
+    defer y.deinit(alloc);
+
+    try oracle.expectClose(y, expect_y, .{ .rel_tol = 1e-4, .abs_tol = 1e-4 });
+    try backwardThroughSum(&tape, &y);
+
+    try oracle.expectClose(a.grad.?.*, expect_da, .{ .rel_tol = 1e-4, .abs_tol = 1e-4 });
+    try oracle.expectClose(b.grad.?.*, expect_db, .{ .rel_tol = 1e-4, .abs_tol = 1e-4 });
+}
+
+// -- Case: log_softmax_3d -------------------------------------------------
+
+test "oracle log_softmax_3d: forward and backward parity" {
+    const alloc = std.testing.allocator;
+    const io = try testIo();
+
+    var a = try oracle.loadTensor(alloc, io, fixturePath("log_softmax_3d", "input_0.ztlt"));
+    defer a.deinit(alloc);
+    var expect_y = try oracle.loadTensor(alloc, io, fixturePath("log_softmax_3d", "output.ztlt"));
+    defer expect_y.deinit(alloc);
+    var expect_da = try oracle.loadTensor(alloc, io, fixturePath("log_softmax_3d", "grad_input_0.ztlt"));
+    defer expect_da.deinit(alloc);
+
+    a.requires_grad = true;
+    var tape = Tape.init(alloc);
+    defer tape.deinit();
+    _ = try tape.trackLeaf(&a);
+
+    var y = try ops_softmax.logSoftmax(alloc, a, &tape);
+    defer y.deinit(alloc);
+
+    try oracle.expectClose(y, expect_y, .{ .rel_tol = 1e-4, .abs_tol = 5e-5 });
+    try backwardThroughSum(&tape, &y);
+
+    try oracle.expectClose(a.grad.?.*, expect_da, .{ .rel_tol = 1e-4, .abs_tol = 1e-4 });
+}
+
+// -- Case: sum_axis_3d ----------------------------------------------------
+
+test "oracle sum_axis_3d: sum over axis=1 with keepdim, forward and backward parity" {
+    const alloc = std.testing.allocator;
+    const io = try testIo();
+
+    var a = try oracle.loadTensor(alloc, io, fixturePath("sum_axis_3d", "input_0.ztlt"));
+    defer a.deinit(alloc);
+    var expect_y = try oracle.loadTensor(alloc, io, fixturePath("sum_axis_3d", "output.ztlt"));
+    defer expect_y.deinit(alloc);
+    var expect_da = try oracle.loadTensor(alloc, io, fixturePath("sum_axis_3d", "grad_input_0.ztlt"));
+    defer expect_da.deinit(alloc);
+
+    a.requires_grad = true;
+    var tape = Tape.init(alloc);
+    defer tape.deinit();
+    _ = try tape.trackLeaf(&a);
+
+    var y = try ops_reduce.sum(alloc, a, 1, &tape);
+    defer y.deinit(alloc);
+
+    try oracle.expectClose(y, expect_y, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
+    try backwardThroughSum(&tape, &y);
+
+    try oracle.expectClose(a.grad.?.*, expect_da, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
+}
+
+// -- Case: mean_axis_3d ---------------------------------------------------
+
+test "oracle mean_axis_3d: mean over last axis with keepdim, forward and backward parity" {
+    const alloc = std.testing.allocator;
+    const io = try testIo();
+
+    var a = try oracle.loadTensor(alloc, io, fixturePath("mean_axis_3d", "input_0.ztlt"));
+    defer a.deinit(alloc);
+    var expect_y = try oracle.loadTensor(alloc, io, fixturePath("mean_axis_3d", "output.ztlt"));
+    defer expect_y.deinit(alloc);
+    var expect_da = try oracle.loadTensor(alloc, io, fixturePath("mean_axis_3d", "grad_input_0.ztlt"));
+    defer expect_da.deinit(alloc);
+
+    a.requires_grad = true;
+    var tape = Tape.init(alloc);
+    defer tape.deinit();
+    _ = try tape.trackLeaf(&a);
+
+    // Axis = ndim - 1 = 2 for our (2,3,4) tensor.
+    var y = try ops_reduce.mean(alloc, a, 2, &tape);
+    defer y.deinit(alloc);
+
+    try oracle.expectClose(y, expect_y, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
+    try backwardThroughSum(&tape, &y);
+
+    try oracle.expectClose(a.grad.?.*, expect_da, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
+}
+
+// -- Case: full_model_forward --------------------------------------------
+//
+// The end-to-end parity check. Builds a TinyWordTransformer at the
+// fixture's config, loads every parameter from the oracle's
+// per-param .ztlt files, runs forward, and compares logits.
+//
+// This catches composition bugs that individual op tests miss: a
+// wrong sign in the residual add, a transpose order swapped between
+// Q and K, an off-by-one in the causal mask, or any drift between
+// our pre-norm block layout and the PyTorch reference.
+
+test "oracle full_model_forward: end-to-end TinyWordTransformer logits parity" {
+    const alloc = std.testing.allocator;
+    const io = try testIo();
+
+    // Config must match what the Python case used. Keeping it in
+    // sync is enforced by the fact that the weight .ztlt files
+    // encode the shapes — loading will fail with ShapeMismatch if
+    // the config drifts.
+    const TransformerConfig = ztl.nn.module.TransformerConfig;
+    const TinyWordTransformer = ztl.nn.model.TinyWordTransformer;
+    const Rng = ztl.rng.Rng;
+
+    const cfg = TransformerConfig{
+        .vocab_size = 8,
+        .d_model = 4,
+        .max_seq_len = 4,
+        .d_ff = 8,
+        .ln_eps = 1e-5,
+        .bias = true,
+    };
+
+    var rng = Rng.init(0);
+    var model = try TinyWordTransformer.init(alloc, cfg, &rng);
+    defer model.deinit();
+
+    // Load the oracle's weights into the model. `collectNamedParams`
+    // provides (name, *Tensor) pairs whose order matches the Python
+    // case's param_pairs list.
+    const NamedParam = ztl.nn.model.NamedParam;
+    var params = std.ArrayList(NamedParam).empty;
+    defer params.deinit(alloc);
+    try model.collectNamedParams(&params);
+
+    // For every named param, load its fixture and memcpy into the
+    // model tensor's data. @memcpy on same-size slices is safe; the
+    // load itself checks the file's shape against our tensor's
+    // shape via the ZTLT header size.
+    for (params.items) |entry| {
+        const path = try std.fmt.allocPrint(
+            alloc,
+            "tests/fixtures/full_model_forward/param__{s}.ztlt",
+            .{entry.name},
+        );
+        defer alloc.free(path);
+
+        var loaded = try oracle.loadTensor(alloc, io, path);
+        defer loaded.deinit(alloc);
+
+        if (loaded.data.len != entry.tensor.data.len) {
+            std.debug.print("  param {s} size mismatch: loaded={d}, model={d}\n", .{
+                entry.name, loaded.data.len, entry.tensor.data.len,
+            });
+            return error.ShapeMismatch;
+        }
+        @memcpy(entry.tensor.data, loaded.data);
+    }
+
+    // Load the token ids and run forward.
+    var ids = try oracle.loadTensor(alloc, io, fixturePath("full_model_forward", "input_0.ztlt"));
+    defer ids.deinit(alloc);
+
+    var expect_logits = try oracle.loadTensor(alloc, io, fixturePath("full_model_forward", "output.ztlt"));
+    defer expect_logits.deinit(alloc);
+
+    // Forward only; no tape, no gradients.
+    var logits = try model.forward(ids, null);
+    defer logits.deinit(alloc);
+
+    // Slightly looser tolerance because the forward passes through
+    // many ops (embedding, LN, 4 matmuls, softmax, matmulBatch x2,
+    // residuals, LN, MLP, residual, final LN, LM head) — f32
+    // rounding compounds. 5e-4 absolute is still well under the
+    // signal level for any reasonable logit.
+    try oracle.expectClose(logits, expect_logits, .{ .rel_tol = 1e-3, .abs_tol = 5e-4 });
+}

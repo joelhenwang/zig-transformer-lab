@@ -58,10 +58,16 @@ Build step: `zig build test-oracle` (separate from `zig build test`
 so a fresh clone without regenerated fixtures still has a green
 default suite).
 
-Current cases (8): `add_2d`, `add_broadcast_2d_1d`, `mul_broadcast`,
+Current cases (14): `add_2d`, `add_broadcast_2d_1d`, `mul_broadcast`,
 `matmul_2d`, `softmax_3d_last_axis`, `cross_entropy_3d`, `gelu_2d`,
-`layernorm_3d`. All pass on Windows as of the commit that introduced
-them. See `docs/oracle.md` for how to add new cases.
+`layernorm_3d`, `embedding_3d`, `matmul_batch_3d`, `log_softmax_3d`,
+`sum_axis_3d`, `mean_axis_3d`, `full_model_forward`.
+
+The `full_model_forward` case is the headline integration test: it
+loads 15 per-parameter `.ztlt` files into a fresh `TinyWordTransformer`
+and asserts that the forward logits match PyTorch within `5e-4`
+absolute. All 14 pass on Windows. See `docs/oracle.md` for how to
+add new cases.
 
 ## Hard rules
 

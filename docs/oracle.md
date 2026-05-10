@@ -91,8 +91,24 @@ making it easy to inspect without running Python.
 | `cross_entropy_3d` | cross_entropy | logits (2,3,5), targets (2,3) | Flattened to (6,5)/(6,); mean reduction |
 | `gelu_2d` | gelu_exact | (3,4) | Our `geluExact` matches PyTorch's `gelu(approximate='none')` |
 | `layernorm_3d` | layernorm | (2,3,4), D=4 | End-to-end composed LayerNorm, all three param grads |
+| `embedding_3d` | embedding | weight (6,4), ids (2,3) | Scatter-add backward with deliberate id repeats |
+| `matmul_batch_3d` | matmul_batch | (2,3,4) @ (2,4,5) | Batched matmul, the shape used inside attention |
+| `log_softmax_3d` | log_softmax | (2,3,4) over dim=-1 | Simpler gradient than softmax |
+| `sum_axis_3d` | sum | (2,3,4) sum(axis=1) | Reduction with keepdim |
+| `mean_axis_3d` | mean | (2,3,4) mean(axis=-1) | Reduction with keepdim |
+| `full_model_forward` | full_model | V=8, D=4, T=4, F=8 | End-to-end TinyWordTransformer logits parity |
 
 Tolerances per case are in `tests/fixtures/<case>/meta.json`.
+
+The `full_model_forward` case is the integration test: PyTorch
+generates one full set of model weights, saves each of the 15 named
+parameters as a `.ztlt` file, runs a forward pass, and saves the
+logits. The Zig test loads every parameter into a fresh
+`TinyWordTransformer`, runs our forward, and asserts the logits
+match within `5e-4` absolute tolerance. This catches any subtle
+composition bug (wrong residual order, swapped Q/K transpose,
+off-by-one in the causal mask) that the individual op tests would
+miss.
 
 ---
 

@@ -1,0 +1,26 @@
+{
+  "backward_tol": 1e-05,
+  "d_model": 4,
+  "description": "embedding lookup (V=6, D=4) with repeated ids to stress scatter-add backward",
+  "forward_tol": 1e-05,
+  "loss": "sumAll",
+  "name": "embedding_3d",
+  "op": "embedding",
+  "output_shape": [
+    2,
+    3,
+    4
+  ],
+  "repeats_present": true,
+  "shapes": [
+    [
+      6,
+      4
+    ],
+    [
+      2,
+      3
+    ]
+  ],
+  "vocab_size": 6
+}

@@ -1,0 +1,20 @@
+{
+  "backward_tol": 0.0001,
+  "description": "log_softmax over last dim of (2,3,4); simpler gradient than softmax",
+  "forward_tol": 5e-05,
+  "loss": "sumAll",
+  "name": "log_softmax_3d",
+  "op": "log_softmax",
+  "output_shape": [
+    2,
+    3,
+    4
+  ],
+  "shapes": [
+    [
+      2,
+      3,
+      4
+    ]
+  ]
+}

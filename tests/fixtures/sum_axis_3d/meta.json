@@ -1,0 +1,22 @@
+{
+  "axis": 1,
+  "backward_tol": 1e-05,
+  "description": "sum over axis=1 of (2,3,4) with keepdim=True",
+  "forward_tol": 1e-05,
+  "keepdim": true,
+  "loss": "sumAll",
+  "name": "sum_axis_3d",
+  "op": "sum",
+  "output_shape": [
+    2,
+    1,
+    4
+  ],
+  "shapes": [
+    [
+      2,
+      3,
+      4
+    ]
+  ]
+}

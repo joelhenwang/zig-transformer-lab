@@ -1,0 +1,44 @@
+{
+  "backward_tol": 0.0,
+  "batch_size": 2,
+  "config": {
+    "bias": true,
+    "d_ff": 8,
+    "d_model": 4,
+    "max_seq_len": 4,
+    "vocab_size": 8
+  },
+  "description": "end-to-end TinyWordTransformer forward (V=8, D=4, T=4, F=8); weights loaded from oracle",
+  "forward_tol": 0.0005,
+  "loss": "forward_only",
+  "name": "full_model_forward",
+  "op": "full_model",
+  "output_shape": [
+    2,
+    4,
+    8
+  ],
+  "param_names": [
+    "tok_embed.weight",
+    "pos_embed.weight",
+    "block.ln1.gamma",
+    "block.ln1.beta",
+    "block.attn.w_q.weight",
+    "block.attn.w_k.weight",
+    "block.attn.w_v.weight",
+    "block.attn.w_o.weight",
+    "block.ln2.gamma",
+    "block.ln2.beta",
+    "block.mlp.fc1.weight",
+    "block.mlp.fc2.weight",
+    "ln_f.gamma",
+    "ln_f.beta",
+    "lm_head.weight"
+  ],
+  "shapes": [
+    [
+      2,
+      4
+    ]
+  ]
+}

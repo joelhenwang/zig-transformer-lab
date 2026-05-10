@@ -47,6 +47,42 @@
       "forward_tol": 5e-05,
       "name": "layernorm_3d",
       "op": "layernorm"
+    },
+    {
+      "backward_tol": 1e-05,
+      "forward_tol": 1e-05,
+      "name": "embedding_3d",
+      "op": "embedding"
+    },
+    {
+      "backward_tol": 0.0001,
+      "forward_tol": 0.0001,
+      "name": "matmul_batch_3d",
+      "op": "matmul_batch"
+    },
+    {
+      "backward_tol": 0.0001,
+      "forward_tol": 5e-05,
+      "name": "log_softmax_3d",
+      "op": "log_softmax"
+    },
+    {
+      "backward_tol": 1e-05,
+      "forward_tol": 1e-05,
+      "name": "sum_axis_3d",
+      "op": "sum"
+    },
+    {
+      "backward_tol": 1e-05,
+      "forward_tol": 1e-05,
+      "name": "mean_axis_3d",
+      "op": "mean"
+    },
+    {
+      "backward_tol": 0.0,
+      "forward_tol": 0.0005,
+      "name": "full_model_forward",
+      "op": "full_model"
     }
   ]
 }
