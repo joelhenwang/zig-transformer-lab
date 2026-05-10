@@ -116,7 +116,11 @@ pub const DeviceBuffer = struct {
     /// `error.ShapeMismatch` rather than truncation.
     pub fn copyFromHost(self: DeviceBuffer, src: []const f32) LabError!void {
         if (src.len != self.len) {
-            std.log.err(
+            // Caller-side mistake: the error return is the semantic
+            // signal; the log is a diagnostic breadcrumb. Use warn
+            // rather than err so a test that deliberately triggers
+            // this path (expectError) does not fail the test runner.
+            std.log.warn(
                 "DeviceBuffer.copyFromHost: host.len={d} != device.len={d}",
                 .{ src.len, self.len },
             );
@@ -134,7 +138,7 @@ pub const DeviceBuffer = struct {
     /// DtoH: copy this buffer into `dst`. Sizes must match exactly.
     pub fn copyToHost(self: DeviceBuffer, dst: []f32) LabError!void {
         if (dst.len != self.len) {
-            std.log.err(
+            std.log.warn(
                 "DeviceBuffer.copyToHost: host.len={d} != device.len={d}",
                 .{ dst.len, self.len },
             );
@@ -153,14 +157,14 @@ pub const DeviceBuffer = struct {
     /// to the same context and have identical element counts.
     pub fn copyFromDevice(self: DeviceBuffer, src: DeviceBuffer) LabError!void {
         if (src.len != self.len) {
-            std.log.err(
+            std.log.warn(
                 "DeviceBuffer.copyFromDevice: src.len={d} != dst.len={d}",
                 .{ src.len, self.len },
             );
             return error.ShapeMismatch;
         }
         if (self.ctx != src.ctx) {
-            std.log.err("DeviceBuffer.copyFromDevice: cross-context copy is not supported", .{});
+            std.log.warn("DeviceBuffer.copyFromDevice: cross-context copy is not supported", .{});
             return error.DeviceMismatch;
         }
         if (self.len == 0) return;
