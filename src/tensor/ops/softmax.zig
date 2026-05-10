@@ -52,6 +52,9 @@ const totalElements = @import("../shape.zig").totalElements;
 const Tape = @import("../../autograd/tape.zig").Tape;
 const Node = @import("../../autograd/node.zig").Node;
 const OpKind = @import("../../autograd/node.zig").OpKind;
+// PR-lambda: softmax / logSoftmax route CUDA inputs to the GPU
+// last-axis reduction kernels.
+const cuda_dispatch = @import("../../backend/cuda/dispatch.zig");
 
 /// Compute the strided offset for a flat element index.
 ///
@@ -106,6 +109,23 @@ fn stridedOffset(tensor: Tensor, flat: usize) usize {
 ///
 /// Memory: caller owns the returned tensor; must call deinit(allocator).
 pub fn softmax(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!Tensor {
+    if (tensor.device == .cuda) {
+        var out = try cuda_dispatch.softmaxLastAxis(tensor);
+        if (tape) |t| {
+            if (tensor.requires_grad) {
+                const node_id = try t.record(Node{
+                    .id = undefined,
+                    .op = .softmax,
+                    .parents = .{ tensor.tape_node, null },
+                    .n_parents = 1,
+                    .saved = .{ .tensor_ref = tensor },
+                });
+                out.requires_grad = true;
+                out.tape_node = node_id;
+            }
+        }
+        return out;
+    }
     const ndim = tensor.shape.ndim();
     const C = tensor.shape.dims[ndim - 1];
     // Number of independent softmax groups (one per "row" of the
@@ -203,6 +223,23 @@ pub fn softmax(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabEr
 ///
 /// Memory: caller owns the returned tensor; must call deinit(allocator).
 pub fn logSoftmax(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!Tensor {
+    if (tensor.device == .cuda) {
+        var out = try cuda_dispatch.logSoftmaxLastAxis(tensor);
+        if (tape) |t| {
+            if (tensor.requires_grad) {
+                const node_id = try t.record(Node{
+                    .id = undefined,
+                    .op = .log_softmax,
+                    .parents = .{ tensor.tape_node, null },
+                    .n_parents = 1,
+                    .saved = .{ .tensor_ref = tensor },
+                });
+                out.requires_grad = true;
+                out.tape_node = node_id;
+            }
+        }
+        return out;
+    }
     const ndim = tensor.shape.ndim();
     const C = tensor.shape.dims[ndim - 1];
     const num_groups = totalElements(tensor.shape) / C;

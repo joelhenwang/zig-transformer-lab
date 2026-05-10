@@ -46,6 +46,7 @@ const oracle = lab.testing_utils.oracle;
 const ops_elementwise = lab.ops.elementwise;
 const ops_reduce = lab.ops.reduce;
 const ops_matmul = lab.ops.matmul;
+const ops_softmax = lab.ops.softmax;
 const Tape = lab.Tape;
 
 // -- Io plumbing (shared with oracle tests; see tests/integration_oracle.zig) -----
@@ -1543,4 +1544,142 @@ test "cuda ops_matmul.matmul: oracle matmul_2d forward + backward parity" {
 
     try oracle.expectClose(da_cpu, expect_da, .{ .rel_tol = 1e-4, .abs_tol = 5e-5 });
     try oracle.expectClose(db_cpu, expect_db, .{ .rel_tol = 1e-4, .abs_tol = 5e-5 });
+}
+
+// ---------------------------------------------------------------------------
+// PR-lambda: softmax / log-softmax over the last axis
+// ---------------------------------------------------------------------------
+
+test "cuda dispatch softmaxLastAxis: oracle softmax_3d_last_axis forward parity" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "softmax");
+
+    const alloc = testing.allocator;
+    var x_cpu = try oracle.loadTensor(alloc, io, fixturePath("softmax_3d_last_axis", "input_0.ztlt"));
+    defer x_cpu.deinit(alloc);
+    var expect_y = try oracle.loadTensor(alloc, io, fixturePath("softmax_3d_last_axis", "output.ztlt"));
+    defer expect_y.deinit(alloc);
+
+    var x_gpu = try x_cpu.toCuda(&ctx);
+    defer x_gpu.storage.deinit(alloc);
+
+    var y_gpu = try dispatch.softmaxLastAxis(x_gpu);
+    defer y_gpu.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    var y_cpu = try y_gpu.toCpu(alloc);
+    defer y_cpu.deinit(alloc);
+    try oracle.expectClose(y_cpu, expect_y, .{ .rel_tol = 1e-4, .abs_tol = 5e-5 });
+}
+
+test "cuda dispatch logSoftmaxLastAxis: oracle log_softmax_3d forward parity" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "softmax");
+
+    const alloc = testing.allocator;
+    var x_cpu = try oracle.loadTensor(alloc, io, fixturePath("log_softmax_3d", "input_0.ztlt"));
+    defer x_cpu.deinit(alloc);
+    var expect_y = try oracle.loadTensor(alloc, io, fixturePath("log_softmax_3d", "output.ztlt"));
+    defer expect_y.deinit(alloc);
+
+    var x_gpu = try x_cpu.toCuda(&ctx);
+    defer x_gpu.storage.deinit(alloc);
+
+    var y_gpu = try dispatch.logSoftmaxLastAxis(x_gpu);
+    defer y_gpu.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    var y_cpu = try y_gpu.toCpu(alloc);
+    defer y_cpu.deinit(alloc);
+    try oracle.expectClose(y_cpu, expect_y, .{ .rel_tol = 1e-4, .abs_tol = 5e-5 });
+}
+
+test "cuda dispatch softmaxLastAxis: large-C stress test (D=64) sums to 1.0 per row" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "softmax");
+
+    const alloc = testing.allocator;
+    // Shape (3, 64): catches shared-memory sizing bugs that the oracle's
+    // D=4 fixture wouldn't expose. Values span ~[-5, +5] so the
+    // max-subtraction path is real (not a vacuous shift).
+    const N: usize = 3;
+    const C: usize = 64;
+    var x_host = try alloc.alloc(f32, N * C);
+    defer alloc.free(x_host);
+    var rng = std.Random.DefaultPrng.init(0xC01D);
+    const r = rng.random();
+    for (0..N * C) |i| x_host[i] = (r.float(f32) - 0.5) * 10.0;
+
+    var x_gpu = try cudaFromSlice(&ctx, Shape.init2D(N, C), x_host);
+    defer x_gpu.storage.deinit(alloc);
+
+    var y_gpu = try dispatch.softmaxLastAxis(x_gpu);
+    defer y_gpu.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    var y_cpu = try y_gpu.toCpu(alloc);
+    defer y_cpu.deinit(alloc);
+    for (0..N) |row| {
+        var row_sum: f32 = 0;
+        for (0..C) |c| row_sum += y_cpu.data[row * C + c];
+        try testing.expectApproxEqAbs(@as(f32, 1.0), row_sum, 1e-5);
+    }
+}
+
+test "cuda ops_softmax.softmax: oracle softmax_3d_last_axis forward + backward parity" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+    _ = try module.loadPtxFromFile(&ctx, io, "softmax");
+
+    const alloc = testing.allocator;
+
+    var x_cpu = try oracle.loadTensor(alloc, io, fixturePath("softmax_3d_last_axis", "input_0.ztlt"));
+    defer x_cpu.deinit(alloc);
+    var expect_y = try oracle.loadTensor(alloc, io, fixturePath("softmax_3d_last_axis", "output.ztlt"));
+    defer expect_y.deinit(alloc);
+    var expect_dx = try oracle.loadTensor(alloc, io, fixturePath("softmax_3d_last_axis", "grad_input_0.ztlt"));
+    defer expect_dx.deinit(alloc);
+
+    var x_gpu = try x_cpu.toCuda(&ctx);
+    defer x_gpu.storage.deinit(alloc);
+    x_gpu.requires_grad = true;
+
+    var tape = Tape.init(alloc);
+    defer tape.deinit();
+    _ = try tape.trackLeaf(&x_gpu);
+
+    var y = try ops_softmax.softmax(alloc, x_gpu, &tape);
+    defer y.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    {
+        var y_cpu = try y.toCpu(alloc);
+        defer y_cpu.deinit(alloc);
+        try oracle.expectClose(y_cpu, expect_y, .{ .rel_tol = 1e-4, .abs_tol = 5e-5 });
+    }
+
+    // Backward: loss = sumAll(y) -> backwardSoftmax uses
+    // diag - outer product formula with internal mul / sum / sub
+    // which all route to CUDA.
+    var loss = try ops_reduce.sumAll(alloc, y, &tape);
+    defer loss.storage.deinit(alloc);
+    try tape.backward(&loss);
+    try ctx.synchronize();
+
+    var dx_cpu = try x_gpu.grad.?.*.toCpu(alloc);
+    defer dx_cpu.deinit(alloc);
+    try oracle.expectClose(dx_cpu, expect_dx, .{ .rel_tol = 1e-4, .abs_tol = 1e-4 });
 }

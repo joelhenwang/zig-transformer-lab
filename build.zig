@@ -199,8 +199,8 @@ const kernel_names = [_][]const u8{
     "vector_add",
     "elementwise",
     "reduce",
+    "softmax",
     // Future PRs will add:
-    // "softmax",
     // "layernorm",
     // "gelu",
     // "embedding",

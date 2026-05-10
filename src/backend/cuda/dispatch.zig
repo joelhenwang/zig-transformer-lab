@@ -767,3 +767,86 @@ fn reshapedView(x: Tensor, target: Shape) LabError!Tensor {
     out.owned = false;
     return out;
 }
+
+// ---------------------------------------------------------------------------
+// Softmax / log-softmax (PR-lambda)
+// ---------------------------------------------------------------------------
+//
+// Row-wise last-axis softmax. The host reshapes the logical
+// (..., C) tensor into a flat (num_rows, C) layout by flattening
+// all leading dims: num_rows = totalElements / C. Kernel uses one
+// block per row, BLOCK_SIZE=256 threads, three passes (max, sum,
+// normalise). Contiguous inputs only — broadcasting / non-contig
+// layouts would need additional stride parameters.
+
+const SOFTMAX_BLOCK_X: c_uint = 256;
+
+fn launchSoftmaxKernel(
+    ctx: *const CudaContext,
+    kernel_name: [:0]const u8,
+    x: DeviceBuffer,
+    out: DeviceBuffer,
+    num_rows: usize,
+    C: usize,
+) LabError!void {
+    const mut_ctx: *CudaContext = @constCast(ctx);
+    const kfn = try module.getKernel(mut_ctx, "softmax", kernel_name);
+
+    const num_rows_arg: c_uint = @intCast(num_rows);
+    const C_arg: c_uint = @intCast(C);
+    const args = [_]?*anyopaque{
+        @constCast(@as(*const anyopaque, @ptrCast(&x.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&out.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&num_rows_arg))),
+        @constCast(@as(*const anyopaque, @ptrCast(&C_arg))),
+    };
+    try module.launch(
+        mut_ctx,
+        kfn,
+        .{ @intCast(num_rows), 1, 1 }, // grid: one block per row
+        .{ SOFTMAX_BLOCK_X, 1, 1 },
+        0,
+        &args,
+    );
+}
+
+/// Row-wise softmax over the last axis of `x`. Input must be
+/// contiguous; output has the same shape.
+pub fn softmaxLastAxis(x: Tensor) LabError!Tensor {
+    if (!shape_isContiguous(x.shape, x.strides)) return error.InvalidLayout;
+    const ndim = x.shape.ndim();
+    if (ndim == 0) return error.ShapeMismatch;
+    const C = x.shape.dims[ndim - 1];
+    if (C == 0) return error.ShapeMismatch;
+    const total = totalElements(x.shape);
+    const num_rows = total / C;
+
+    const x_buf = try requireCudaBuffer(x);
+    const ctx = x_buf.ctx;
+
+    var out_buf = try DeviceBuffer.alloc(ctx, total);
+    errdefer out_buf.deinit();
+
+    try launchSoftmaxKernel(ctx, "softmax_last", x_buf, out_buf, num_rows, C);
+    return wrapContiguousOutput(out_buf, x.shape, x.requires_grad);
+}
+
+/// Row-wise log-softmax over the last axis of `x`.
+pub fn logSoftmaxLastAxis(x: Tensor) LabError!Tensor {
+    if (!shape_isContiguous(x.shape, x.strides)) return error.InvalidLayout;
+    const ndim = x.shape.ndim();
+    if (ndim == 0) return error.ShapeMismatch;
+    const C = x.shape.dims[ndim - 1];
+    if (C == 0) return error.ShapeMismatch;
+    const total = totalElements(x.shape);
+    const num_rows = total / C;
+
+    const x_buf = try requireCudaBuffer(x);
+    const ctx = x_buf.ctx;
+
+    var out_buf = try DeviceBuffer.alloc(ctx, total);
+    errdefer out_buf.deinit();
+
+    try launchSoftmaxKernel(ctx, "log_softmax_last", x_buf, out_buf, num_rows, C);
+    return wrapContiguousOutput(out_buf, x.shape, x.requires_grad);
+}
