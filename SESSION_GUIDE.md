@@ -39,61 +39,28 @@ it with CUDA. The project follows a hybrid approach: implementation-agent mode
 ### Stage 1 — Project Scaffold ✅ COMPLETE
 **Commit:** `153095b stage(1): scaffold, overview, agent brief`
 
-Files created:
-- `build.zig`, `build.zig.zon` — full spec with `-Dcuda`, `-Dcuda_arch`, `-Dcuda_home`, `-Dexample`, `-Dseed`
-- `src/root.zig` — re-export scaffolding (all stages pre-planned as comments)
-- `src/core/errors.zig` — `LabError` error set
-- `tests/unit_all.zig` — module-based test aggregator
-- `AGENTS.md` — hybrid mode agent brief
-- `README.md`, `LICENSE` (MIT, Joel Wang), `.gitignore`, `tools/requirements.txt`
-- `docs/00_overview.md` — 283 lines: mission, ecosystem, locked decisions D1-D14, repo layout, glossary
-- `plan.md` — copied from user's Downloads
+### Stage 2 — CPU Tensor Foundation ✅ COMPLETE
+**Commit:** `001c74e stage(2): cpu tensor foundation` — 7 files, 3082 insertions
 
-Acceptance: ✅ `zig build` succeeds, `zig build test` passes
+### Stage 3 — Tape-based Autograd ✅ COMPLETE
+**Commit:** `f8405e3 stage(3): tape-based autograd` — 15 files, 5112 insertions
 
-### Stage 2 — CPU Tensor Foundation ✅ COMPLETE (uncommitted)
+### Stage 4 — NN Layers + Optimizers ✅ COMPLETE
+**Commit:** `b02801b stage(4): nn layers and optimizers` — 18 files, 3638 insertions
 
-**Files completed (all compile and pass tests):**
+### Stage 5 — Tokenizer + Data Pipeline ✅ COMPLETE
+**Commit:** `d286c8a stage(5): word-level tokenizer and dataset`
 
-| File | Contents | Tests |
-|------|----------|-------|
-| `src/core/dtype.zig` | DType enum (.f32 only), sizeInBytes(), label() | 2 |
-| `src/core/device.zig` | Device enum (.cpu, .cuda), isCuda(), label() | 3 |
-| `src/core/rng.zig` | Rng wrapping Xoshiro256, floatF32(), normalF32() (Box-Muller) | 5 |
-| `src/tensor/shape.zig` | Shape/Strides structs, init1D-4D, computeStrides, totalElements, isContiguous, equals, toString, broadcastShapes, squeeze | ~24 |
-| `src/tensor/tensor.zig` | Tensor struct (data, shape, strides, dtype, device, owned, autograd fields), init/deinit, at/atPtr, flatIndex, isContiguous, view, reshape, transpose2d, copyTo, fill | ~15 |
-| `src/tensor/print.zig` | debugSummary (shape/strides/stats in 1 pass), printValues | ~4 |
-| `src/tensor/ops/create.zig` | zeros, ones, full, randn, randu, arange, fromSlice | ~9 |
-| `src/tensor/ops/elementwise.zig` | add, sub, mul, div (broadcast), addScalar, mulScalar, addInPlace, neg | ~13 |
-| `src/tensor/ops/reduce.zig` | sum, mean, max (with axis), sumAll | ~7 |
-| `src/tensor/ops/matmul.zig` | matmul (ikj cache-friendly), matmulBatch, transpose2d | ~7 |
-| `src/tensor/ops/unary.zig` | exp, log, neg, relu, geluExact | ~5 |
-| `src/tensor/ops/softmax.zig` | numerically stable softmax, logSoftmax (last axis) | ~5 |
-| `src/tensor/ops/loss.zig` | crossEntropy (fused log_softmax + NLL) | ~4 |
-
-**Total: ~103 tests passing**
-
-**Examples:**
-- `examples/01_tensor_playground.zig` — 13-section runnable example covering all Stage 2 ops
-
-**Documentation:**
-- `docs/01_zig_primer.md` — 803 lines: Zig 0.16 concepts, 15-entry gotcha table, 10-entry common mistakes
-- `docs/02_tensors.md` — 973 lines: row-major strides, broadcasting, softmax stability, ikj matmul, views
-- `docs/02b_from_tensors_to_training.md` — 861 lines: bridges Stage 2 ops to ML/DL, forward-pass trace, PyTorch equivalents
-
-**Acceptance verified:** `zig build test` green, example runs, all docs 500+ lines
-
-**Remaining:** Commit as `stage(2): cpu tensor foundation`
-
-### Stage 3 — Tape-based Autograd 🔲 NOT STARTED
-
-### Stage 4 — nn Module and Optimizers 🔲 NOT STARTED
-
-### Stage 5 — Tokenizer and Dataset Pipeline 🔲 NOT STARTED
-
-### Stage 6 — End-to-end CPU Training 🔲 NOT STARTED
+### Stage 6 — End-to-end CPU Training ✅ COMPLETE
+**Commit:** `015da3c stage(6): end-to-end cpu training` — 10 files, 1530 insertions
+- `src/lab/train.zig` — Trainer, generate(), gradient clipping, grad norm logging
+- `examples/06_train_shakespeare.zig`, `examples/07_generate.zig`
+- `docs/07_cpu_training.md` — 492 lines
+- Bug fixes: backwardCrossEntropy @round, reshapeTracked, NamedParam, dangling pointers, beta2=0.999
+- All 215+ tests pass, 0 leaks
 
 ### Stage 7 — CUDA Backend 🔲 NOT STARTED
+See AGENTS.md "Stage 7: Next steps" for detailed sub-stages 7.A through 7.I.
 
 ### Stage 8 — Debugging and N-block Refactor 🔲 NOT STARTED
 
@@ -183,33 +150,35 @@ zig build docs
 
 ## 7. How to Resume Implementation
 
-### Stage 2: Commit (if not yet done)
+### To start Stage 7 (CUDA Backend):
 
-If Stage 2 is not yet committed, commit it now:
+Read `plan.md` Stage 7 section carefully, and `AGENTS.md` "Stage 7: Next steps"
+for the detailed sub-stage ordering (7.A through 7.I).
 
-```bash
-git add -A
-git commit -m "stage(2): cpu tensor foundation"
-```
+Key files to create (in order):
+1. `src/backend/cuda/bindings.zig` — dlopen/dlsym for libcuda, libcudart, libcublas
+2. `src/backend/cuda/context.zig` — CudaContext (device, context, stream, cuBLAS handle)
+3. `src/backend/cuda/mem.zig` — DeviceBuffer (cuMemAlloc/cuFree, HtoD, DtoH)
+4. `src/backend/backend.zig` — Backend vtable + CPU naive dispatch
+5. `src/backend/cuda/gemm.zig` — Row-major cuBLAS GEMM wrapper (**most error-prone**)
+6. `src/backend/cuda/module.zig` — PTX loading via cuModuleLoadData
+7. `src/backend/cuda/kernels/*.cu` — 8 kernel files (elementwise, softmax, layernorm, gelu, embedding, causal_mask, ce_loss, adamw)
+8. `src/backend/cuda/dispatch.zig` — CUDA dispatcher implementing Backend.VTable
+9. `examples/08_cuda_vs_cpu.zig` — Cross-validation
+10. `docs/08_backends_cuda.md`
 
-Acceptance already verified:
-- `zig build test` green with ~103 tests
-- `01_tensor_playground.zig` runs with expected output
-- All doc chapters 500+ lines
+**Critical Zig 0.16.0 patterns for CUDA work:**
+- Load `skills/modern-zig-0-16-tutor/references/09-c-interop-0-16.md` and
+  `references/17-zig-cuda-interop-notes.md` for C interop patterns
+- dlopen/dlsym: `extern fn dlopen(path: [*:0]const u8, mode: c_int) ?*anyopaque;`
+- C function pointers: `pub const CUresult = c_uint;` etc.
+- `callconv(.c)` for all CUDA callback signatures
+- Link `libc` + `dl`, never `libcuda` directly (D1)
 
-### To start Stage 3 (Autograd):
+### Stages 8-9:
 
-Read `plan.md` Section on Stage 3 carefully. Key files to create:
-- `src/autograd/node.zig`, `tape.zig`, `backward.zig`, `gradcheck.zig`
-- Extend `src/tensor/tensor.zig` (requires_grad, grad, tape_node fields already declared)
-- `examples/02_autograd_scalar.zig`, `03_autograd_tensor.zig`
-- `docs/03_autograd.md`
-
-Build incrementally: implement simple backwards first (add/sub/mul/div), test each, then move to complex ones (matmul, softmax, CE). The tape-based design is in plan.md Stage 3.
-
-### Stages 4-9:
-
-Follow plan.md precisely. Each stage has: files to create, design notes, acceptance criteria, commit message format.
+Follow plan.md precisely. Each stage has: files to create, design notes,
+acceptance criteria, commit message format.
 
 ---
 
@@ -219,12 +188,12 @@ Follow plan.md precisely. Each stage has: files to create, design notes, accepta
 zig-transformer-lab/
 ├── build.zig              ✅ Full spec with CUDA options
 ├── build.zig.zon          ✅ Zig 0.16.0 pinned
-├── AGENTS.md              ✅ Hybrid mode agent brief
+├── AGENTS.md              ✅ Agent brief (Stages 1-6 done, Stage 7 next)
 ├── README.md              ✅
 ├── LICENSE                ✅ MIT, Joel Wang
 ├── .gitignore             ✅
 ├── plan.md                ✅ 1300-line implementation plan
-├── skills/                ✅ modern-zig-0-16-tutor (copied from zig-transformer)
+├── skills/                ✅ modern-zig-0-16-tutor
 │   └── modern-zig-0-16-tutor/
 │       ├── SKILL.md
 │       ├── references/    (19 files: build, io, allocators, containers, C interop, CUDA, ML, testing, etc.)
@@ -234,32 +203,47 @@ zig-transformer-lab/
 │       ├── scripts/      (4 files: stale pattern detector, version checker, validator)
 │       └── tests/        (2 files: expected stale/modern patterns)
 ├── docs/
-│   ├── 00_overview.md     ✅ 283 lines
+│   ├── 00_overview.md     ✅ 291 lines
 │   ├── pre_flight.md      ✅ Local only (gitignored)
 │   ├── 01_zig_primer.md   ✅ 803 lines (Stage 2)
-│   ├── 02_tensors.md      ✅ 973 lines (Stage 2)
-│   └── 02b_from_tensors_to_training.md ✅ 861 lines (Stage 2)
+│   ├── 02_tensors.md       ✅ 973 lines (Stage 2)
+│   ├── 02b_from_tensors_to_training.md ✅ 861 lines (Stage 2)
+│   ├── 03_autograd.md     ✅ (Stage 3)
+│   ├── 03b_from_autograd_to_training.md ✅ (Stage 3)
+│   ├── 04_nn.md           ✅ 858 lines (Stage 4)
+│   ├── 04b_from_nn_to_training.md ✅ 1072 lines (Stage 4/5)
+│   ├── 05_transformer_math.md ✅ (Stage 4)
+│   ├── 06_tokenizer_data.md ✅ (Stage 5)
+│   └── 07_cpu_training.md ✅ 492 lines (Stage 6)
 ├── src/
-│   ├── root.zig           ✅ Stage 1+2 wired
+│   ├── root.zig           ✅ Stages 1-6 wired
 │   ├── core/              ✅ errors, dtype, device, rng
-│   ├── tensor/             ✅ shape, tensor, print
-│   │   └── ops/           ✅ create, elementwise, reduce, matmul, unary, softmax, loss
-│   ├── autograd/          🔲 Stage 3
-│   ├── nn/                🔲 Stage 4
-│   ├── optim/             🔲 Stage 4
-│   ├── tokenizer/         🔲 Stage 5
-│   ├── data/              🔲 Stage 5
-│   ├── backend/           🔲 Stage 7
+│   ├── tensor/            ✅ shape, tensor, print
+│   │   └── ops/           ✅ create, elementwise, reduce, matmul, unary, softmax, loss, shape_ops
+│   ├── autograd/          ✅ node, tape, backward, gradcheck (Stage 3)
+│   ├── nn/                ✅ module, linear, embedding, layernorm, activations, attention, mlp, block, model (Stage 4)
+│   ├── optim/             ✅ optimizer, sgd, adamw (Stage 4)
+│   ├── tokenizer/         ✅ vocab, word (Stage 5)
+│   ├── data/              ✅ dataset, windowing, batcher (Stage 5)
+│   ├── backend/           🔲 Stage 7 (backend.zig, cpu_naive/, cuda/)
 │   ├── debug/             🔲 Stage 8
-│   └── lab/               🔲 Stage 6
+│   └── lab/               ✅ train.zig (Stage 6)
 ├── examples/
-│   └── 01_tensor_playground.zig ✅ 13-section runnable example (Stage 2)
+│   ├── 01_tensor_playground.zig ✅ (Stage 2)
+│   ├── 02_autograd_scalar.zig  ✅ (Stage 3)
+│   ├── 03_autograd_tensor.zig  ✅ (Stage 3)
+│   ├── 04_overfit_one_batch.zig ✅ (Stage 4)
+│   ├── 05_train_tiny.zig       ✅ (Stage 6 fixes)
+│   ├── 06_train_shakespeare.zig ✅ (Stage 6)
+│   └── 07_generate.zig         ✅ (Stage 6)
 ├── tests/
-│   └── unit_all.zig       ✅ Module-based aggregator (dead code — see AGENTS.md)
+│   └── unit_all.zig       ✅ Dead code — see AGENTS.md
 ├── tools/
 │   ├── requirements.txt   ✅
 │   └── .venv/             ✅ numpy+torch (gitignored)
-└── data/                  🔲 Stage 5
+└── data/
+    ├── tiny.txt           ✅ ~5 KB crafted corpus (Stage 5)
+    └── tinyshakespeare.txt ✅ ~1 MB Shakespeare (Stage 5)
 ```
 
 ---
@@ -296,8 +280,15 @@ The `skills/modern-zig-0-16-tutor/` directory is a comprehensive Zig 0.16.0 refe
 5. **Tensor.transpose2d** returns a view (owned=false). Don't deinit it independently.
 6. **broadcastShapes** returns `!Shape` (can fail with ShapeMismatch). Always use `try`.
 7. **crossEntropy** expects targets stored as f32 values (rounds to int for indexing).
-8. **The `seed` build option** is declared but not yet consumed by examples (placeholder for Stage 6).
-9. **`std.Io.get()` does not exist in 0.16.0.** There is no global stdout writer. In examples, use `init.io.lockStderr(&buffer, null)` to get a locked stderr writer. The `Init` struct provides the `io: Io` field.
+8. **Always use `reshapeTracked()` in training loop.** Untracked `reshape()` creates a VIEW sharing tape_node → silent gradient shape mismatch. (Stage 6 bug)
+9. **Always use `@round` before `@intFromFloat` on indices.** `@intFromFloat` truncates towards zero. (Stage 6 bug)
+10. **Don't store HashMap-containing structs (AdamW) as fields in structs returned by value.** Internal self-referential pointers corrupt on copy. Create locally in `train()`. (Stage 6 bug)
+11. **Don't collect params in `init()` if model is copied into struct.** Pointers to local's fields dangle after `return Trainer{ .model = model }`. (Stage 6 bug)
+12. **`collectNamedParams` needs pointer self (`*TinyWordTransformer`)**. By-value creates dangling pointers to stack-local copy. (Stage 6 bug)
+13. **Gradient clipping is essential** for training stability. Default `grad_clip_norm=5.0`. (Stage 6)
+14. **`beta2=0.999`** (not 0.95) is the correct default for AdamW. 0.95 causes instability. (Stage 6)
+
+**Full 35-entry gotcha table:** See `AGENTS.md` "Zig 0.16.0 compilation gotchas" section.
 
 ---
 
@@ -323,13 +314,14 @@ Full table in `docs/00_overview.md` or `plan.md` Section 2.
 When starting a new session, do these in order:
 
 1. `cd /home/joelwang-rtx/Desktop/ai_lab/zig-transformer-lab`
-2. Read `AGENTS.md` (agent contract)
+2. Read `AGENTS.md` (agent contract, progress, gotchas, next steps)
 3. Read this file (`SESSION_GUIDE.md`) for current state
-4. Read `src/root.zig` to see what's wired vs commented
-5. Check `git log --oneline` for completed stages
-6. Run `export PATH="/home/joelwang-rtx/.local/bin:$PATH" && zig build test` to verify baseline
-7. Consult `skills/modern-zig-0-16-tutor/SKILL.md` for any Zig API questions
-8. Pick up where the last stage left off
+4. Check `git log --oneline` for completed stages (expect 6 commits)
+5. Run `export PATH="/home/joelwang-rtx/.local/bin:$PATH" && zig build test` to verify baseline (215+ tests)
+6. For Stage 7 CUDA work: also verify `nvcc --version` and `nvidia-smi`
+7. Load `skills/modern-zig-0-16-tutor/SKILL.md` for any Zig API questions
+8. Load `skills/modern-zig-0-16-tutor/references/09-c-interop-0-16.md` and `references/17-zig-cuda-interop-notes.md` for CUDA interop
+9. Pick up at Stage 7 (CUDA Backend) — see AGENTS.md for sub-stages 7.A–7.I
 
 ---
 

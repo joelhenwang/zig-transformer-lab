@@ -26,21 +26,26 @@ code that teaches how PyTorch-like systems work internally.
 | 3 — Tape-based Autograd | **Done** | Commit `f8405e3` — 15 files, 5112 insertions |
 | 4 — NN Layers + Optimizers | **Done** | Commit `b02801b` — 18 files, 3638 insertions |
 | 5 — Tokenizer + Data Pipeline | **Done** | Commit `d286c8a` — 7 source files, 2 data files, 2 docs, 1 example |
-| 6 — End-to-end CPU Training | **Done** | This session — Trainer, generation, gradient clipping, bug fixes |
-| 7–9 | Not started | |
+| 6 — End-to-end CPU Training | **Done** | Commit `015da3c` — Trainer, generation, gradient clipping, bug fixes |
+| 7 — CUDA Backend | **Not started** | See Stage 7 section below |
+| 8–9 | Not started | |
 
 **Stage 3 committed:** `stage(3): tape-based autograd`
 **Stage 4 committed:** `stage(4): nn layers and optimizers`
-
 **Stage 5 committed:** `stage(5): word-level tokenizer and dataset`
-**Stage 6 committed:** (pending)
+**Stage 6 committed:** `stage(6): end-to-end cpu training`
 
-### Session history — what was done this session (Stage 6)
+### Stage 6 — What was implemented
 
-1. Implemented `src/lab/train.zig` — Trainer struct (TrainConfig, train loop, gradient clipping, grad norm logging), generate() function (autoregressive top-k + temperature sampling), GenerateOpts
-2. Implemented `examples/06_train_shakespeare.zig` — CPU training on Shakespeare with Trainer
-3. Implemented `examples/07_generate.zig` — Load checkpoint, generate text with top-k/temperature settings
+### Stage 6 — New source files
+
+1. `src/lab/train.zig` — Trainer struct (TrainConfig, train loop, gradient clipping, grad norm logging), generate() function (autoregressive top-k + temperature sampling), GenerateOpts
+2. `examples/06_train_shakespeare.zig` — CPU training on Shakespeare with Trainer
+3. `examples/07_generate.zig` — Load checkpoint, generate text with top-k/temperature settings
 4. Wired `lab` module into `src/root.zig` with test block entry
+
+### Stage 6 — Bug fixes
+
 5. Fixed `backwardCrossEntropy` — missing `@round` on target index (line 666 of backward.zig). `@intFromFloat` truncates towards zero, so `2.9999` → 2 instead of 3. Added `@round` to match the forward pass.
 6. Fixed untracked reshape bug in training loop — `logits_3d.reshape(...)` creates a VIEW sharing tape_node, causing CE gradient (B*T, V) to bypass reshape backward. Replaced with `ops_shape.reshapeTracked()` so gradient flows with correct shape.
 7. Same untracked reshape fix applied to examples 04 and 05.
@@ -48,7 +53,15 @@ code that teaches how PyTorch-like systems work internally.
 9. Changed default `beta2` from 0.95 to 0.999 (standard Adam value). beta2=0.95 caused training instability: the second moment estimate adapts too fast, making the effective learning rate oscillate when gradients change direction.
 10. Fixed `model.zig` — NamedParam type for collectNamedParams (anonymous struct mismatch across scopes). Changed save/load to take `*TinyWordTransformer` (pointer self) so collectNamedParams can access mutable weight pointers.
 11. Fixed dangling pointer bug in Trainer.init() — collecting params before model is copied into struct makes pointers to local variable's fields. Moved params collection and optimizer creation into train().
-12. All 215+ tests pass, 0 leaks
+
+### Stage 6 — Documentation
+
+12. `docs/07_cpu_training.md` — 492 lines: training loop trace, reshape bug, @round bug, gradient clipping, beta2 analysis, generation algorithm, checkpoint format, PyTorch equivalents
+
+### Stage 6 — Acceptance criteria (all pass)
+
+- `zig build test` — 215+ tests pass, 0 leaks
+- Training is stable at lr=1e-3 with beta2=0.999 on both tiny.txt and Shakespeare
 
 **Training dynamics discovered:**
 - lr=1e-3 with beta2=0.999 is stable on tiny.txt (loss 6.1→4.2 over 500 steps)
@@ -83,10 +96,8 @@ code that teaches how PyTorch-like systems work internally.
 ### Examples
 19. `examples/04_overfit_one_batch.zig` — Training loop: V=32, D=16, T=8, B=2, 50 steps with AdamW. Loss 3.83→3.09.
 
-### Documentation (committed)
+### Documentation (committed in Stage 4 and 5)
 20. `docs/04_nn.md` — 858 lines
-
-### Documentation (uncommitted, from this session)
 21. `docs/04b_from_nn_to_training.md` — 1072 lines: why each layer exists, optimizer math, complete training step trace, gradient flow, shape trace, keepAlive memory management, PyTorch equivalents, 8 common mistakes
 
 ### Key bugs fixed in Stage 4
@@ -405,12 +416,112 @@ and `docs/00_overview.md`:
 2. `src/backend/cpu_naive/dispatch.zig` — wraps Stage 2 ops
 3. `src/backend/cuda/{bindings,context,mem,module,gemm,dispatch}.zig`
 4. `src/backend/cuda/kernels/*.cu` — offline .ptx kernels
-5. `docs/08_cuda_backend.md`
+5. `docs/08_backends_cuda.md`
 
 ### Key design decisions already locked
 - **D9:** cuBLAS for GEMM, custom kernels for elementwise/softmax/etc
 - **D10:** .ptx loaded via cuModuleLoadData (no NVRTC)
 - **D11:** dlopen for CUDA libraries at runtime
+
+### Recommended implementation order (sub-stages)
+
+Implement Stage 7 in this order to maintain a compilable/testable codebase
+at every step:
+
+#### 7.A — Bindings (`src/backend/cuda/bindings.zig`)
+- Dynamically load `libcuda.so.1`, `libcudart.so`, `libcublas.so` via dlopen/dlsym
+- Resolve only the symbols we need (see plan.md §7.A for the full list)
+- All wrappers convert non-success codes into `error.CudaError`
+- Debug builds log numeric code + symbol name; store `cuGetErrorString` /
+  `cublasGetStatusString` message for `debug.lastCudaError()` retrieval
+- **Test:** dlopen succeeds on a CUDA-capable machine; symbol resolution
+  returns non-null function pointers
+
+#### 7.B — Context (`src/backend/cuda/context.zig`)
+- `CudaContext` struct: device, context, stream, cuBLAS handle, ptx_modules
+  HashMap, allocator
+- `init(alloc, device_id)`: cuInit → cuDeviceGet → cuCtxCreate_v2 →
+  cuStreamCreate → cublasCreate_v2 → cublasSetStream_v2 → load .ptx
+- `deinit()`: destroy in reverse order (cublas → stream → context)
+- **Test:** init/deinit cycle on GPU 0 without errors
+
+#### 7.C — Memory (`src/backend/cuda/mem.zig`)
+- `DeviceBuffer` RAII over `cuMemAlloc_v2` / `cuMemFree_v2`
+- `DeviceBuffer.from_host(ctx, slice_f32) !Self` — cuMemcpyHtoD_v2
+- `self.to_host(alloc) ![]f32` — cuMemcpyDtoH_v2
+- `self.deinit()` — cuMemFree_v2
+- `Tensor.to_cuda(ctx)` and `Tensor.to_cpu(alloc)` preserve shape/strides
+- **Test:** round-trip host→device→host preserves data exactly
+
+#### 7.D — Backend vtable + CPU naive dispatch
+- `src/backend/backend.zig`: Backend struct + VTable (matmul, add, softmax,
+  layernorm, gelu, embedding_fwd/bwd, causal_mask, ce_loss, adamw_step,
+  to_device, to_host)
+- `src/backend/cpu_naive/dispatch.zig`: wraps existing Stage 2 CPU ops into
+  vtable function signatures
+- **Test:** CPU backend produces same results as direct op calls
+
+#### 7.E — Row-major GEMM wrapper (`src/backend/cuda/gemm.zig`)
+- **This is the single most error-prone spot in the codebase.**
+- Presents row-major `C = alpha * A @ B + beta * C` API
+- Internally calls cuBLAS (column-major) with swapped operands
+- Batched matmul uses `cublasSgemmStridedBatched` for `(B,M,K)@(B,K,N)`
+- **Test:** multiply two known `(2,3)@(3,4)` matrices; compare vs CPU
+  within `1e-5`
+
+#### 7.F — PTX module loading (`src/backend/cuda/module.zig`)
+- Load .ptx files from `zig-out/ptx/` via `cuModuleLoadData`
+- Cache by file stem in `CudaContext.ptx_modules`
+- `getFunction(ctx, module_name, kernel_name) !CUfunction`
+- **build.zig:** `nvcc -arch=sm_89 -ptx` step for each `.cu` file; output
+  to `zig-out/ptx/`. Use static `kernel_names` list (no filesystem iteration)
+
+#### 7.G — CUDA kernels (`src/backend/cuda/kernels/*.cu`)
+Minimum set (each with forward + backward where applicable):
+- `elementwise.cu` — add, sub, mul, div, scalar ops, in-place residual add
+- `softmax.cu` — row-wise with max-subtract trick; block per row, shared
+  memory for max + sum
+- `layernorm.cu` — online mean/variance per row (Welford), gamma/beta affine
+- `gelu.cu` — exact forward and backward
+- `embedding.cu` — forward gather; backward `atomicAdd` scatter
+- `causal_mask.cu` — adds -infinity above diagonal into scores
+- `ce_loss.cu` — fused `log_softmax + NLL + grad` w.r.t. logits
+- `adamw.cu` — per-parameter step with bias correction
+
+Every kernel: starts with `if (idx >= n) return;` bounds check, never
+out-of-bounds reads/writes, has matching unit test with tiny fixed inputs
+and CPU reference.
+
+#### 7.H — CUDA dispatch (`src/backend/cuda/dispatch.zig`)
+- Implements `Backend.VTable` for CUDA path
+- Each dispatch function: packs params → `cuLaunchKernel` →
+  `cuStreamSynchronize` (for now; async later if needed)
+- Autograd calls `backend.vtable.matmul(...)` instead of `ops.matmul(...)`
+  directly; CPU and CUDA provide identical semantics
+
+#### 7.I — Cross-validation (`examples/08_cuda_vs_cpu.zig`)
+- Full-model forward on CPU and CUDA on identical random batch: max abs
+  diff < `5e-5`
+- One training step on both: gradient max abs diff < `1e-4`, parameter diff
+  after `optim.step` < `2e-4`
+
+### Stage 7 acceptance criteria
+- Every kernel has a unit test
+- `08_cuda_vs_cpu.zig` passes tolerances above
+- `06_train_shakespeare.zig -Dcuda=true` is at least 30x faster than CPU
+  and produces a similar loss trajectory (final loss within 10% of CPU run
+  at matched steps)
+- `docs/08_backends_cuda.md` committed alongside code
+
+### Stage 7 docs outline (`docs/08_backends_cuda.md`)
+- Why matmul dominates transformer compute (FLOP-count derivation)
+- Why cuBLAS
+- What cuBLAS hides (algorithm selection, tensor cores; not used here since
+  f32, but mentioned)
+- How PyTorch dispatches high-level ops to cuBLAS/cuDNN (ATen dispatcher)
+- Row-major/column-major derivation with diagrams
+- PTX loading lifecycle and why we precompile offline
+- Kernel-by-kernel walkthrough
 
 ## When stuck
 
