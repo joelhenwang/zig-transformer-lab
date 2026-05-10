@@ -197,7 +197,7 @@ Monitor for:
 | 6 — End-to-end CPU Training | **Done** | Commit `015da3c` — Trainer, generation, gradient clipping, bug fixes |
 | 6.5 — CPU Hardening | **Done** | Commits `f9c1d3b`, `28e73e1`, `97b0aaa`, `3331801` (refactor + docs + oracle + oracle expansion) |
 | 7-setup — Remote RTX workflow | **Done** | Commit `1e3b540` — SSH scripts, `.gitattributes`, smoke test confirmed |
-| 7 — CUDA Backend | **In progress** | PR-α (07bd274), PR-β (3c409a1), PR-γ (be977ea + fix 6b918e6), PR-δ (fe269ef), PR-ε (be6e0f8), PR-ζ (d2b458f + fixes 6c8b630, 3d73ef0), PR-η (849947c + tape/routing cab742c) landed — 7 elementwise CUDA kernels dispatching with `ops_elementwise.add` routing CUDA inputs to GPU + tape cloning via DtoD, 267/267 CPU + 31/31 CUDA tests pass on RTX 4060 Ti, compute-sanitizer memory-clean. Next: PR-θ (broadcasting) or backward parity. See `docs/stage7_plan.md`. |
+| 7 — CUDA Backend | **In progress** | PRs α–ι landed (07bd274 through 43a2f1e plus fix commits) — full forward + backward autograd loop working on GPU for add_2d, incl. elementwise routing, broadcasting, reductions, sumToShape, device-aware zerosLike/onesLike/tape seed; 267/267 CPU + 40/40 CUDA tests pass on RTX 4060 Ti, compute-sanitizer memory-clean. Next: PR-κ (cuBLAS GEMM + docs/08) or PR-λ (softmax). See `docs/stage7_plan.md`. |
 | 8–9 | Not started | |
 
 **Stage 3 committed:** `stage(3): tape-based autograd`

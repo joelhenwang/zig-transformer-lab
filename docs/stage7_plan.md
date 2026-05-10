@@ -183,9 +183,9 @@ append an entry in Section 10.
 | 4 | δ | Tensor `Storage.cuda` variant | γ | `[x]` fe269ef |
 | 5 | ε | `Tensor.toCuda` / `toCpu` + roundtrip | δ | `[x]` be6e0f8 |
 | 6 | ζ | PTX loader + vector-add smoke kernel | β | `[x]` d2b458f (+6c8b630, 3d73ef0 fixes) |
-| 7 | η | Elementwise CUDA ops (same-shape) + parity | ε, ζ | `[x]` 849947c (forward) + cab742c (tape + add routing) |
-| 8 | θ | Broadcasting + scalar CUDA ops + parity | η | `[ ]` |
-| 9 | ι | CUDA reductions (sum, mean, sumAll) + parity | θ | `[ ]` |
+| 7 | η | Elementwise CUDA ops (same-shape) + parity | ε, ζ | `[x]` 849947c (forward) + cab742c (tape + add routing) + 2ad2ba7 (remaining 6 ops routed) |
+| 8 | θ | Broadcasting + scalar CUDA ops + parity | η | `[x]` 809fd90 (forward; backward via PR-ι) |
+| 9 | ι | CUDA reductions (sum, mean, sumAll) + parity | θ | `[x]` 43a2f1e (sum/sumAll/broadcastTo/sumToShape + full add_2d fwd+bwd oracle parity) |
 | 10 | κ | cuBLAS row-major GEMM + docs/08 | γ | `[ ]` |
 | 11 | λ | Softmax + causal mask CUDA + parity | η | `[ ]` |
 | 12 | μ | Embedding + cross-entropy + AdamW CUDA + parity | κ, λ | `[ ]` |
@@ -1666,7 +1666,9 @@ Appended to as PRs land. Format: `- [x] PR-X — <scope> (commit HASH, YYYY-MM-D
 - [x] PR-δ — Tensor Storage.cuda variant (fe269ef, 2026-05-10) — 267/267 CPU + 14/14 CUDA pass on RTX 4060 Ti, compute-sanitizer clean (0 leaks, 0 errors)
 - [x] PR-ε — Tensor.toCuda / toCpu (be6e0f8, 2026-05-10) — 267 CPU + 19/19 CUDA pass on RTX 4060 Ti, compute-sanitizer clean (0 leaks, 0 errors)
 - [x] PR-ζ — PTX loader + vector-add smoke kernel (d2b458f + null-term fix 6c8b630 + log-level fix 3d73ef0, 2026-05-10) — 267 CPU + 24/24 CUDA pass on RTX 4060 Ti (includes two real kernel launches with bit-identical CPU parity on 1024 elements); compute-sanitizer: 0 memory leaks, 0 memory-access errors (1 API-level error is the deliberate `expectError` on cuModuleGetFunction with a non-existent symbol)
-- [x] PR-η — Elementwise CUDA ops (849947c forward + cab742c tape/routing, 2026-05-10) — 267 CPU + 31/31 CUDA pass on RTX 4060 Ti; oracle add_2d forward parity matches PyTorch within rel_tol=1e-4, abs_tol=1e-5; `ops_elementwise.add` routes CUDA inputs to GPU dispatch and records on tape; `tape.cloneTensorData` DtoD-copies saved CUDA snapshots into `kept_alive_cuda`. Backward parity + remaining 6 op routings (sub/mul/div/neg/addScalar/mulScalar) deferred to a small follow-up. compute-sanitizer: 0 leaks, 0 memory errors.
+- [x] PR-η — Elementwise CUDA ops (849947c forward + cab742c tape/routing + 2ad2ba7 remaining 6 routings, 2026-05-10) — 267 CPU + 31 CUDA pass after PR-η.2; `ops_elementwise.{add,sub,mul,div,neg,addScalar,mulScalar}` and `ops_unary.neg` route CUDA inputs to GPU with tape recording; oracle add_2d forward parity matches PyTorch within rel_tol=1e-4, abs_tol=1e-5. compute-sanitizer: 0 leaks, 0 memory errors.
+- [x] PR-θ — Broadcasting elementwise CUDA (809fd90, 2026-05-10) — rank-4 stride-aware broadcast kernels for add/sub/mul/div; `ops_elementwise.*` picks fast path vs broadcast based on shape+layout; oracle add_broadcast_2d_1d forward parity matches within tolerance; 34/34 CUDA pass.
+- [x] PR-ι — CUDA reductions (43a2f1e, 2026-05-10) — sumAll (atomicAdd), sumAxis (row-major contiguous), bcast_copy + broadcastTo + sumToShape; device-aware zerosLike/onesLike + tape.backward seeds on the same device as loss; **full oracle add_2d forward+backward parity end-to-end on GPU**; 40/40 CUDA pass; compute-sanitizer 0 leaks, 0 memory errors.
 - [ ] PR-θ — Broadcasting / scalar CUDA ops + parity
 - [ ] PR-ι — CUDA reductions + parity
 - [ ] PR-κ — cuBLAS row-major GEMM + docs/08
