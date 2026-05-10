@@ -189,8 +189,9 @@ Monitor for:
 | 4 — NN Layers + Optimizers | **Done** | Commit `b02801b` — 18 files, 3638 insertions |
 | 5 — Tokenizer + Data Pipeline | **Done** | Commit `d286c8a` — 7 source files, 2 data files, 2 docs, 1 example |
 | 6 — End-to-end CPU Training | **Done** | Commit `015da3c` — Trainer, generation, gradient clipping, bug fixes |
-| 6.5 — CPU Hardening | **In progress** | PR-α underway |
-| 7 — CUDA Backend | **Blocked on 6.5** | See Stage 7 section below |
+| 6.5 — CPU Hardening | **Done** | Commits `f9c1d3b`, `28e73e1`, `97b0aaa`, `3331801` (refactor + docs + oracle + oracle expansion) |
+| 7-setup — Remote RTX workflow | **Done** | Commit `1e3b540` — SSH scripts, `.gitattributes`, smoke test confirmed |
+| 7 — CUDA Backend | **Ready to start** | Stage 6.5 and 7-setup both complete; begin with PR-α (dlopen loader smoke test) |
 | 8–9 | Not started | |
 
 **Stage 3 committed:** `stage(3): tape-based autograd`
