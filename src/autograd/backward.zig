@@ -302,13 +302,31 @@ fn backwardMatmul(
         .tensor_pair => |tp| {
             // dL/dA = dL/dC @ Bᵀ
             const bt = try tp.b.transpose2d();
-            const da_val = try ops_matmul.matmul(allocator, grad_output.*, bt, null);
-            result[0] = try heapAlloc(allocator, da_val);
+            // CUDA matmul requires contiguous inputs; the transpose
+            // view is non-contiguous. Materialise a fresh contiguous
+            // copy via bcast_copy (identity-shape broadcastTo) and
+            // deinit it after the matmul consumes it.
+            if (bt.device == .cuda) {
+                var bt_c = try cuda_dispatch.broadcastTo(bt, bt.shape);
+                defer bt_c.storage.deinit(allocator);
+                const da_val = try ops_matmul.matmul(allocator, grad_output.*, bt_c, null);
+                result[0] = try heapAlloc(allocator, da_val);
+            } else {
+                const da_val = try ops_matmul.matmul(allocator, grad_output.*, bt, null);
+                result[0] = try heapAlloc(allocator, da_val);
+            }
 
             // dL/dB = Aᵀ @ dL/dC
             const at = try tp.a.transpose2d();
-            const db_val = try ops_matmul.matmul(allocator, at, grad_output.*, null);
-            result[1] = try heapAlloc(allocator, db_val);
+            if (at.device == .cuda) {
+                var at_c = try cuda_dispatch.broadcastTo(at, at.shape);
+                defer at_c.storage.deinit(allocator);
+                const db_val = try ops_matmul.matmul(allocator, at_c, grad_output.*, null);
+                result[1] = try heapAlloc(allocator, db_val);
+            } else {
+                const db_val = try ops_matmul.matmul(allocator, at, grad_output.*, null);
+                result[1] = try heapAlloc(allocator, db_val);
+            }
         },
         else => return error.InvalidArgument,
     }
