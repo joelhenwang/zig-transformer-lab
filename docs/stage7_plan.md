@@ -181,7 +181,7 @@ append an entry in Section 10.
 | 2 | β | `CudaContext` lifecycle (device, context, stream, cuBLAS) | α | `[x]` 3c409a1 |
 | 3 | γ | `DeviceBuffer` alloc/free/copy | β | `[x]` be977ea (+6b918e6 fix) |
 | 4 | δ | Tensor `Storage.cuda` variant | γ | `[x]` fe269ef |
-| 5 | ε | `Tensor.toCuda` / `toCpu` + roundtrip | δ | `[ ]` |
+| 5 | ε | `Tensor.toCuda` / `toCpu` + roundtrip | δ | `[x]` be6e0f8 |
 | 6 | ζ | PTX loader + vector-add smoke kernel | β | `[ ]` |
 | 7 | η | Elementwise CUDA ops (same-shape) + parity | ε, ζ | `[ ]` |
 | 8 | θ | Broadcasting + scalar CUDA ops + parity | η | `[ ]` |
@@ -1664,7 +1664,7 @@ Appended to as PRs land. Format: `- [x] PR-X — <scope> (commit HASH, YYYY-MM-D
 - [x] PR-β — CudaContext lifecycle (3c409a1, 2026-05-10) — 6/6 pass on RTX 4060 Ti, compute-sanitizer clean
 - [x] PR-γ — DeviceBuffer alloc/free/copy (be977ea + fix 6b918e6, 2026-05-10) — 12/12 pass on RTX 4060 Ti, compute-sanitizer clean (0 leaks, 0 errors)
 - [x] PR-δ — Tensor Storage.cuda variant (fe269ef, 2026-05-10) — 267/267 CPU + 14/14 CUDA pass on RTX 4060 Ti, compute-sanitizer clean (0 leaks, 0 errors)
-- [ ] PR-ε — Tensor.toCuda / toCpu
+- [x] PR-ε — Tensor.toCuda / toCpu (be6e0f8, 2026-05-10) — 267 CPU + 19/19 CUDA pass on RTX 4060 Ti, compute-sanitizer clean (0 leaks, 0 errors)
 - [ ] PR-ζ — PTX loader + vector-add smoke kernel
 - [ ] PR-η — Elementwise CUDA ops (same-shape) + parity
 - [ ] PR-θ — Broadcasting / scalar CUDA ops + parity
