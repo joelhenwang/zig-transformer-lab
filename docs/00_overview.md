@@ -55,6 +55,7 @@ Recommended order:
 9. **05_transformer_math.md** — full shape trace for one transformer block
 10. **06_tokenizer_data.md** — word-level tokenizer, windowing, batching
 11. **07_cpu_training.md** — end-to-end CPU training loop, generation
+11b. **07b_learning_guide_training.md** — bridges Stage 6 code to ML/DL concepts
 12. **08_backends_cuda.md** — cuBLAS, PTX loading, kernel walk-throughs
 13. **09_debugging.md** — NaN hunting, compute-sanitizer, shape-assert workflow
 14. **10_pytorch_parallels.md** — mapping every concept back to PyTorch
