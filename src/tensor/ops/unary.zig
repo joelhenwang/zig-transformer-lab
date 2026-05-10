@@ -21,11 +21,16 @@
 //!   neg(x)    = -x
 //!   relu(x)   = max(0, x)
 //!   geluExact(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
+//!   sqrt(x)      = √x
 //!
 //!   GELU (Gaussian Error Linear Unit) is the activation used in the
 //!   original BERT and GPT-2 models.  The "exact" variant uses the
 //!   error function directly; a faster "approximate" variant (using
 //!   tanh) exists but is deferred to a later stage.
+//!
+//!   sqrt is needed by LayerNorm: the inverse standard deviation is
+//!   1 / sqrt(variance + eps), and composing this from our existing
+//!   ops means we need sqrt as a tracked operation.
 //!
 //! Memory ownership:
 //!   All functions return new owned tensors.  The caller must call
@@ -47,6 +52,9 @@ const LabError = @import("../../core/errors.zig").LabError;
 const Tensor = @import("../tensor.zig").Tensor;
 const Shape = @import("../shape.zig").Shape;
 const totalElements = @import("../shape.zig").totalElements;
+const Tape = @import("../../autograd/tape.zig").Tape;
+const Node = @import("../../autograd/node.zig").Node;
+const OpKind = @import("../../autograd/node.zig").OpKind;
 
 // ---------------------------------------------------------------------------
 // erf — Polynomial approximation (Abramowitz & Stegun, formula 7.1.26)
@@ -114,7 +122,7 @@ fn erfFloat(x: f64) f64 {
 ///   // out = [1, e, e^2] = [1.0, 2.718, 7.389]
 ///
 /// Memory: caller owns the returned tensor; must call deinit(allocator).
-pub fn exp(allocator: std.mem.Allocator, tensor: Tensor) LabError!Tensor {
+pub fn exp(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!Tensor {
     const n = totalElements(tensor.shape);
     var out = try Tensor.init(allocator, tensor.shape);
     errdefer out.deinit(allocator);
@@ -149,6 +157,20 @@ pub fn exp(allocator: std.mem.Allocator, tensor: Tensor) LabError!Tensor {
         out.data[flat] = @exp(tensor.data[offset]);
     }
 
+    if (tape) |t| {
+        if (tensor.requires_grad) {
+            const node_id = try t.record(Node{
+                .id = undefined,
+                .op = .exp,
+                .parents = .{ tensor.tape_node, null },
+                .n_parents = 1,
+                .saved = .{ .tensor_ref = tensor },
+            });
+            out.requires_grad = true;
+            out.tape_node = node_id;
+        }
+    }
+
     return out;
 }
 
@@ -165,7 +187,7 @@ pub fn exp(allocator: std.mem.Allocator, tensor: Tensor) LabError!Tensor {
 ///   // out = [0, 1, 2]
 ///
 /// Memory: caller owns the returned tensor; must call deinit(allocator).
-pub fn log(allocator: std.mem.Allocator, tensor: Tensor) LabError!Tensor {
+pub fn log(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!Tensor {
     const n = totalElements(tensor.shape);
     var out = try Tensor.init(allocator, tensor.shape);
     errdefer out.deinit(allocator);
@@ -190,6 +212,20 @@ pub fn log(allocator: std.mem.Allocator, tensor: Tensor) LabError!Tensor {
         out.data[flat] = @log(tensor.data[offset]);
     }
 
+    if (tape) |t| {
+        if (tensor.requires_grad) {
+            const node_id = try t.record(Node{
+                .id = undefined,
+                .op = .log,
+                .parents = .{ tensor.tape_node, null },
+                .n_parents = 1,
+                .saved = .{ .tensor_ref = tensor },
+            });
+            out.requires_grad = true;
+            out.tape_node = node_id;
+        }
+    }
+
     return out;
 }
 
@@ -205,7 +241,7 @@ pub fn log(allocator: std.mem.Allocator, tensor: Tensor) LabError!Tensor {
 ///   // out = [-1, 2, 0]
 ///
 /// Memory: caller owns the returned tensor; must call deinit(allocator).
-pub fn neg(allocator: std.mem.Allocator, tensor: Tensor) LabError!Tensor {
+pub fn neg(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!Tensor {
     const n = totalElements(tensor.shape);
     var out = try Tensor.init(allocator, tensor.shape);
     errdefer out.deinit(allocator);
@@ -230,6 +266,20 @@ pub fn neg(allocator: std.mem.Allocator, tensor: Tensor) LabError!Tensor {
         out.data[flat] = -tensor.data[offset];
     }
 
+    if (tape) |t| {
+        if (tensor.requires_grad) {
+            const node_id = try t.record(Node{
+                .id = undefined,
+                .op = .neg,
+                .parents = .{ tensor.tape_node, null },
+                .n_parents = 1,
+                .saved = .nothing,
+            });
+            out.requires_grad = true;
+            out.tape_node = node_id;
+        }
+    }
+
     return out;
 }
 
@@ -247,7 +297,7 @@ pub fn neg(allocator: std.mem.Allocator, tensor: Tensor) LabError!Tensor {
 ///   // out = [0, 0, 1]
 ///
 /// Memory: caller owns the returned tensor; must call deinit(allocator).
-pub fn relu(allocator: std.mem.Allocator, tensor: Tensor) LabError!Tensor {
+pub fn relu(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!Tensor {
     const n = totalElements(tensor.shape);
     var out = try Tensor.init(allocator, tensor.shape);
     errdefer out.deinit(allocator);
@@ -272,6 +322,20 @@ pub fn relu(allocator: std.mem.Allocator, tensor: Tensor) LabError!Tensor {
         out.data[flat] = @max(@as(f32, 0.0), tensor.data[offset]);
     }
 
+    if (tape) |t| {
+        if (tensor.requires_grad) {
+            const node_id = try t.record(Node{
+                .id = undefined,
+                .op = .relu,
+                .parents = .{ tensor.tape_node, null },
+                .n_parents = 1,
+                .saved = .{ .tensor_ref = tensor },
+            });
+            out.requires_grad = true;
+            out.tape_node = node_id;
+        }
+    }
+
     return out;
 }
 
@@ -290,7 +354,7 @@ pub fn relu(allocator: std.mem.Allocator, tensor: Tensor) LabError!Tensor {
 ///   // geluExact(1) = 0.5 * 1 * (1 + erf(1/sqrt(2))) ~ 0.8412
 ///
 /// Memory: caller owns the returned tensor; must call deinit(allocator).
-pub fn geluExact(allocator: std.mem.Allocator, tensor: Tensor) LabError!Tensor {
+pub fn geluExact(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!Tensor {
     const n = totalElements(tensor.shape);
     var out = try Tensor.init(allocator, tensor.shape);
     errdefer out.deinit(allocator);
@@ -324,6 +388,76 @@ pub fn geluExact(allocator: std.mem.Allocator, tensor: Tensor) LabError!Tensor {
         out.data[flat] = 0.5 * val * (1.0 + @as(f32, @floatCast(erf_val)));
     }
 
+    if (tape) |t| {
+        if (tensor.requires_grad) {
+            const node_id = try t.record(Node{
+                .id = undefined,
+                .op = .gelu,
+                .parents = .{ tensor.tape_node, null },
+                .n_parents = 1,
+                .saved = .{ .tensor_ref = tensor },
+            });
+            out.requires_grad = true;
+            out.tape_node = node_id;
+        }
+    }
+
+    return out;
+}
+
+/// Element-wise square root: √x.
+///
+/// Needed by LayerNorm: inv_std = 1 / sqrt(var + eps).
+/// The gradient: dL/dx = dL/dy * 1 / (2 * sqrt(x)).
+///
+/// For x < 0, returns NaN (IEEE 754 behavior).
+///
+/// Shape: in:(...) -> out:(...)  [same shape]
+///
+/// Worked example:
+///   // in = [0, 1, 4]  shape (3,)
+///   // out = [0, 1, 2]
+///
+/// Memory: caller owns the returned tensor; must call deinit(allocator).
+pub fn sqrt(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!Tensor {
+    const n = totalElements(tensor.shape);
+    var out = try Tensor.init(allocator, tensor.shape);
+    errdefer out.deinit(allocator);
+
+    for (0..n) |flat| {
+        var offset: usize = 0;
+        var remaining: usize = flat;
+        const ndim = tensor.shape.ndim();
+        var axis: usize = 0;
+        while (axis + 1 < ndim) : (axis += 1) {
+            var block: usize = 1;
+            var a2: usize = axis + 1;
+            while (a2 < ndim) : (a2 += 1) {
+                block *= tensor.shape.dims[a2];
+            }
+            const idx = remaining / block;
+            remaining %= block;
+            offset += idx * tensor.strides.values[axis];
+        }
+        offset += remaining * tensor.strides.values[axis];
+
+        out.data[flat] = @sqrt(tensor.data[offset]);
+    }
+
+    if (tape) |t| {
+        if (tensor.requires_grad) {
+            const node_id = try t.record(Node{
+                .id = undefined,
+                .op = .sqrt,
+                .parents = .{ tensor.tape_node, null },
+                .n_parents = 1,
+                .saved = .{ .tensor_ref = tensor },
+            });
+            out.requires_grad = true;
+            out.tape_node = node_id;
+        }
+    }
+
     return out;
 }
 
@@ -340,7 +474,7 @@ test "exp [0, 1, 2] = [1, e, e^2]" {
     t.data[1] = 1.0;
     t.data[2] = 2.0;
 
-    var out = try exp(alloc, t);
+    var out = try exp(alloc, t, null);
     defer out.deinit(alloc);
 
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), out.data[0], 1e-4);
@@ -357,7 +491,7 @@ test "log [1, e, e^2] = [0, 1, 2]" {
     t.data[1] = @floatCast(std.math.e);
     t.data[2] = @floatCast(std.math.e * std.math.e);
 
-    var out = try log(alloc, t);
+    var out = try log(alloc, t, null);
     defer out.deinit(alloc);
 
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), out.data[0], 1e-4);
@@ -374,7 +508,7 @@ test "neg [-1, 0, 1] = [1, 0, -1]" {
     t.data[1] = 0.0;
     t.data[2] = 1.0;
 
-    var out = try neg(alloc, t);
+    var out = try neg(alloc, t, null);
     defer out.deinit(alloc);
 
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), out.data[0], 1e-4);
@@ -391,7 +525,7 @@ test "relu [-1, 0, 1] = [0, 0, 1]" {
     t.data[1] = 0.0;
     t.data[2] = 1.0;
 
-    var out = try relu(alloc, t);
+    var out = try relu(alloc, t, null);
     defer out.deinit(alloc);
 
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), out.data[0], 1e-4);
@@ -406,7 +540,7 @@ test "geluExact [0] ~ 0, [1] ~ 0.8412" {
     defer t0.deinit(alloc);
     t0.data[0] = 0.0;
 
-    var out0 = try geluExact(alloc, t0);
+    var out0 = try geluExact(alloc, t0, null);
     defer out0.deinit(alloc);
     // gelu(0) = 0.5 * 0 * (1 + erf(0)) = 0
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), out0.data[0], 1e-4);
@@ -415,7 +549,7 @@ test "geluExact [0] ~ 0, [1] ~ 0.8412" {
     defer t1.deinit(alloc);
     t1.data[0] = 1.0;
 
-    var out1 = try geluExact(alloc, t1);
+    var out1 = try geluExact(alloc, t1, null);
     defer out1.deinit(alloc);
     // gelu(1) = 0.5 * 1 * (1 + erf(1/sqrt(2))) ~ 0.8412
     try std.testing.expectApproxEqAbs(@as(f32, 0.8412), out1.data[0], 1e-3);

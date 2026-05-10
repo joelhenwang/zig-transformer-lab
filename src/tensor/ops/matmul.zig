@@ -58,6 +58,9 @@ const std = @import("std");
 const LabError = @import("../../core/errors.zig").LabError;
 const Tensor = @import("../tensor.zig").Tensor;
 const Shape = @import("../shape.zig").Shape;
+const Tape = @import("../../autograd/tape.zig").Tape;
+const Node = @import("../../autograd/node.zig").Node;
+const OpKind = @import("../../autograd/node.zig").OpKind;
 
 /// Matrix multiply two rank-2 tensors.
 ///
@@ -73,7 +76,7 @@ const Shape = @import("../shape.zig").Shape;
 ///   // out = [[38,44,50,56],[83,98,113,128]]  shape (2,4)
 ///
 /// Memory: caller owns the returned tensor; must call deinit(allocator).
-pub fn matmul(allocator: std.mem.Allocator, a: Tensor, b: Tensor) LabError!Tensor {
+pub fn matmul(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) LabError!Tensor {
     // --- Rank validation ---
     // We restrict to rank-2 because general ND matmul requires
     // broadcasting rules and batch dimension handling — those belong
@@ -131,6 +134,20 @@ pub fn matmul(allocator: std.mem.Allocator, a: Tensor, b: Tensor) LabError!Tenso
         }
     }
 
+    if (tape) |t| {
+        if (a.requires_grad or b.requires_grad) {
+            const node_id = try t.record(Node{
+                .id = undefined,
+                .op = .matmul,
+                .parents = .{ a.tape_node, b.tape_node },
+                .n_parents = 2,
+                .saved = .{ .tensor_pair = .{ .a = a, .b = b } },
+            });
+            out.requires_grad = true;
+            out.tape_node = node_id;
+        }
+    }
+
     return out;
 }
 
@@ -148,7 +165,7 @@ pub fn matmul(allocator: std.mem.Allocator, a: Tensor, b: Tensor) LabError!Tenso
 ///   // Each batch element is an independent 2D matmul.
 ///
 /// Memory: caller owns the returned tensor; must call deinit(allocator).
-pub fn matmulBatch(allocator: std.mem.Allocator, a: Tensor, b: Tensor) LabError!Tensor {
+pub fn matmulBatch(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) LabError!Tensor {
     // --- Rank validation ---
     // Rank-3 is the standard for batched matmul in transformers.
     // For other ranks, the caller should reshape or use matmul.
@@ -201,6 +218,20 @@ pub fn matmulBatch(allocator: std.mem.Allocator, a: Tensor, b: Tensor) LabError!
         }
     }
 
+    if (tape) |t| {
+        if (a.requires_grad or b.requires_grad) {
+            const node_id = try t.record(Node{
+                .id = undefined,
+                .op = .matmul_batch,
+                .parents = .{ a.tape_node, b.tape_node },
+                .n_parents = 2,
+                .saved = .{ .tensor_pair = .{ .a = a, .b = b } },
+            });
+            out.requires_grad = true;
+            out.tape_node = node_id;
+        }
+    }
+
     return out;
 }
 
@@ -247,7 +278,7 @@ test "matmul 2x3 @ 3x4 = 2x4 with hand-computed values" {
     // b = [[1,2,3,4],[5,6,7,8],[9,10,11,12]]
     for (0..12) |i| b.data[i] = @as(f32, @floatFromInt(i + 1));
 
-    var out = try matmul(alloc, a, b);
+    var out = try matmul(alloc, a, b, null);
     defer out.deinit(alloc);
 
     // Verify shape
@@ -284,7 +315,7 @@ test "matmul 1x1 edge case" {
     defer b.deinit(alloc);
     b.data[0] = 3.0;
 
-    var out = try matmul(alloc, a, b);
+    var out = try matmul(alloc, a, b, null);
     defer out.deinit(alloc);
 
     try std.testing.expectEqual(@as(usize, 1), out.shape.dims[0]);
@@ -301,7 +332,7 @@ test "matmul shape mismatch returns error" {
     defer b.deinit(alloc);
 
     // a: (2,3), b: (4,5) — a.cols=3 != b.rows=4
-    try std.testing.expectError(LabError.ShapeMismatch, matmul(alloc, a, b));
+    try std.testing.expectError(LabError.ShapeMismatch, matmul(alloc, a, b, null));
 }
 
 test "matmul non-rank-2 returns error" {
@@ -313,7 +344,7 @@ test "matmul non-rank-2 returns error" {
     defer b_2d.deinit(alloc);
 
     // a is rank-3, not rank-2
-    try std.testing.expectError(LabError.InvalidArgument, matmul(alloc, a_3d, b_2d));
+    try std.testing.expectError(LabError.InvalidArgument, matmul(alloc, a_3d, b_2d, null));
 }
 
 test "matmulBatch (2,3,4) @ (2,4,5)" {
@@ -330,7 +361,7 @@ test "matmulBatch (2,3,4) @ (2,4,5)" {
     // Both batches: all 1s
     for (0..40) |i| b.data[i] = 1.0;
 
-    var out = try matmulBatch(alloc, a, b);
+    var out = try matmulBatch(alloc, a, b, null);
     defer out.deinit(alloc);
 
     // Shape should be (2, 3, 5)

@@ -48,6 +48,11 @@ const Tensor = @import("../tensor.zig").Tensor;
 const DType = @import("../../core/dtype.zig").DType;
 const Device = @import("../../core/device.zig").Device;
 const equals = @import("../shape.zig").equals;
+const Tape = @import("../../autograd/tape.zig").Tape;
+const Node = @import("../../autograd/node.zig").Node;
+const OpKind = @import("../../autograd/node.zig").OpKind;
+const SavedData = @import("../../autograd/node.zig").SavedData;
+const NodeId = @import("../tensor.zig").NodeId;
 
 /// Map a flat output index to a multi-dimensional input index,
 /// accounting for broadcasting. For each dimension: if the input
@@ -73,7 +78,7 @@ fn broadcastIndex(out_idx: usize, out_shape: Shape, in_shape: Shape, in_strides:
 }
 
 /// Broadcast elementwise addition: out[i,j,...] = a[i,j,...] + b[i,j,...]
-pub fn add(allocator: std.mem.Allocator, a: Tensor, b: Tensor) !Tensor {
+pub fn add(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Tensor {
     const out_shape = try broadcastShapes(a.shape, b.shape);
     var out = try Tensor.init(allocator, out_shape);
     const n = totalElements(out_shape);
@@ -82,11 +87,12 @@ pub fn add(allocator: std.mem.Allocator, a: Tensor, b: Tensor) !Tensor {
         const b_idx = broadcastIndex(i, out_shape, b.shape, b.strides);
         out.data[i] = a.data[a_idx] + b.data[b_idx];
     }
+    try recordBinaryOp(tape, &out, &a, &b, .add);
     return out;
 }
 
 /// Broadcast elementwise subtraction: out = a - b
-pub fn sub(allocator: std.mem.Allocator, a: Tensor, b: Tensor) !Tensor {
+pub fn sub(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Tensor {
     const out_shape = try broadcastShapes(a.shape, b.shape);
     var out = try Tensor.init(allocator, out_shape);
     const n = totalElements(out_shape);
@@ -95,11 +101,12 @@ pub fn sub(allocator: std.mem.Allocator, a: Tensor, b: Tensor) !Tensor {
         const b_idx = broadcastIndex(i, out_shape, b.shape, b.strides);
         out.data[i] = a.data[a_idx] - b.data[b_idx];
     }
+    try recordBinaryOp(tape, &out, &a, &b, .sub);
     return out;
 }
 
 /// Broadcast elementwise multiplication (Hadamard product, NOT matmul).
-pub fn mul(allocator: std.mem.Allocator, a: Tensor, b: Tensor) !Tensor {
+pub fn mul(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Tensor {
     const out_shape = try broadcastShapes(a.shape, b.shape);
     var out = try Tensor.init(allocator, out_shape);
     const n = totalElements(out_shape);
@@ -108,12 +115,13 @@ pub fn mul(allocator: std.mem.Allocator, a: Tensor, b: Tensor) !Tensor {
         const b_idx = broadcastIndex(i, out_shape, b.shape, b.strides);
         out.data[i] = a.data[a_idx] * b.data[b_idx];
     }
+    try recordBinaryOp(tape, &out, &a, &b, .mul);
     return out;
 }
 
 /// Broadcast elementwise division: out = a / b
 /// Division by zero produces Inf or NaN — let IEEE 754 happen, document it.
-pub fn div(allocator: std.mem.Allocator, a: Tensor, b: Tensor) !Tensor {
+pub fn div(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Tensor {
     const out_shape = try broadcastShapes(a.shape, b.shape);
     var out = try Tensor.init(allocator, out_shape);
     const n = totalElements(out_shape);
@@ -122,27 +130,54 @@ pub fn div(allocator: std.mem.Allocator, a: Tensor, b: Tensor) !Tensor {
         const b_idx = broadcastIndex(i, out_shape, b.shape, b.strides);
         out.data[i] = a.data[a_idx] / b.data[b_idx];
     }
+    try recordBinaryOp(tape, &out, &a, &b, .div);
     return out;
 }
 
 /// Add a scalar to every element: out[i] = a[i] + scalar
-pub fn addScalar(allocator: std.mem.Allocator, a: Tensor, scalar: f32) !Tensor {
+pub fn addScalar(allocator: std.mem.Allocator, a: Tensor, scalar: f32, tape: ?*Tape) !Tensor {
     const out_shape = a.shape;
     var out = try Tensor.init(allocator, out_shape);
     const n = totalElements(out_shape);
     for (0..n) |i| {
         out.data[i] = a.data[i] + scalar;
     }
+    if (tape) |t| {
+        if (a.requires_grad) {
+            const node_id = try t.record(Node{
+                .id = undefined,
+                .op = .add_scalar,
+                .parents = .{ a.tape_node, null },
+                .n_parents = 1,
+                .saved = .{ .tensor_scalar = .{ .shape = a.shape, .scalar = scalar } },
+            });
+            out.requires_grad = true;
+            out.tape_node = node_id;
+        }
+    }
     return out;
 }
 
 /// Multiply every element by a scalar: out[i] = a[i] * scalar
-pub fn mulScalar(allocator: std.mem.Allocator, a: Tensor, scalar: f32) !Tensor {
+pub fn mulScalar(allocator: std.mem.Allocator, a: Tensor, scalar: f32, tape: ?*Tape) !Tensor {
     const out_shape = a.shape;
     var out = try Tensor.init(allocator, out_shape);
     const n = totalElements(out_shape);
     for (0..n) |i| {
         out.data[i] = a.data[i] * scalar;
+    }
+    if (tape) |t| {
+        if (a.requires_grad) {
+            const node_id = try t.record(Node{
+                .id = undefined,
+                .op = .mul_scalar,
+                .parents = .{ a.tape_node, null },
+                .n_parents = 1,
+                .saved = .{ .tensor_scalar = .{ .shape = a.shape, .scalar = scalar } },
+            });
+            out.requires_grad = true;
+            out.tape_node = node_id;
+        }
     }
     return out;
 }
@@ -157,14 +192,54 @@ pub fn addInPlace(a: *Tensor, b: Tensor) !void {
 }
 
 /// Elementwise negation: out[i] = -a[i]
-pub fn neg(allocator: std.mem.Allocator, a: Tensor) !Tensor {
+pub fn neg(allocator: std.mem.Allocator, a: Tensor, tape: ?*Tape) !Tensor {
     const out_shape = a.shape;
     var out = try Tensor.init(allocator, out_shape);
     const n = totalElements(out_shape);
     for (0..n) |i| {
         out.data[i] = -a.data[i];
     }
+    if (tape) |t| {
+        if (a.requires_grad) {
+            const node_id = try t.record(Node{
+                .id = undefined,
+                .op = .neg,
+                .parents = .{ a.tape_node, null },
+                .n_parents = 1,
+                .saved = .nothing,
+            });
+            out.requires_grad = true;
+            out.tape_node = node_id;
+        }
+    }
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// Autograd recording helpers
+// ---------------------------------------------------------------------------
+
+/// Record a binary elementwise op on the tape if either input requires grad.
+///
+/// Stores snapshots of both input tensors by value in the Node's
+/// SavedData. The `data` slices in the snapshots point to the
+/// original heap buffers, which must outlive the tape. This avoids
+/// dangling pointers that would occur if we stored `@constCast(a)`
+/// where `a` is a pointer to a by-value parameter (stack-local copy).
+fn recordBinaryOp(tape: ?*Tape, out: *Tensor, a: *const Tensor, b: *const Tensor, op: OpKind) !void {
+    if (tape) |t| {
+        if (a.requires_grad or b.requires_grad) {
+            const node_id = try t.record(Node{
+                .id = undefined,
+                .op = op,
+                .parents = .{ a.tape_node, b.tape_node },
+                .n_parents = 2,
+                .saved = .{ .tensor_pair = .{ .a = a.*, .b = b.* } },
+            });
+            out.requires_grad = true;
+            out.tape_node = node_id;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -191,7 +266,7 @@ test "add (2,3) + (2,3) = (2,3)" {
     b.data[4] = 50;
     b.data[5] = 60;
 
-    var out = try add(allocator, a, b);
+    var out = try add(allocator, a, b, null);
     defer out.deinit(allocator);
     try std.testing.expectEqual(@as(f32, 11.0), out.data[0]);
     try std.testing.expectEqual(@as(f32, 66.0), out.data[5]);
@@ -214,7 +289,7 @@ test "add broadcast (1,3) + (2,3) = (2,3)" {
     b.data[4] = 50;
     b.data[5] = 60;
 
-    var out = try add(allocator, a, b);
+    var out = try add(allocator, a, b, null);
     defer out.deinit(allocator);
     // Row 0: [1+10, 2+20, 3+30] = [11, 22, 33]
     try std.testing.expectEqual(@as(f32, 11.0), out.data[0]);
@@ -240,7 +315,7 @@ test "sub (2,3) - (2,3)" {
     b.data[1] = 2;
     b.data[2] = 3;
 
-    var out = try sub(allocator, a, b);
+    var out = try sub(allocator, a, b, null);
     defer out.deinit(allocator);
     try std.testing.expectEqual(@as(f32, 9.0), out.data[0]);
     try std.testing.expectEqual(@as(f32, 27.0), out.data[2]);
@@ -260,7 +335,7 @@ test "mul elementwise" {
     b.data[1] = 6;
     b.data[2] = 7;
 
-    var out = try mul(allocator, a, b);
+    var out = try mul(allocator, a, b, null);
     defer out.deinit(allocator);
     try std.testing.expectEqual(@as(f32, 10.0), out.data[0]);
     try std.testing.expectEqual(@as(f32, 28.0), out.data[2]);
@@ -278,7 +353,7 @@ test "div produces Inf for division by zero" {
     b.data[0] = 0.0;
     b.data[1] = 0.0;
 
-    var out = try div(allocator, a, b);
+    var out = try div(allocator, a, b, null);
     defer out.deinit(allocator);
     // 1.0/0.0 = +Inf, 0.0/0.0 = NaN
     try std.testing.expect(std.math.isPositiveInf(out.data[0]));
@@ -293,7 +368,7 @@ test "addScalar" {
     a.data[1] = 2;
     a.data[2] = 3;
 
-    var out = try addScalar(allocator, a, 10.0);
+    var out = try addScalar(allocator, a, 10.0, null);
     defer out.deinit(allocator);
     try std.testing.expectEqual(@as(f32, 11.0), out.data[0]);
     try std.testing.expectEqual(@as(f32, 13.0), out.data[2]);
@@ -307,7 +382,7 @@ test "mulScalar" {
     a.data[1] = 2;
     a.data[2] = 3;
 
-    var out = try mulScalar(allocator, a, 3.0);
+    var out = try mulScalar(allocator, a, 3.0, null);
     defer out.deinit(allocator);
     try std.testing.expectEqual(@as(f32, 3.0), out.data[0]);
     try std.testing.expectEqual(@as(f32, 9.0), out.data[2]);
@@ -321,7 +396,7 @@ test "neg" {
     a.data[1] = -2;
     a.data[2] = 0;
 
-    var out = try neg(allocator, a);
+    var out = try neg(allocator, a, null);
     defer out.deinit(allocator);
     try std.testing.expectEqual(@as(f32, -1.0), out.data[0]);
     try std.testing.expectEqual(@as(f32, 2.0), out.data[1]);
@@ -372,7 +447,7 @@ test "add broadcast (2,1) + (2,3) = (2,3)" {
     b.data[4] = 5;
     b.data[5] = 6;
 
-    var out = try add(allocator, a, b);
+    var out = try add(allocator, a, b, null);
     defer out.deinit(allocator);
     // Row 0: 100 + [1,2,3] = [101, 102, 103]
     try std.testing.expectEqual(@as(f32, 101.0), out.data[0]);

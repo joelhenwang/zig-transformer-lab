@@ -49,6 +49,9 @@ const LabError = @import("../../core/errors.zig").LabError;
 const Tensor = @import("../tensor.zig").Tensor;
 const Shape = @import("../shape.zig").Shape;
 const totalElements = @import("../shape.zig").totalElements;
+const Tape = @import("../../autograd/tape.zig").Tape;
+const Node = @import("../../autograd/node.zig").Node;
+const OpKind = @import("../../autograd/node.zig").OpKind;
 
 /// Compute the strided offset for a flat element index.
 ///
@@ -102,7 +105,7 @@ fn stridedOffset(tensor: Tensor, flat: usize) usize {
 ///   // out = [[0.0900, 0.2447, 0.6652]]
 ///
 /// Memory: caller owns the returned tensor; must call deinit(allocator).
-pub fn softmax(allocator: std.mem.Allocator, tensor: Tensor) LabError!Tensor {
+pub fn softmax(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!Tensor {
     const ndim = tensor.shape.ndim();
     const C = tensor.shape.dims[ndim - 1];
     // Number of independent softmax groups (one per "row" of the
@@ -162,6 +165,20 @@ pub fn softmax(allocator: std.mem.Allocator, tensor: Tensor) LabError!Tensor {
         }
     }
 
+    if (tape) |t| {
+        if (tensor.requires_grad) {
+            const node_id = try t.record(Node{
+                .id = undefined,
+                .op = .softmax,
+                .parents = .{ tensor.tape_node, null },
+                .n_parents = 1,
+                .saved = .{ .tensor_ref = tensor },
+            });
+            out.requires_grad = true;
+            out.tape_node = node_id;
+        }
+    }
+
     return out;
 }
 
@@ -185,7 +202,7 @@ pub fn softmax(allocator: std.mem.Allocator, tensor: Tensor) LabError!Tensor {
 ///   //             = [-2.4076, -1.4076, -0.4076]
 ///
 /// Memory: caller owns the returned tensor; must call deinit(allocator).
-pub fn logSoftmax(allocator: std.mem.Allocator, tensor: Tensor) LabError!Tensor {
+pub fn logSoftmax(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!Tensor {
     const ndim = tensor.shape.ndim();
     const C = tensor.shape.dims[ndim - 1];
     const num_groups = totalElements(tensor.shape) / C;
@@ -235,6 +252,20 @@ pub fn logSoftmax(allocator: std.mem.Allocator, tensor: Tensor) LabError!Tensor 
         }
     }
 
+    if (tape) |t| {
+        if (tensor.requires_grad) {
+            const node_id = try t.record(Node{
+                .id = undefined,
+                .op = .log_softmax,
+                .parents = .{ tensor.tape_node, null },
+                .n_parents = 1,
+                .saved = .{ .tensor_ref = tensor },
+            });
+            out.requires_grad = true;
+            out.tape_node = node_id;
+        }
+    }
+
     return out;
 }
 
@@ -251,7 +282,7 @@ test "softmax [[1,2,3]] = [[0.0900, 0.2447, 0.6652]]" {
     t.data[1] = 2.0;
     t.data[2] = 3.0;
 
-    var out = try softmax(alloc, t);
+    var out = try softmax(alloc, t, null);
     defer out.deinit(alloc);
 
     // exp(1-3)=0.1353, exp(2-3)=0.3679, exp(3-3)=1.0
@@ -269,7 +300,7 @@ test "softmax [[0,0]] = [[0.5, 0.5]]" {
     t.data[0] = 0.0;
     t.data[1] = 0.0;
 
-    var out = try softmax(alloc, t);
+    var out = try softmax(alloc, t, null);
     defer out.deinit(alloc);
 
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), out.data[0], 1e-4);
@@ -284,7 +315,7 @@ test "softmax [[100,101]] does not overflow" {
     t.data[0] = 100.0;
     t.data[1] = 101.0;
 
-    var out = try softmax(alloc, t);
+    var out = try softmax(alloc, t, null);
     defer out.deinit(alloc);
 
     // max=101, exp(-1)=0.3679, exp(0)=1.0
@@ -303,7 +334,7 @@ test "softmax rows sum to 1.0" {
     // Fill with various values
     for (0..15) |i| t.data[i] = @as(f32, @floatFromInt(i));
 
-    var out = try softmax(alloc, t);
+    var out = try softmax(alloc, t, null);
     defer out.deinit(alloc);
 
     // Each row should sum to 1.0
@@ -325,7 +356,7 @@ test "logSoftmax [[1,2,3]]" {
     t.data[1] = 2.0;
     t.data[2] = 3.0;
 
-    var out = try logSoftmax(alloc, t);
+    var out = try logSoftmax(alloc, t, null);
     defer out.deinit(alloc);
 
     // log_softmax = [1-3-ln(1.5032), 2-3-ln(1.5032), 3-3-ln(1.5032)]

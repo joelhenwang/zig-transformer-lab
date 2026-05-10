@@ -58,6 +58,9 @@ const Tensor = @import("../tensor.zig").Tensor;
 const Shape = @import("../shape.zig").Shape;
 const totalElements = @import("../shape.zig").totalElements;
 const logSoftmax = @import("softmax.zig").logSoftmax;
+const Tape = @import("../../autograd/tape.zig").Tape;
+const Node = @import("../../autograd/node.zig").Node;
+const OpKind = @import("../../autograd/node.zig").OpKind;
 
 /// Mean cross-entropy loss between logits and integer targets.
 ///
@@ -73,7 +76,7 @@ const logSoftmax = @import("softmax.zig").logSoftmax;
 ///   // loss = -(-0.399) / 1 = 0.399
 ///
 /// Memory: caller owns the returned tensor; must call deinit(allocator).
-pub fn crossEntropy(allocator: std.mem.Allocator, logits: Tensor, targets: Tensor) LabError!Tensor {
+pub fn crossEntropy(allocator: std.mem.Allocator, logits: Tensor, targets: Tensor, tape: ?*Tape) LabError!Tensor {
     // --- Input validation ---
     // logits must be rank-2: (batch_size, num_classes)
     if (logits.shape.ndim() != 2) return LabError.InvalidArgument;
@@ -99,7 +102,7 @@ pub fn crossEntropy(allocator: std.mem.Allocator, logits: Tensor, targets: Tenso
     // This is the numerically stable way to get log-probabilities.
     // See softmax.zig for why we don't compute log(softmax(x))
     // directly.
-    var log_probs = try logSoftmax(allocator, logits);
+    var log_probs = try logSoftmax(allocator, logits, null);
     defer log_probs.deinit(allocator);
 
     // --- Gather and average ---
@@ -134,6 +137,20 @@ pub fn crossEntropy(allocator: std.mem.Allocator, logits: Tensor, targets: Tenso
     errdefer out.deinit(allocator);
     out.data[0] = mean_loss;
 
+    if (tape) |t| {
+        if (logits.requires_grad) {
+            const node_id = try t.record(Node{
+                .id = undefined,
+                .op = .cross_entropy,
+                .parents = .{ logits.tape_node, null },
+                .n_parents = 1,
+                .saved = .{ .ce_info = .{ .logits = logits, .targets = targets.data } },
+            });
+            out.requires_grad = true;
+            out.tape_node = node_id;
+        }
+    }
+
     return out;
 }
 
@@ -160,7 +177,7 @@ test "crossEntropy known 3-class example" {
     defer targets.deinit(alloc);
     targets.data[0] = 0.0;
 
-    var loss = try crossEntropy(alloc, logits, targets);
+    var loss = try crossEntropy(alloc, logits, targets, null);
     defer loss.deinit(alloc);
 
     try std.testing.expectApproxEqAbs(@as(f32, 0.4173), loss.data[0], 1e-2);
@@ -182,7 +199,7 @@ test "crossEntropy uniform logits gives loss = log(C)" {
     defer targets.deinit(alloc);
     targets.data[0] = 0.0;
 
-    var loss = try crossEntropy(alloc, logits, targets);
+    var loss = try crossEntropy(alloc, logits, targets, null);
     defer loss.deinit(alloc);
 
     // ln(3) ~ 1.0986  — use @log builtin for natural log
@@ -199,7 +216,7 @@ test "crossEntropy rejects mismatched batch sizes" {
     defer targets.deinit(alloc);
 
     // logits batch=2, targets batch=3
-    try std.testing.expectError(LabError.ShapeMismatch, crossEntropy(alloc, logits, targets));
+    try std.testing.expectError(LabError.ShapeMismatch, crossEntropy(alloc, logits, targets, null));
 }
 
 test "crossEntropy rejects out-of-range target" {
@@ -212,5 +229,5 @@ test "crossEntropy rejects out-of-range target" {
     // C=3, but target index is 5 (out of range)
     targets.data[0] = 5.0;
 
-    try std.testing.expectError(LabError.InvalidArgument, crossEntropy(alloc, logits, targets));
+    try std.testing.expectError(LabError.InvalidArgument, crossEntropy(alloc, logits, targets, null));
 }
