@@ -386,27 +386,39 @@ pub fn unload() void {
 
 /// Convert a CUresult into LabError. On failure the numeric code and
 /// the string from cuGetErrorString (when the loader is available)
-/// are logged via std.log.err so the test runner surfaces them.
+/// are logged via std.log.warn so the test runner surfaces them.
+///
+/// Log level rationale:
+///   The returned `error.CudaError` IS the primary failure signal —
+///   callers propagate it up to a point where context is meaningful
+///   (e.g. "failed to load PTX for kernel X"). The log entry here is
+///   a diagnostic breadcrumb, not a fatal beacon. Zig 0.16 test
+///   runner treats std.log.err emissions inside a passing test as a
+///   build-step failure (see the PR-γ / PR-η follow-ups), so we use
+///   warn — tests that exercise error paths via `expectError` do not
+///   erroneously fail the build. Real CUDA faults in production still
+///   surface loudly via the error return + the warn breadcrumb.
 pub fn check(r: CUresult) LabError!void {
     if (r == CUDA_SUCCESS) return;
     if (loader) |L| {
         var msg: [*:0]const u8 = "(no error string)";
         _ = L.cuGetErrorString(r, &msg);
-        std.log.err("cuda driver error {d}: {s}", .{ r, std.mem.span(msg) });
+        std.log.warn("cuda driver error {d}: {s}", .{ r, std.mem.span(msg) });
     } else {
-        std.log.err("cuda driver error {d} (loader not initialised)", .{r});
+        std.log.warn("cuda driver error {d} (loader not initialised)", .{r});
     }
     return error.CudaError;
 }
 
-/// Convert a cublasStatus_t into LabError. Same pattern as check().
+/// Convert a cublasStatus_t into LabError. Same log-level rationale
+/// as `check`.
 pub fn checkCublas(s: cublasStatus_t) LabError!void {
     if (s == CUBLAS_STATUS_SUCCESS) return;
     if (loader) |L| {
         const msg = L.cublasGetStatusString(s);
-        std.log.err("cublas error {d}: {s}", .{ s, std.mem.span(msg) });
+        std.log.warn("cublas error {d}: {s}", .{ s, std.mem.span(msg) });
     } else {
-        std.log.err("cublas error {d} (loader not initialised)", .{s});
+        std.log.warn("cublas error {d} (loader not initialised)", .{s});
     }
     return error.CudaError;
 }

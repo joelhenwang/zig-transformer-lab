@@ -167,7 +167,12 @@ pub fn getKernel(
     name: [:0]const u8,
 ) LabError!bindings.CUfunction {
     const module = ctx.ptx_modules.get(module_stem) orelse {
-        std.log.err(
+        // Warn level (not err): the returned LabError.InvalidArgument
+        // is the primary signal; this log is a diagnostic breadcrumb.
+        // Keeping it at warn means test cases that exercise the
+        // missing-module branch via expectError do not spuriously
+        // fail the Zig test runner.
+        std.log.warn(
             "cuda module: kernel '{s}' requested from module '{s}', but module is not loaded",
             .{ name, module_stem },
         );
