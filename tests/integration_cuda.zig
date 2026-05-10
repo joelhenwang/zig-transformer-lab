@@ -368,3 +368,151 @@ test "cuda Tensor: nonOwningStorage view over Storage.cuda preserves ctx/ptr/len
         .cpu => unreachable,
     }
 }
+
+// ---------------------------------------------------------------------------
+// PR-epsilon: Tensor.toCuda / toCpu round-trip
+// ---------------------------------------------------------------------------
+
+test "cuda Tensor.toCuda rejects a CUDA source" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    // Build a real CUDA tensor first, then assert toCuda refuses to
+    // re-transfer it. This surfaces caller mistakes instead of quietly
+    // doubling GPU memory use.
+    const src = [_]f32{ 1, 2, 3, 4 };
+    const dbuf = try DeviceBuffer.fromHost(&ctx, &src);
+    var gpu = Tensor{
+        .data = &.{},
+        .shape = Shape.init1D(4),
+        .strides = computeStrides(Shape.init1D(4)),
+        .dtype = .f32,
+        .device = .cuda,
+        .owned = false,
+        .storage = .{ .cuda = dbuf },
+        .offset = 0,
+        .requires_grad = false,
+        .grad = null,
+        .tape_node = null,
+    };
+    defer gpu.storage.deinit(testing.allocator);
+
+    try testing.expectError(error.DeviceMismatch, gpu.toCuda(&ctx));
+}
+
+test "cuda Tensor.toCpu rejects a CPU source" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var cpu = try Tensor.init(testing.allocator, Shape.init1D(4));
+    defer cpu.deinit(testing.allocator);
+
+    try testing.expectError(error.DeviceMismatch, cpu.toCpu(testing.allocator));
+}
+
+test "cuda Tensor.toCuda / toCpu round-trip is byte-identical for a contiguous tensor" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    // Fill a (2, 3) CPU tensor with known values, round-trip via CUDA,
+    // expect byte-identical result (memcpy on f32 preserves bit
+    // patterns — any mismatch here is a hard bug, not f32 rounding).
+    var cpu = try Tensor.init(testing.allocator, Shape.init2D(2, 3));
+    defer cpu.deinit(testing.allocator);
+    for (cpu.data, 0..) |*v, i| v.* = @floatFromInt(i + 1);
+
+    var gpu = try cpu.toCuda(&ctx);
+    defer gpu.storage.deinit(testing.allocator);
+
+    // Top-level invariants on the GPU tensor: CPU compat alias empty,
+    // device tag cuda, storage.len matches the full source buffer.
+    try testing.expectEqual(@as(usize, 0), gpu.data.len);
+    try testing.expect(gpu.device == .cuda);
+    try testing.expectEqual(cpu.data.len, gpu.storage.len());
+    try testing.expectEqual(cpu.offset, gpu.offset);
+    try testing.expect(lab.shape.equals(cpu.shape, gpu.shape));
+
+    var back = try gpu.toCpu(testing.allocator);
+    defer back.deinit(testing.allocator);
+
+    try testing.expectEqualSlices(f32, cpu.data, back.data);
+    try testing.expect(lab.shape.equals(cpu.shape, back.shape));
+    try testing.expectEqual(cpu.strides.values[0], back.strides.values[0]);
+    try testing.expectEqual(cpu.strides.values[1], back.strides.values[1]);
+    try testing.expectEqual(cpu.offset, back.offset);
+}
+
+test "cuda Tensor.toCuda preserves transposed (non-contiguous) strides" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    // Build a (3, 2) tensor with known values, transpose to (2, 3)
+    // view, round-trip via CUDA. The view's strides are (1, 2) — NOT
+    // row-major — so this test is the one the playbook flagged: copy
+    // the whole backing buffer, not just totalElements(shape), or
+    // CUDA-side stride walks go off the end.
+    var parent = try Tensor.init(testing.allocator, Shape.init2D(3, 2));
+    defer parent.deinit(testing.allocator);
+    for (parent.data, 0..) |*v, i| v.* = @floatFromInt(i + 1);
+
+    const transposed = try parent.transpose2d();
+    // transposed: shape (2, 3), strides (1, 2), storage.len == 6,
+    //            owned=false (view into parent).
+
+    const gpu_view = try transposed.toCuda(&ctx);
+    // gpu_view: shape (2, 3), strides (1, 2), storage.cuda.len == 6,
+    //           owned=true on the embedded DeviceBuffer, but top-level
+    //           owned=false per the PR-delta CUDA invariant.
+    var gpu_view_mut = gpu_view;
+    defer gpu_view_mut.storage.deinit(testing.allocator);
+
+    try testing.expect(lab.shape.equals(transposed.shape, gpu_view.shape));
+    try testing.expectEqual(transposed.strides.values[0], gpu_view.strides.values[0]);
+    try testing.expectEqual(transposed.strides.values[1], gpu_view.strides.values[1]);
+    try testing.expectEqual(@as(usize, 6), gpu_view.storage.len());
+
+    // Round-trip back to CPU and confirm element-wise equality at each
+    // logical index. Because strides were preserved, iterating (i, j)
+    // on either side reads the same element.
+    var back = try gpu_view.toCpu(testing.allocator);
+    defer back.deinit(testing.allocator);
+
+    for (0..2) |i| {
+        for (0..3) |j| {
+            const expected = transposed.at(&[_]usize{ i, j });
+            const actual = back.at(&[_]usize{ i, j });
+            try testing.expectEqual(expected, actual);
+        }
+    }
+
+    // Parent is untouched (transfer is a copy, not a move).
+    for (parent.data, 0..) |v, i| {
+        try testing.expectEqual(@as(f32, @floatFromInt(i + 1)), v);
+    }
+}
+
+test "cuda Tensor.toCuda preserves requires_grad and param_id" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    // A parameter-like CPU tensor: requires_grad=true, with a param_id
+    // set. toCuda must carry both through so AdamW state keyed by
+    // ParamId keeps matching across the device transfer.
+    var cpu = try Tensor.init(testing.allocator, Shape.init1D(4));
+    defer cpu.deinit(testing.allocator);
+    cpu.requires_grad = true;
+    cpu.param_id = 42;
+    for (cpu.data, 0..) |*v, i| v.* = @floatFromInt(i);
+
+    var gpu = try cpu.toCuda(&ctx);
+    defer gpu.storage.deinit(testing.allocator);
+
+    try testing.expect(gpu.requires_grad);
+    try testing.expectEqual(@as(?u32, 42), gpu.param_id);
+    // grad and tape_node are reset on transfer (see toCuda doc comment).
+    try testing.expect(gpu.grad == null);
+    try testing.expect(gpu.tape_node == null);
+}

@@ -74,6 +74,7 @@ const Device = @import("../core/device.zig").Device;
 // so this import does not break the Windows CPU-only build — bindings
 // only touch the GPU at runtime via load(), never at compile time.
 const DeviceBuffer = @import("../backend/cuda/mem.zig").DeviceBuffer;
+const CudaContext = @import("../backend/cuda/context.zig").CudaContext;
 
 /// NodeId for the autograd tape graph.
 /// u32 is sufficient for our use case: even a large training run
@@ -629,6 +630,126 @@ pub const Tensor = struct {
             const off = logicalOffsetFromLinear(self.shape, self.strides, logical);
             self.data[off] = value;
         }
+    }
+
+    // -- Device transfer (PR-ε) ------------------------------------------
+    //
+    // `toCuda` and `toCpu` move a tensor between devices by allocating a
+    // fresh backing buffer on the destination and copying the entire
+    // storage. They preserve `shape`, `strides`, and `offset` verbatim so
+    // that a non-contiguous CPU view (e.g. the output of `transpose2d`)
+    // becomes the same non-contiguous layout on CUDA — ops on the target
+    // device walk the same logical elements the source walked.
+    //
+    // Why copy the *full* storage, not just `totalElements(shape)`?
+    //
+    //   A transposed view reads through strides that can reach any
+    //   element of the parent buffer. If we copied only the reachable
+    //   logical elements and then reconstructed the tensor on the target
+    //   with the same strides, the first stride-walk past the logical
+    //   count would OOB-read. Copying the whole parent buffer means the
+    //   strides remain valid on the destination.
+    //
+    // Autograd: `requires_grad` is preserved (user intent carries over);
+    // `grad` and `tape_node` are reset to null. These are step-scoped
+    // quantities and the tape is per-device — moving a tensor mid-tape
+    // and expecting gradients to flow would silently give wrong answers,
+    // so we make the discontinuity explicit.
+    //
+    // These methods do NOT record a tape entry: the transfer is a host-
+    // controlled side-effect, not a differentiable op. If a future PR
+    // needs differentiable device transfer (for e.g. activation
+    // checkpointing), it can add a `.to_device` OpKind — but that is
+    // not Stage 7 territory.
+
+    /// Allocate a fresh DeviceBuffer on `ctx` and copy this CPU tensor's
+    /// backing buffer into it. The returned Tensor is a new heap-owning
+    /// CUDA tensor with the same shape/strides/offset as `self`.
+    ///
+    /// Errors:
+    ///   - `error.DeviceMismatch` if `self.device != .cpu`.
+    ///   - `error.CudaError`      if the CUDA allocation or HtoD copy fails.
+    ///
+    /// Worked example:
+    ///   const cpu = try Tensor.init(alloc, Shape.init2D(2, 3));
+    ///   defer cpu.deinit(alloc);
+    ///   var gpu = try cpu.toCuda(&ctx);
+    ///   defer gpu.deinit(alloc);   // deinit routes to cuMemFree_v2
+    pub fn toCuda(self: Tensor, ctx: *const CudaContext) LabError!Tensor {
+        if (self.device != .cpu) return error.DeviceMismatch;
+        const src_data = switch (self.storage) {
+            .cpu => |s| s.data,
+            .cuda => unreachable, // excluded by the device check above
+        };
+
+        // fromHost allocates src_data.len elements and HtoD-copies. The
+        // returned buffer is OWNED — we transfer it into the Tensor below.
+        const buffer = try DeviceBuffer.fromHost(ctx, src_data);
+        // Intentionally do NOT `errdefer buffer.deinit()` here: the
+        // subsequent Tensor-literal construction cannot fail (all fields
+        // are simple moves/copies, no `try`), so the buffer either
+        // succeeds all the way into the returned Tensor or was never
+        // created in the first place.
+
+        const t = Tensor{
+            .data = &.{}, // CPU compat alias intentionally empty on CUDA
+            .shape = self.shape,
+            .strides = self.strides,
+            .dtype = self.dtype,
+            .device = .cuda,
+            .owned = false, // top-level alias is always false for CUDA tensors
+            .storage = .{ .cuda = buffer },
+            .offset = self.offset,
+            .requires_grad = self.requires_grad,
+            .grad = null,
+            .tape_node = null,
+            .param_id = self.param_id,
+        };
+        debugCheckInvariants(t);
+        return t;
+    }
+
+    /// Allocate a fresh host `[]f32` and copy this CUDA tensor's
+    /// backing buffer into it via `cuMemcpyDtoH_v2`. The returned
+    /// Tensor is a new heap-owning CPU tensor with the same
+    /// shape/strides/offset as `self`.
+    ///
+    /// Errors:
+    ///   - `error.DeviceMismatch` if `self.device != .cuda`.
+    ///   - `error.OutOfMemory`    if the host allocation fails.
+    ///   - `error.CudaError`      if the DtoH copy fails.
+    ///
+    /// Worked example:
+    ///   var gpu_tensor = ...;  // some CUDA tensor
+    ///   var cpu = try gpu_tensor.toCpu(alloc);
+    ///   defer cpu.deinit(alloc);   // frees the host []f32
+    pub fn toCpu(self: Tensor, allocator: std.mem.Allocator) LabError!Tensor {
+        if (self.device != .cuda) return error.DeviceMismatch;
+        const buf = switch (self.storage) {
+            .cuda => |b| b,
+            .cpu => unreachable, // excluded by the device check above
+        };
+
+        const host_data = allocator.alloc(f32, buf.len) catch return error.OutOfMemory;
+        errdefer allocator.free(host_data);
+        try buf.copyToHost(host_data);
+
+        const t = Tensor{
+            .data = host_data,
+            .shape = self.shape,
+            .strides = self.strides,
+            .dtype = self.dtype,
+            .device = .cpu,
+            .owned = true,
+            .storage = .{ .cpu = .{ .data = host_data, .owned = true } },
+            .offset = self.offset,
+            .requires_grad = self.requires_grad,
+            .grad = null,
+            .tape_node = null,
+            .param_id = self.param_id,
+        };
+        debugCheckInvariants(t);
+        return t;
     }
 
     /// Verify all structural invariants of this tensor.
