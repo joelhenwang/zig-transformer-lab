@@ -49,6 +49,11 @@ const TransformerBlock = @import("block.zig").TransformerBlock;
 const ops_elementwise = @import("../tensor/ops/elementwise.zig");
 const ops_create = @import("../tensor/ops/create.zig");
 
+/// Named struct type for parameter entries in save/load.
+/// Required because anonymous structs create different types per scope
+/// in Zig, which prevents passing ArrayLists across function boundaries.
+const NamedParam = struct { name: []const u8, tensor: *Tensor };
+
 pub const TinyWordTransformer = struct {
     tok_embed: Embedding,
     pos_embed: Embedding,
@@ -178,7 +183,7 @@ pub const TinyWordTransformer = struct {
     ///
     /// Worked example:
     ///   try model.save(io, "checkpoint.bin");
-    pub fn save(self: TinyWordTransformer, io: std.Io, path: []const u8) !void {
+    pub fn save(self: *TinyWordTransformer, io: std.Io, path: []const u8) !void {
         const cwd = std.Io.Dir.cwd();
         const file = try cwd.createFile(io, path, .{});
         defer file.close(io);
@@ -191,7 +196,7 @@ pub const TinyWordTransformer = struct {
         try writer.interface.writeInt(u32, 1, .little);
 
         // Collect parameters with names
-        var param_list: std.ArrayList(struct { name: []const u8, tensor: *Tensor }) = .empty;
+        var param_list: std.ArrayList(NamedParam) = .empty;
         defer param_list.deinit(self.allocator);
         try self.collectNamedParams(&param_list);
 
@@ -221,7 +226,7 @@ pub const TinyWordTransformer = struct {
     ///
     /// Worked example:
     ///   try model.load(io, "checkpoint.bin");
-    pub fn load(self: TinyWordTransformer, io: std.Io, path: []const u8) !void {
+    pub fn load(self: *TinyWordTransformer, io: std.Io, path: []const u8) !void {
         const cwd = std.Io.Dir.cwd();
         const file = try cwd.openFile(io, path, .{});
         defer file.close(io);
@@ -240,7 +245,7 @@ pub const TinyWordTransformer = struct {
         const num_params = try reader.interface.readInt(u32, .little);
 
         // Collect parameters with names for matching
-        var param_list: std.ArrayList(struct { name: []const u8, tensor: *Tensor }) = .empty;
+        var param_list: std.ArrayList(NamedParam) = .empty;
         defer param_list.deinit(self.allocator);
         try self.collectNamedParams(&param_list);
 
@@ -282,8 +287,8 @@ pub const TinyWordTransformer = struct {
 
     /// Internal: collect parameters with their names.
     fn collectNamedParams(
-        self: TinyWordTransformer,
-        list: *std.ArrayList(struct { name: []const u8, tensor: *Tensor }),
+        self: *TinyWordTransformer,
+        list: *std.ArrayList(NamedParam),
     ) !void {
         try list.append(self.allocator, .{ .name = "tok_embed.weight", .tensor = &self.tok_embed.weight });
         try list.append(self.allocator, .{ .name = "pos_embed.weight", .tensor = &self.pos_embed.weight });

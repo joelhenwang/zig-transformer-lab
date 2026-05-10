@@ -80,7 +80,7 @@ pub fn main(init: std.process.Init) !void {
     var adam = try AdamW.init(allocator, .{
         .lr = lr,
         .beta1 = 0.9,
-        .beta2 = 0.95,
+        .beta2 = 0.999,
         .eps = 1e-8,
         .weight_decay = 0.01,
     });
@@ -137,8 +137,10 @@ pub fn main(init: std.process.Init) !void {
         var logits_3d = try model.forward(ids, &tape);
         try tape.keepAlive(&logits_3d);
 
-        // Reshape logits from (B, T, V) to (B*T, V)
-        const logits = try logits_3d.reshape(Shape.init2D(B * T, ds.vocab.size()));
+        // Reshape logits from (B, T, V) to (B*T, V) — tape-tracked
+        var logits = try ztl.ops.shape_ops.reshapeTracked(allocator, logits_3d, Shape.init2D(B * T, ds.vocab.size()), &tape);
+        try tape.keepAlive(&logits);
+        defer logits.deinit(allocator);
 
         // Compute cross-entropy loss
         var loss = try ztl.ops.loss.crossEntropy(allocator, logits, targets, &tape);

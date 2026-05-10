@@ -39,7 +39,7 @@ pub fn main(init: std.process.Init) !void {
     const T = 8;
     const B = 2;
     const lr = 1e-3;
-    const num_steps = 50;
+    const num_steps = 100;
 
     const cfg = TransformerConfig{
         .vocab_size = V,
@@ -58,7 +58,7 @@ pub fn main(init: std.process.Init) !void {
     var adam = try AdamW.init(allocator, .{
         .lr = lr,
         .beta1 = 0.9,
-        .beta2 = 0.95,
+        .beta2 = 0.999,
         .eps = 1e-8,
         .weight_decay = 0.01,
     });
@@ -117,9 +117,13 @@ pub fn main(init: std.process.Init) !void {
         try tape.keepAlive(&logits_3d);
 
         // Reshape logits from (B, T, V) to (B*T, V) for cross-entropy.
-        // This is a view (not tape-tracked) — the gradient flows through
-        // the 3D logits which are already on the tape from the model forward.
-        const logits = try logits_3d.reshape(Shape.init2D(B * T, V));
+        // Tape-tracked so the gradient flows back with the correct shape.
+        // The untracked reshape() would silently bypass the reshape
+        // backward, causing a shape mismatch that only works by accident
+        // because both shapes share row-major memory layout.
+        var logits = try ztl.ops.shape_ops.reshapeTracked(allocator, logits_3d, Shape.init2D(B * T, V), &tape);
+        try tape.keepAlive(&logits);
+        defer logits.deinit(allocator);
 
         // Reshape targets from (B, T) to (B*T,) for cross-entropy
         const targets_flat = try targets.reshape(Shape.init1D(B * T));

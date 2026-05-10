@@ -25,53 +25,36 @@ code that teaches how PyTorch-like systems work internally.
 | 2 — CPU Tensor Foundation | **Done** | Commit `001c74e` — 7 files, 3082 insertions |
 | 3 — Tape-based Autograd | **Done** | Commit `f8405e3` — 15 files, 5112 insertions |
 | 4 — NN Layers + Optimizers | **Done** | Commit `b02801b` — 18 files, 3638 insertions |
-| 5 — Tokenizer + Data Pipeline | **Done** | This session — 7 source files, 2 data files, 2 docs, 1 example |
-| 6–9 | Not started | |
+| 5 — Tokenizer + Data Pipeline | **Done** | Commit `d286c8a` — 7 source files, 2 data files, 2 docs, 1 example |
+| 6 — End-to-end CPU Training | **Done** | This session — Trainer, generation, gradient clipping, bug fixes |
+| 7–9 | Not started | |
 
 **Stage 3 committed:** `stage(3): tape-based autograd`
 **Stage 4 committed:** `stage(4): nn layers and optimizers`
 
-### Session history — what was done this session
+**Stage 5 committed:** `stage(5): word-level tokenizer and dataset`
+**Stage 6 committed:** (pending)
 
-1. Created `data/tiny.txt` (~6 KB crafted corpus with varied punctuation and contractions)
-2. Downloaded `data/tinyshakespeare.txt` (~1 MB from karpathy/char-rnn)
-3. Implemented `src/tokenizer/vocab.zig` — Vocab struct with buildFromText, encode/decode, save/load, frequency cutoff
-4. Implemented `src/tokenizer/word.zig` — tokenize (punctuation peeling + apostrophe splitting), encode, decode
-5. Implemented `src/data/dataset.zig` — File → []u32 token stream, vocab building, initWithVocab for val splits
-6. Implemented `src/data/windowing.zig` — Sliding window (input, target) pairs as views
-7. Implemented `src/data/batcher.zig` — Fisher-Yates shuffle (Xoshiro256), drop-last batching
-8. Created `examples/05_train_tiny.zig` — Real-data training loop on tiny.txt, loss 6.08→5.17 over 100 steps
-9. Wired Stage 5 modules into `src/root.zig` (uncommented tokenizer/data re-exports + test block)
-10. Fixed `src/nn/model.zig` save/load to use Zig 0.16.0 file I/O API (`io` parameter, `writer.interface.print`, `reader.interface.takeDelimiter`, `file.stat(io)`, `cwd.readFileAlloc`)
-11. Wrote `docs/05_transformer_math.md` (~1441 lines) — Full shape trace for one transformer block
-12. Wrote `docs/06_tokenizer_data.md` (~1506 lines) — Tokenizer, dataset, batching pedagogical docs
-13. All 205+ tests pass, 0 leaks
+### Session history — what was done this session (Stage 6)
 
-**Key Zig 0.16.0 API discoveries (Stage 5):**
-- `std.Io.Dir.cwd().openFile(io, path, .{})` / `createFile(io, path, .{})` — the `io: std.Io` parameter is mandatory in 0.16.0
-- `file.writer(io, &buf)` / `file.reader(io, &buf)` — both require io and buffer parameters
-- `writer.interface.print(...)` — print is on the interface, not the File.Writer directly
-- `reader.interface.takeDelimiter('\n')` — replaces `readUntilDelimiterOrEof`
-- `cwd.readFileAlloc(io, path, allocator, .limited(N))` — simplest way to read a whole file
-- `std.Io.Threaded.init(allocator, .{})` + `threaded.io()` — creates a `std.Io` for test code
-- `ArrayList(T).init(allocator)` does NOT exist — use `var list: ArrayList(T) = .empty;`
-- `ArrayList.deinit(allocator)` — now requires allocator parameter in 0.16.0
-- `HashMap.deinit()` — managed HashMap still takes no args (stores its allocator)
-- Anonymous struct types in ArrayList don't match across scope boundaries — use named `const` types
+1. Implemented `src/lab/train.zig` — Trainer struct (TrainConfig, train loop, gradient clipping, grad norm logging), generate() function (autoregressive top-k + temperature sampling), GenerateOpts
+2. Implemented `examples/06_train_shakespeare.zig` — CPU training on Shakespeare with Trainer
+3. Implemented `examples/07_generate.zig` — Load checkpoint, generate text with top-k/temperature settings
+4. Wired `lab` module into `src/root.zig` with test block entry
+5. Fixed `backwardCrossEntropy` — missing `@round` on target index (line 666 of backward.zig). `@intFromFloat` truncates towards zero, so `2.9999` → 2 instead of 3. Added `@round` to match the forward pass.
+6. Fixed untracked reshape bug in training loop — `logits_3d.reshape(...)` creates a VIEW sharing tape_node, causing CE gradient (B*T, V) to bypass reshape backward. Replaced with `ops_shape.reshapeTracked()` so gradient flows with correct shape.
+7. Same untracked reshape fix applied to examples 04 and 05.
+8. Added gradient clipping to Trainer — global L2 norm clipping with configurable `grad_clip_norm` (default 5.0). Prints grad norm alongside loss.
+9. Changed default `beta2` from 0.95 to 0.999 (standard Adam value). beta2=0.95 caused training instability: the second moment estimate adapts too fast, making the effective learning rate oscillate when gradients change direction.
+10. Fixed `model.zig` — NamedParam type for collectNamedParams (anonymous struct mismatch across scopes). Changed save/load to take `*TinyWordTransformer` (pointer self) so collectNamedParams can access mutable weight pointers.
+11. Fixed dangling pointer bug in Trainer.init() — collecting params before model is copied into struct makes pointers to local variable's fields. Moved params collection and optimizer creation into train().
+12. All 215+ tests pass, 0 leaks
 
-**OOV rate note:**
-With word-level tokenization + apostrophe splitting, Shakespeare has ~12.6K unique tokens.
-With V=2000, OOV rate is ~8.5% (above the plan's original 5% target).
-Plan assumed fewer unique tokens before apostrophe-splitting decision.
-Test verifies OOV < 10% instead; V≈3661 would be needed for 5%.
-
-### Uncommitted files from previous session
-- `docs/04b_from_nn_to_training.md` — new file, 1072 lines
-- `docs/00_overview.md` — updated reading order and repo layout to include 04b
-
-### Uncommitted: Stage 5 files
-All Stage 5 source files, data files, docs, and modified files are uncommitted.
-Ready to commit as `stage(5): word-level tokenizer and dataset`.
+**Training dynamics discovered:**
+- lr=1e-3 with beta2=0.999 is stable on tiny.txt (loss 6.1→4.2 over 500 steps)
+- lr=3e-3 causes divergence after ~200 steps even with gradient clipping at norm=1.0
+- Shakespeare at V=2000, D=32, T=16, B=4: loss 7.75→7.35 over 500 steps (stable but slow)
+- Gradient norms are typically 1.5-3.5 on tiny.txt, 1.5-2.1 on Shakespeare
 
 **What was completed in Stage 4 (committed):**
 
@@ -332,6 +315,49 @@ Real errors encountered during implementation. New entries added per stage:
     Reads the entire file into a heap-allocated buffer with a size limit.
     Much simpler than openFile + reader + readAll.
 
+29. **`@round` is required before `@intFromFloat` on target indices.**
+    `@intFromFloat` truncates towards zero: `@intFromFloat(2.9999)` = 2, not 3.
+    In `backwardCrossEntropy`, this caused the one-hot gradient to point at
+    the wrong class. Fix: `@intFromFloat(@round(value))` to match the
+    forward pass which already used `@round`.
+
+30. **Untracked `reshape()` creates silent gradient shape mismatch.**
+    `logits_3d.reshape(Shape.init2D(B*T, V))` returns a VIEW that shares
+    `tape_node` with the 3D original. The CE backward stores a gradient of
+    shape `(B*T, V)` under this node ID, but the matmul backward expects
+    `(B, T, V)`. This "works" accidentally because both shapes are
+    row-major contiguous, but it's a latent bug. Fix: always use
+    `ops_shape.reshapeTracked()` in the training loop.
+
+31. **`collectNamedParams` needs pointer self (`*TinyWordTransformer`).**
+    With `self: TinyWordTransformer` (by value), `&self.weight` creates a
+    pointer to a stack-local copy that dangles after the function returns.
+    Fix: `self: *TinyWordTransformer` so `&self.weight` points to the
+    actual model field. Also requires `save()` and `load()` to take `*self`.
+
+32. **Don't collect params in `init()` if model is copied into struct.**
+    `model.parameters(&params)` on a local `model` variable collects
+    pointers to the local's fields. After `return Trainer{ .model = model }`,
+    those pointers dangle. Fix: collect params in `train()` after the
+    model is in its final memory location.
+
+33. **Don't store AdamW in struct — HashMap internal pointers corrupt on copy.**
+    `var adam = AdamW.init(alloc, ...)` creates a local with a HashMap
+    containing self-referential pointers. Copying into a struct field
+    via `return Trainer{ .opt = adam }` corrupts these pointers.
+    Fix: create AdamW locally in `train()` so its HashMap is valid for
+    the entire training run.
+
+34. **Gradient clipping is essential for training stability.**
+    Without clipping, lr=3e-3 diverges even on tiny.txt. With clipping
+    at `grad_clip_norm=5.0` (our default), lr=1e-3 is stable on both
+    tiny.txt and Shakespeare. Gradient norms are typically 1.5-3.5.
+
+35. **`beta2=0.95` causes training instability.** The second moment
+    estimate adapts 50x faster than standard (beta2=0.999), making
+    the effective learning rate oscillate when gradient directions
+    change. Changed default from 0.95 to 0.999.
+
 ## CUDA sacred spots
 
 - Row-major to column-major wrapping in `src/backend/cuda/gemm.zig`. Dedicated tests.
@@ -369,27 +395,22 @@ When you hit a Zig compilation error or API question, load reference files by to
 Also available: 19 reference files, 12 recipes, 7 templates, 4 validation scripts.
 See `skills/modern-zig-0-16-tutor/README.md` for the full directory map.
 
-## Stage 6: Next steps
+## Stage 7: Next steps
 
-Stage 6 implements end-to-end CPU training. Per `plan.md`
+Stage 7 implements the CUDA backend. Per `plan.md`
 and `docs/00_overview.md`:
 
 ### What to implement
-1. `src/lab/train.zig` — top-level trainer
-2. `examples/06_train_shakespeare.zig` — CPU training on Shakespeare
-3. `examples/07_generate.zig` — load checkpoint, sample
-4. `docs/07_cpu_training.md` — Training loop, generation
+1. `src/backend/backend.zig` — vtable
+2. `src/backend/cpu_naive/dispatch.zig` — wraps Stage 2 ops
+3. `src/backend/cuda/{bindings,context,mem,module,gemm,dispatch}.zig`
+4. `src/backend/cuda/kernels/*.cu` — offline .ptx kernels
+5. `docs/08_cuda_backend.md`
 
 ### Key design decisions already locked
-- **D5:** 1 block / 1 head, hard-coded during Stages 2–7
-- **D8:** Training corpora: data/tiny.txt (~6 KB) and data/tinyshakespeare.txt (~1 MB)
-- **D14:** Xoshiro256 seeded RNG; deterministic runs
-
-### Dependencies on Stage 5
-- Tokenizer and dataset pipeline is ready
-- Vocab feeds vocab_size into TransformerConfig
-- Windowing and batching produce (B, T) tensors
-- Training loop pattern from example 05
+- **D9:** cuBLAS for GEMM, custom kernels for elementwise/softmax/etc
+- **D10:** .ptx loaded via cuModuleLoadData (no NVRTC)
+- **D11:** dlopen for CUDA libraries at runtime
 
 ## When stuck
 

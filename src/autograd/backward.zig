@@ -663,7 +663,7 @@ fn backwardCrossEntropy(
             for (0..B) |b| {
                 for (0..C) |c| {
                     const idx = b * C + c;
-                    const target_idx: usize = @intFromFloat(ci.targets[b]);
+                    const target_idx: usize = @intFromFloat(@round(ci.targets[b]));
                     const one_hot_val: f32 = if (c == target_idx) 1.0 else 0.0;
                     // dL/dlogits[i,j] = (1/B) * (softmax[i,j] - one_hot[i,j])
                     // The (1/B) comes from the mean reduction in cross_entropy

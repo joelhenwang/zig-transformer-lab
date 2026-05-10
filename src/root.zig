@@ -73,6 +73,9 @@ pub const data = struct {
     pub const batcher = @import("data/batcher.zig");
 };
 
+// Stage 6 additions:
+pub const lab = @import("lab/train.zig");
+
 // Stage 7 additions:
 // pub const backend = @import("backend/backend.zig");
 
@@ -117,4 +120,7 @@ test {
     _ = data.dataset;
     _ = data.windowing;
     _ = data.batcher;
+
+    // Stage 6:
+    _ = lab;
 }
