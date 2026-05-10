@@ -84,7 +84,18 @@ pub const testing_utils = struct {
 };
 
 // Stage 7 additions:
-// pub const backend = @import("backend/backend.zig");
+// The `backend.cuda` namespace exposes the CUDA runtime layer in
+// incremental PRs. PR-alpha ships just the dynamic-loader bindings;
+// subsequent PRs will add `context`, `mem`, `module`, `dispatch`,
+// and the kernel wrappers. The sub-namespace is always present so
+// that tests/integration_cuda.zig can reach bindings regardless of
+// the `-Dcuda` build option (the file itself is platform-portable
+// because it uses std.DynLib rather than linking libcuda directly).
+pub const backend = struct {
+    pub const cuda = struct {
+        pub const bindings = @import("backend/cuda/bindings.zig");
+    };
+};
 
 test {
     _ = errors;
