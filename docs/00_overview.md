@@ -49,7 +49,8 @@ Recommended order:
 3. **02_tensors.md** — row-major layout, strides, broadcasting, softmax stability
 4. **02b_from_tensors_to_training.md** — bridges Stage 2 ops to ML/DL concepts, forward-pass trace, PyTorch equivalents
 5. **03_autograd.md** — tape-based reverse-mode autograd, matmul backward, fused CE
-6. **04_nn.md** — Module protocol, parameter iteration, initialization strategies
+6. **03b_from_autograd_to_training.md** — bridges Stage 3 autograd to ML/DL, backward trace through transformer, residual gradient flow, optimizer preview
+7. **04_nn.md** — Module protocol, parameter iteration, initialization strategies
 7. **05_transformer_math.md** — full shape trace for one transformer block
 8. **06_tokenizer_data.md** — word-level tokenizer, windowing, batching
 9. **07_cpu_training.md** — end-to-end CPU training loop, generation
@@ -128,6 +129,7 @@ zig-transformer-lab/
 |   |-- 02_tensors.md             #   Tensors, strides, broadcasting
 |   |-- 02b_from_tensors_to_training.md #   Stage 2 ops → ML/DL bridge, forward-pass trace
 |   |-- 03_autograd.md            #   Tape-based autograd
+|   |-- 03b_from_autograd_to_training.md #   Stage 3 autograd → ML/DL bridge, backward-pass trace
 |   |-- 04_nn.md                  #   Module protocol, layers
 |   |-- 05_transformer_math.md   #   Full shape trace
 |   |-- 06_tokenizer_data.md     #   Tokenizer, dataset, batching
@@ -283,4 +285,5 @@ zig build run-example -Dexample=06_train_shakespeare -Dcuda=true
 - New to Zig? Start with **docs/01_zig_primer.md**.
 - Comfortable with Zig but new to tensors? Start with **docs/02_tensors.md**.
 - Know tensors but want the ML/DL connection? Read **docs/02b_from_tensors_to_training.md**.
+- Know autograd mechanics but want the transformer connection? Read **docs/03b_from_autograd_to_training.md**.
 - Want the full picture? Read the chapters in order, 01 through 10.

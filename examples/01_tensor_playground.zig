@@ -144,13 +144,13 @@ pub fn main(init: std.process.Init) !void {
     //   Row 1: [a0, a1, a2] + [b10, b11, b12]  (a is reused)
     const row = try ztl.ops.create.fromSlice(allocator, Shape.init2D(1, 3), &.{ 100, 200, 300 });
     const mat = try ztl.ops.create.fromSlice(allocator, Shape.init2D(2, 3), &.{ 1, 2, 3, 4, 5, 6 });
-    const bc_add = try ztl.ops.elementwise.add(allocator, row, mat);
+    const bc_add = try ztl.ops.elementwise.add(allocator, row, mat, null);
     try writer.print("  (1,3)+(2,3):  ", .{});
     try ztl.tensor_print.printValues(bc_add, writer, 6);
 
     // (2,1) + (2,3) -> (2,3)
     const col = try ztl.ops.create.fromSlice(allocator, Shape.init2D(2, 1), &.{ 10, 20 });
-    const bc_add2 = try ztl.ops.elementwise.add(allocator, col, mat);
+    const bc_add2 = try ztl.ops.elementwise.add(allocator, col, mat, null);
     try writer.print("  (2,1)+(2,3):  ", .{});
     try ztl.tensor_print.printValues(bc_add2, writer, 6);
 
@@ -166,28 +166,28 @@ pub fn main(init: std.process.Init) !void {
     const a = try ztl.ops.create.fromSlice(allocator, Shape.init1D(4), &.{ 10, 20, 30, 40 });
     const b = try ztl.ops.create.fromSlice(allocator, Shape.init1D(4), &.{ 1, 2, 3, 4 });
 
-    const add_res = try ztl.ops.elementwise.add(allocator, a, b);
+    const add_res = try ztl.ops.elementwise.add(allocator, a, b, null);
     try writer.print("  add:  ", .{});
     try ztl.tensor_print.printValues(add_res, writer, 4);
 
-    const sub_res = try ztl.ops.elementwise.sub(allocator, a, b);
+    const sub_res = try ztl.ops.elementwise.sub(allocator, a, b, null);
     try writer.print("  sub:  ", .{});
     try ztl.tensor_print.printValues(sub_res, writer, 4);
 
-    const mul_res = try ztl.ops.elementwise.mul(allocator, a, b);
+    const mul_res = try ztl.ops.elementwise.mul(allocator, a, b, null);
     try writer.print("  mul:  ", .{});
     try ztl.tensor_print.printValues(mul_res, writer, 4);
 
-    const div_res = try ztl.ops.elementwise.div(allocator, a, b);
+    const div_res = try ztl.ops.elementwise.div(allocator, a, b, null);
     try writer.print("  div:  ", .{});
     try ztl.tensor_print.printValues(div_res, writer, 4);
 
     // Scalar ops: add a single value to every element
-    const added = try ztl.ops.elementwise.addScalar(allocator, a, 100.0);
+    const added = try ztl.ops.elementwise.addScalar(allocator, a, 100.0, null);
     try writer.print("  addScalar(100):  ", .{});
     try ztl.tensor_print.printValues(added, writer, 4);
 
-    const scaled = try ztl.ops.elementwise.mulScalar(allocator, a, 0.1);
+    const scaled = try ztl.ops.elementwise.mulScalar(allocator, a, 0.1, null);
     try writer.print("  mulScalar(0.1): ", .{});
     try ztl.tensor_print.printValues(scaled, writer, 4);
 
@@ -198,19 +198,19 @@ pub fn main(init: std.process.Init) !void {
 
     const u = try ztl.ops.create.fromSlice(allocator, Shape.init1D(5), &.{ -2, -1, 0, 1, 2 });
 
-    const relu_out = try ztl.ops.unary.relu(allocator, u);
+    const relu_out = try ztl.ops.unary.relu(allocator, u, null);
     try writer.print("  relu:  ", .{});
     try ztl.tensor_print.printValues(relu_out, writer, 5);
 
-    const exp_out = try ztl.ops.unary.exp(allocator, u);
+    const exp_out = try ztl.ops.unary.exp(allocator, u, null);
     try writer.print("  exp:   ", .{});
     try ztl.tensor_print.printValues(exp_out, writer, 5);
 
-    const log_out = try ztl.ops.unary.log(allocator, try ztl.ops.create.fromSlice(allocator, Shape.init1D(3), &.{ 1.0, 2.718, 7.389 }));
+    const log_out = try ztl.ops.unary.log(allocator, try ztl.ops.create.fromSlice(allocator, Shape.init1D(3), &.{ 1.0, 2.718, 7.389 }), null);
     try writer.print("  log:   ", .{});
     try ztl.tensor_print.printValues(log_out, writer, 3);
 
-    const gelu_out = try ztl.ops.unary.geluExact(allocator, u);
+    const gelu_out = try ztl.ops.unary.geluExact(allocator, u, null);
     try writer.print("  gelu:  ", .{});
     try ztl.tensor_print.printValues(gelu_out, writer, 5);
 
@@ -221,15 +221,15 @@ pub fn main(init: std.process.Init) !void {
 
     const r = try ztl.ops.create.fromSlice(allocator, Shape.init2D(2, 3), &.{ 1, 2, 3, 4, 5, 6 });
 
-    const sum0 = try ztl.ops.reduce.sum(allocator, r, 0);
+    const sum0 = try ztl.ops.reduce.sum(allocator, r, 0, null);
     try writer.print("  sum(axis=0): ", .{});
     try ztl.tensor_print.printValues(sum0, writer, 3);
 
-    const sum1 = try ztl.ops.reduce.sum(allocator, r, 1);
+    const sum1 = try ztl.ops.reduce.sum(allocator, r, 1, null);
     try writer.print("  sum(axis=1): ", .{});
     try ztl.tensor_print.printValues(sum1, writer, 2);
 
-    const mean0 = try ztl.ops.reduce.mean(allocator, r, 0);
+    const mean0 = try ztl.ops.reduce.mean(allocator, r, 0, null);
     try writer.print("  mean(axis=0): ", .{});
     try ztl.tensor_print.printValues(mean0, writer, 3);
 
@@ -237,7 +237,7 @@ pub fn main(init: std.process.Init) !void {
     try writer.print("  max(axis=0):  ", .{});
     try ztl.tensor_print.printValues(max0, writer, 3);
 
-    const sum_all = try ztl.ops.reduce.sumAll(allocator, r);
+    const sum_all = try ztl.ops.reduce.sumAll(allocator, r, null);
     try writer.print("  sumAll:  ", .{});
     try ztl.tensor_print.printValues(sum_all, writer, 1);
 
@@ -249,14 +249,14 @@ pub fn main(init: std.process.Init) !void {
     // A(2,3) @ B(3,4) = C(2,4)
     const ma = try ztl.ops.create.fromSlice(allocator, Shape.init2D(2, 3), &.{ 1, 2, 3, 4, 5, 6 });
     const mb = try ztl.ops.create.fromSlice(allocator, Shape.init2D(3, 4), &.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
-    const mc = try ztl.ops.matmul.matmul(allocator, ma, mb);
+    const mc = try ztl.ops.matmul.matmul(allocator, ma, mb, null);
     try writer.print("  (2,3)@(3,4) = (2,4):  ", .{});
     try ztl.tensor_print.printValues(mc, writer, 8);
 
     // Batched matmul: (B,M,K) @ (B,K,N) = (B,M,N)
     const ba = try ztl.ops.create.full(allocator, Shape.init3D(2, 3, 4), 1.0);
     const bb = try ztl.ops.create.full(allocator, Shape.init3D(2, 4, 5), 1.0);
-    const bc = try ztl.ops.matmul.matmulBatch(allocator, ba, bb);
+    const bc = try ztl.ops.matmul.matmulBatch(allocator, ba, bb, null);
     try writer.print("  batched (2,3,4)@(2,4,5) shape: {s}\n", .{shapeStr(bc.shape, &buf)});
     try writer.print("  batched result[0]:  ", .{});
     try ztl.tensor_print.printValues(bc, writer, 5);
@@ -291,24 +291,24 @@ pub fn main(init: std.process.Init) !void {
     // The "max subtraction" trick prevents overflow: exp(x - max(x)) is
     // always <= 1, so we never compute exp(large_number).
     const logits = try ztl.ops.create.fromSlice(allocator, Shape.init2D(1, 3), &.{ 1.0, 2.0, 3.0 });
-    const probs = try ztl.ops.softmax.softmax(allocator, logits);
+    const probs = try ztl.ops.softmax.softmax(allocator, logits, null);
     try writer.print("  logits:  ", .{});
     try ztl.tensor_print.printValues(logits, writer, 3);
     try writer.print("  softmax: ", .{});
     try ztl.tensor_print.printValues(probs, writer, 3);
 
     // Verify probabilities sum to 1.0
-    const prob_sum = try ztl.ops.reduce.sumAll(allocator, probs);
+    const prob_sum = try ztl.ops.reduce.sumAll(allocator, probs, null);
     try writer.print("  sum(probs) = {d:.6} (should be ~1.0)\n", .{prob_sum.data[0]});
 
     // log_softmax is more numerically stable than log(softmax)
-    const lse = try ztl.ops.softmax.logSoftmax(allocator, logits);
+    const lse = try ztl.ops.softmax.logSoftmax(allocator, logits, null);
     try writer.print("  log_softmax: ", .{});
     try ztl.tensor_print.printValues(lse, writer, 3);
 
     // Even large logits don't overflow thanks to the max-subtraction trick
     const big = try ztl.ops.create.fromSlice(allocator, Shape.init2D(1, 3), &.{ 100.0, 101.0, 102.0 });
-    const big_probs = try ztl.ops.softmax.softmax(allocator, big);
+    const big_probs = try ztl.ops.softmax.softmax(allocator, big, null);
     try writer.print("  softmax([100,101,102]) = ", .{});
     try ztl.tensor_print.printValues(big_probs, writer, 3);
 
@@ -325,7 +325,7 @@ pub fn main(init: std.process.Init) !void {
         0.1, 2.0, 1.0,
     });
     const ce_targets = try ztl.ops.create.fromSlice(allocator, Shape.init1D(2), &.{ 0.0, 1.0 });
-    const ce_loss = try ztl.ops.loss.crossEntropy(allocator, ce_logits, ce_targets);
+    const ce_loss = try ztl.ops.loss.crossEntropy(allocator, ce_logits, ce_targets, null);
     try writer.print("  logits (2,3):  ", .{});
     try ztl.tensor_print.printValues(ce_logits, writer, 6);
     try writer.print("  targets:       ", .{});
@@ -335,7 +335,7 @@ pub fn main(init: std.process.Init) !void {
     // When logits are uniform (all equal), CE loss = ln(C) = ln(3) ~ 1.099
     const uni = try ztl.ops.create.ones(allocator, Shape.init2D(1, 3));
     const uni_tgt = try ztl.ops.create.zeros(allocator, Shape.init1D(1));
-    const uni_loss = try ztl.ops.loss.crossEntropy(allocator, uni, uni_tgt);
+    const uni_loss = try ztl.ops.loss.crossEntropy(allocator, uni, uni_tgt, null);
     try writer.print("  uniform CE loss = {d:.4} (ln(3) ~ 1.099)\n", .{uni_loss.data[0]});
 
     // ========================================================================

@@ -22,29 +22,56 @@ code that teaches how PyTorch-like systems work internally.
 | Stage | Status | Notes |
 |-------|--------|-------|
 | 1 — Scaffold | **Done** | Commit `153095b` |
-| 2 — CPU Tensor Foundation | **Done (uncommitted)** | All code + ~103 tests + example + 3 doc chapters ready; needs commit |
-| 3 — Tape-based Autograd | **Next** | Ready to start when user says go |
-| 4–9 | Not started | |
+| 2 — CPU Tensor Foundation | **Done** | `stage(2): cpu tensor foundation` — 7 files, 3082 insertions |
+| 3 — Tape-based Autograd | **Done (uncommitted)** | All code + tests + examples + 2 doc chapters ready; needs commit |
+| 4 — NN Layers + Optimizers | **Done (uncommitted)** | 13 source files, example 04, docs/04_nn.md (858 lines) |
+| 5–9 | Not started | |
 
-**Stage 2 is complete but not yet committed.** Before committing, user should
-confirm readiness. The commit message should be:
-`stage(2): cpu tensor foundation`
+**Stage 3 is complete but not yet committed.** The commit message should be:
+`stage(3): tape-based autograd`
 
-**What was completed this session:**
-1. `examples/01_tensor_playground.zig` — 13-section runnable example (shapes, creation, indexing, debug printing, broadcasting, elementwise/unary/reduce/matmul ops, views, softmax, cross-entropy, squeeze)
-2. `docs/01_zig_primer.md` — 803 lines: Zig 0.16 concepts used in the library + 15-entry gotcha table + 10-entry common mistakes
-3. `docs/02_tensors.md` — 973 lines: row-major strides, broadcasting (ASCII diagrams), softmax stability, log-softmax, cross-entropy, ikj matmul, views/contiguity
-4. `docs/02b_from_tensors_to_training.md` — 861 lines: bridges Stage 2 ops to ML/DL concepts, mini forward-pass trace with shapes, design-decision rationale, PyTorch equivalents table
-5. AGENTS.md revised — added progress tracking, known dead code section, renamed gotchas header
-6. `init.io.lockStderr` pattern discovered for stdout writing in examples (gotcha #11)
+**Stage 4 is complete but not yet committed.** The commit message should be:
+`stage(4): nn layers and optimizers`
 
-**New Zig 0.16.0 gotcha discovered this session:**
+**What was completed in Stage 4:**
 
-11. **`std.Io.get()` does not exist in 0.16.0.** There is no global stdout writer.
-    Use `init.io.lockStderr(&buffer, null)` inside `pub fn main(init: std.process.Init) !void`
-    to get a locked stderr writer. The `Init` struct provides the `io: Io` field.
+### New source files
+1. `src/nn/module.zig` — TransformerConfig, Module convention, collectParamsSlice
+2. `src/nn/linear.zig` — Linear: weight (D_out, D_in), Kaiming init, 3D→2D reshape, tape-tracked forward
+3. `src/nn/embedding.zig` — Embedding: weight table, forward gathers rows, records `.embedding` OpKind
+4. `src/nn/layernorm.zig` — LayerNorm: gamma/beta, composed from ~7 tape-tracked ops (mean, sub, mul, sqrt, div, add)
+5. `src/nn/activations.zig` — GELU wrapper (stateless, wraps ops.unary.geluExact)
+6. `src/nn/attention.zig` — CausalSelfAttention (1 head): 4 Linear sub-layers, causal mask, QKV→K^T→matmulBatch→scale→mask→softmax→matmulBatch→W_o
+7. `src/nn/mlp.zig` — MLP: fc1→GELU→fc2
+8. `src/nn/block.zig` — TransformerBlock: pre-norm residual (LN→Attn→+x→LN→MLP→+h)
+9. `src/nn/model.zig` — TinyWordTransformer: tok_embed+pos_embed→block→ln_f→lm_head, save/load checkpoint format
+10. `src/optim/optimizer.zig` — Optimizer vtable (ctx + step/zeroGrad/deinit function pointers)
+11. `src/optim/sgd.zig` — SGD with momentum and coupled weight decay
+12. `src/optim/adamw.zig` — AdamW with bias correction (β₁ᵗ, β₂ᵗ) and decoupled weight decay
 
-See `SESSION_GUIDE.md` for file-level detail, environment info, and resumption instructions.
+### Modified files (Stage 3 → Stage 4)
+13. `src/autograd/node.zig` — Added OpKind.sqrt (21→22 variants)
+14. `src/autograd/backward.zig` — Added backwardSqrt, backwardEmbedding (scatter-add), fixed backwardMatmulBatch for 3D tensors
+15. `src/autograd/tape.zig` — Added `kept_alive: ArrayList([]f32)`, `keepAlive(self, *Tensor)`, fixed `trackLeaf()` to always create fresh node (ignoring stale tape_node)
+16. `src/tensor/ops/unary.zig` — Added `sqrt(alloc, t, tape)` with tape recording
+17. `src/tensor/ops/shape_ops.zig` — NEW: reshapeTracked, transpose2dTracked, transposeInner2d (3D view)
+18. `src/root.zig` — Wired nn.* and optim.* modules with re-exports and test blocks
+
+### Examples
+19. `examples/04_overfit_one_batch.zig` — Training loop: V=32, D=16, T=8, B=2, 50 steps with AdamW. Loss 3.83→3.09.
+
+### Documentation
+20. `docs/04_nn.md` — 858 lines: Module convention, Linear/Embedding/LayerNorm/GELU/MLP/Attention/Block/Model design, Kaiming init, keepAlive mechanism, optimizer math (SGD momentum, AdamW bias correction + decoupled decay), PyTorch equivalents, 10 common mistakes
+
+### Key bugs fixed in Stage 4
+- **trackLeaf() stale tape_node collision.** After destroying a tape, param.tape_node still held the old node ID. Next step's trackLeaf() short-circuited, returning a stale ID that collided with other nodes. Fix: trackLeaf() always creates a fresh node, ignoring existing tape_node.
+- **Use-after-free on intermediate tensors.** NN forward methods create owned intermediates (transposes, reshapes, matmul outputs) that are defer-freed before backward runs. Tape's SavedData holds data slices into freed buffers. Fix: tape.keepAlive() transfers buffer ownership to tape's kept_alive list; sets tensor.owned=false so deinit is no-op.
+- **backwardMatmulBatch on 3D tensors.** Was calling tp.b.transpose2d() on 3D tensors (crash). Fix: use ops_shape.transposeInner2d(tp.b) which swaps dims[1]/dims[2] of a 3D tensor.
+- **Loss read-after-free.** Reading loss.data[0] after loss.deinit() in example 04. Fix: save const loss_val = loss.data[0] before deinit.
+
+### Acceptance criteria (all pass)
+- `zig build test` — 150+ tests pass, 0 leaks
+- `zig build run-example -Dexample=04_overfit_one_batch` — Loss decreases from 3.83 to 3.09 over 50 steps
 
 ## Known dead code / pitfalls
 
@@ -56,6 +83,10 @@ See `SESSION_GUIDE.md` for file-level detail, environment info, and resumption i
 - **`plan.md` lists `src/core/allocator.zig`** in its repository layout, but this
   file was never created and is not imported anywhere. The plan's layout is stale
   on this point; `docs/00_overview.md` is accurate.
+
+- **`root.zig` line 14 still says "add them here AND in tests/unit_all.zig".** This
+  comment is stale — only `src/root.zig` test blocks matter. The unit_all.zig
+  reference should be removed when convenient.
 
 ## Workflow
 
@@ -106,6 +137,27 @@ to a dimension count without adding 1.
 
 `Shape.equals` is a **free function**, not a method: `equals(a, b)` not `a.equals(b)`.
 
+## This project's SavedData API (MUST follow — tripped up in Stage 3)
+
+SavedData stores Tensor structs **by value** (snapshots), not by pointer:
+
+```zig
+// WRONG — dangling pointer to stack-local by-value parameter:
+.saved = .{ .tensor_ref = @constCast(&tensor_param) }       // DANGLING!
+.saved = .{ .tensor_pair = .{ .a = @constCast(&a), .b = @constCast(&b) } }  // DANGLING!
+
+// CORRECT — snapshot by value, data slice shares original heap buffer:
+.saved = .{ .tensor_ref = tensor_param }                    // snapshot
+.saved = .{ .tensor_pair = .{ .a = a, .b = b } }          // snapshot
+.saved = .{ .ce_info = .{ .logits = logits, .targets = targets.data } } // logits by value
+```
+
+**Why:** Ops take `Tensor` by value (Zig convention). `@constCast(&param)` creates
+a pointer to a stack-local copy that's destroyed when the function returns. By
+storing the whole struct, we capture the `data` slice (pointing to the original
+heap buffer) along with shape/strides. The heap buffer is alive as long as the
+caller's tensor outlives the tape — same contract as PyTorch's autograd.
+
 ## Zig 0.16.0 compilation gotchas
 
 Real errors encountered during implementation. New entries added per stage:
@@ -154,6 +206,32 @@ Real errors encountered during implementation. New entries added per stage:
     writer. In examples, use `init.io.lockStderr(&buffer, null)` to get a
     locked stderr writer. The `Init` struct provides the `io: Io` field.
 
+12. **`@constCast(&by_value_param)` creates dangling pointers.** When ops
+    take `Tensor` by value, storing a pointer to the parameter in SavedData
+    dangles after the function returns. Store the Tensor by value (snapshot)
+    instead. The `data` slice in the snapshot shares the original heap buffer.
+    Discovered in Stage 3 when `backwardMul` crashed with `ShapeMismatch` —
+    the saved `tensor_pair` pointers pointed to freed stack frames.
+
+13. **`lockStderr` buffer can be zero-length.** Use `var buf: [0]u8 = undefined`
+    for unbuffered stderr writing in examples (matches example 01 pattern).
+    A `[1024]u8` buffer works but may swallow output silently if the buffer
+    isn't flushed before program exit.
+
+14. **Gradient tensors for null-parent inputs leak without explicit cleanup.**
+    When an op input has `tape_node = null` (doesn't require grad), the
+    backward function still computes its gradient, but the accumulation loop
+    skips it (null parent ID). Without a cleanup loop after accumulation,
+    these heap-allocated gradient tensors leak. Fix: iterate parent_grads
+    again and free any where `node.parents[pi]` is null.
+
+15. **`fetchSwapRemove` → `fetchRemove` in Zig 0.16.0 HashMap API.** The
+    method is `fetchRemove`, not `fetchSwapRemove`. The latter does not exist.
+
+16. **`@floatFromInt(@as(u64, @bitCast(x)))` is WRONG for f32→f64 conversion.**
+    Use `@floatCast(f64, x)` to widen f32 to f64. `@bitCast` reinterprets
+    the bit pattern (producing garbage), while `@floatCast` converts the value.
+
 ## CUDA sacred spots
 
 - Row-major to column-major wrapping in `src/backend/cuda/gemm.zig`. Dedicated tests.
@@ -190,6 +268,31 @@ When you hit a Zig compilation error or API question, load reference files by to
 
 Also available: 19 reference files, 12 recipes, 7 templates, 4 validation scripts.
 See `skills/modern-zig-0-16-tutor/README.md` for the full directory map.
+
+## Stage 5: Next steps
+
+Stage 5 implements the tokenizer and data pipeline. Per `plan.md`
+and `docs/00_overview.md`:
+
+### What to implement
+1. `src/tokenizer/vocab.zig` — Vocab struct, serialize/deserialize, word-level tokenization
+2. `src/tokenizer/word.zig` — Encode (text→IDs) and decode (IDs→text)
+3. `src/data/dataset.zig` — File → token stream
+4. `src/data/windowing.zig` — Sliding window: (input, target) pairs
+5. `src/data/batcher.zig` — Deterministic shuffle + batching
+6. `examples/05_train_tiny.zig` — Train on data/tiny.txt
+7. `docs/05_transformer_math.md` — Full shape trace for one transformer block (or merge into 06)
+8. `docs/06_tokenizer_data.md` — Tokenizer, dataset, batching
+
+### Key design decisions already locked
+- **D5:** 1 block / 1 head, hard-coded during Stages 2–7
+- **D8:** Training corpora: data/tiny.txt (~5 KB) and data/tinyshakespeare.txt (~1 MB)
+- **D14:** Xoshiro256 seeded RNG; deterministic runs
+
+### Dependencies on Stage 4
+- Model is ready (TinyWordTransformer)
+- Optimizer is ready (AdamW)
+- Training loop pattern from example 04
 
 ## When stuck
 

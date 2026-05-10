@@ -10,8 +10,8 @@
 //!
 //! Convention:
 //!   Sub-modules are imported as private consts and re-exported as public.
-//!   As new source files are added in later stages, add them here AND in
-//!   tests/unit_all.zig so their `test` blocks are discovered.
+//!   As new source files are added in later stages, add them here
+//!   and in the test block at the bottom so their `test` blocks are discovered.
 //!
 
 pub const errors = @import("core/errors.zig");
@@ -32,31 +32,35 @@ pub const ops = struct {
     pub const unary = @import("tensor/ops/unary.zig");
     pub const softmax = @import("tensor/ops/softmax.zig");
     pub const loss = @import("tensor/ops/loss.zig");
+    pub const shape_ops = @import("tensor/ops/shape_ops.zig");
 };
 
 // Stage 3 additions:
-// pub const autograd = @import("autograd/node.zig");
-// pub const tape = @import("autograd/tape.zig");
-// pub const backward = @import("autograd/backward.zig");
-// pub const gradcheck = @import("autograd/gradcheck.zig");
+pub const autograd = @import("autograd/node.zig");
+const tape_mod = @import("autograd/tape.zig");
+pub const Tape = tape_mod.Tape;
+const backward_mod = @import("autograd/backward.zig");
+pub const backward = backward_mod;
+const gradcheck_mod = @import("autograd/gradcheck.zig");
+pub const gradcheck = gradcheck_mod;
 
 // Stage 4 additions:
-// pub const nn = struct {
-//     pub const module = @import("nn/module.zig");
-//     pub const linear = @import("nn/linear.zig");
-//     pub const embedding = @import("nn/embedding.zig");
-//     pub const layernorm = @import("nn/layernorm.zig");
-//     pub const activations = @import("nn/activations.zig");
-//     pub const attention = @import("nn/attention.zig");
-//     pub const mlp = @import("nn/mlp.zig");
-//     pub const block = @import("nn/block.zig");
-//     pub const model = @import("nn/model.zig");
-// };
-// pub const optim = struct {
-//     pub const optimizer = @import("optim/optimizer.zig");
-//     pub const sgd = @import("optim/sgd.zig");
-//     pub const adamw = @import("optim/adamw.zig");
-// };
+pub const nn = struct {
+    pub const module = @import("nn/module.zig");
+    pub const linear = @import("nn/linear.zig");
+    pub const embedding = @import("nn/embedding.zig");
+    pub const layernorm = @import("nn/layernorm.zig");
+    pub const activations = @import("nn/activations.zig");
+    pub const attention = @import("nn/attention.zig");
+    pub const mlp = @import("nn/mlp.zig");
+    pub const block = @import("nn/block.zig");
+    pub const model = @import("nn/model.zig");
+};
+pub const optim = struct {
+    pub const optimizer = @import("optim/optimizer.zig");
+    pub const sgd = @import("optim/sgd.zig");
+    pub const adamw = @import("optim/adamw.zig");
+};
 
 // Stage 5 additions:
 // pub const tokenizer = struct {
@@ -87,4 +91,23 @@ test {
     _ = ops.unary;
     _ = ops.softmax;
     _ = ops.loss;
+    _ = ops.shape_ops;
+    _ = autograd;
+    _ = tape_mod;
+    _ = backward_mod;
+    _ = gradcheck_mod;
+
+    // Stage 4:
+    _ = nn.module;
+    _ = nn.linear;
+    _ = nn.embedding;
+    _ = nn.layernorm;
+    _ = nn.activations;
+    _ = nn.attention;
+    _ = nn.mlp;
+    _ = nn.block;
+    _ = nn.model;
+    _ = optim.optimizer;
+    _ = optim.sgd;
+    _ = optim.adamw;
 }
