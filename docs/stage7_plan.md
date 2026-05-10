@@ -177,8 +177,8 @@ append an entry in Section 10.
 
 | # | PR | Scope (one line) | Depends on | Status |
 |---|---|---|---|---|
-| 1 | α | Dynamic loader smoke test (no kernels) | — | `[ ]` |
-| 2 | β | `CudaContext` lifecycle (device, context, stream, cuBLAS) | α | `[ ]` |
+| 1 | α | Dynamic loader smoke test (no kernels) | — | `[x]` 07bd274 |
+| 2 | β | `CudaContext` lifecycle (device, context, stream, cuBLAS) | α | `[x]` TBD |
 | 3 | γ | `DeviceBuffer` alloc/free/copy | β | `[ ]` |
 | 4 | δ | Tensor `Storage.cuda` variant | γ | `[ ]` |
 | 5 | ε | `Tensor.toCuda` / `toCpu` + roundtrip | δ | `[ ]` |
@@ -1660,8 +1660,8 @@ Written so a next session doesn't re-learn the plumbing.
 Appended to as PRs land. Format: `- [x] PR-X — <scope> (commit HASH, YYYY-MM-DD)`.
 
 ```
-- [ ] PR-α — CUDA dynamic loader smoke test
-- [ ] PR-β — CudaContext lifecycle
+- [x] PR-α — CUDA dynamic loader smoke test (07bd274, 2026-05-10) — 3/3 pass on RTX 4060 Ti, CUDA 13.2 (driver 13020)
+- [x] PR-β — CudaContext lifecycle (TBD, 2026-05-10) — 6/6 pass on RTX 4060 Ti
 - [ ] PR-γ — DeviceBuffer alloc/free/copy
 - [ ] PR-δ — Tensor Storage.cuda variant
 - [ ] PR-ε — Tensor.toCuda / toCpu

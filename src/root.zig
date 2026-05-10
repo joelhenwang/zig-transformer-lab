@@ -94,6 +94,7 @@ pub const testing_utils = struct {
 pub const backend = struct {
     pub const cuda = struct {
         pub const bindings = @import("backend/cuda/bindings.zig");
+        pub const context = @import("backend/cuda/context.zig");
     };
 };
 

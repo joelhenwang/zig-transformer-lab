@@ -31,6 +31,8 @@ const testing = std.testing;
 
 const lab = @import("zig_transformer_lab");
 const bindings = lab.backend.cuda.bindings;
+const context = lab.backend.cuda.context;
+const CudaContext = context.CudaContext;
 
 // ---------------------------------------------------------------------------
 // PR-alpha: dynamic loader smoke tests
@@ -106,4 +108,49 @@ test "cuda bindings: cuCtxCreate_v2 + cublasCreate_v2 round-trip without leaks" 
     // Later PRs exercise stream creation, memory allocation, and
     // kernel launch from this same setup; PR-alpha's job is simply
     // to prove the lifecycle pair works.
+}
+
+// ---------------------------------------------------------------------------
+// PR-beta: CudaContext lifecycle
+// ---------------------------------------------------------------------------
+
+test "cuda context: init + deinit round-trip on device 0" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    // Fresh context: device, ctx, stream, cublas all non-null /
+    // valid; PTX module cache is empty.
+    try testing.expect(ctx.ctx != null);
+    try testing.expect(ctx.stream != null);
+    try testing.expect(ctx.cublas != null);
+    try testing.expectEqual(@as(usize, 0), ctx.ptx_modules.count());
+}
+
+test "cuda context: synchronize on empty stream is a no-op and returns success" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    // No work submitted; synchronize is just a round-trip to the
+    // driver. Should succeed immediately with no CUDA errors
+    // remaining sticky afterward.
+    try ctx.synchronize();
+    try ctx.synchronize();
+}
+
+test "cuda context: two sequential init/deinit cycles leave no state behind" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    {
+        var ctx = try CudaContext.init(testing.allocator);
+        defer ctx.deinit();
+        try ctx.synchronize();
+    }
+    // Second construction — would fail with CUDA_ERROR_INVALID_CONTEXT
+    // or OUT_OF_MEMORY if the prior deinit leaked a context or stream.
+    {
+        var ctx = try CudaContext.init(testing.allocator);
+        defer ctx.deinit();
+        try ctx.synchronize();
+    }
 }
