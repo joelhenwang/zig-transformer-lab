@@ -52,7 +52,7 @@ const ops_create = @import("../tensor/ops/create.zig");
 /// Named struct type for parameter entries in save/load.
 /// Required because anonymous structs create different types per scope
 /// in Zig, which prevents passing ArrayLists across function boundaries.
-const NamedParam = struct { name: []const u8, tensor: *Tensor };
+pub const NamedParam = struct { name: []const u8, tensor: *Tensor };
 
 pub const TinyWordTransformer = struct {
     tok_embed: Embedding,
@@ -285,8 +285,8 @@ pub const TinyWordTransformer = struct {
         }
     }
 
-    /// Internal: collect parameters with their names.
-    fn collectNamedParams(
+    /// Collect parameters with their names (for debugging / grad checking).
+    pub fn collectNamedParams(
         self: *TinyWordTransformer,
         list: *std.ArrayList(NamedParam),
     ) !void {

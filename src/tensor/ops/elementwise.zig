@@ -60,19 +60,29 @@ const NodeId = @import("../tensor.zig").NodeId;
 /// output's index for that dimension.
 fn broadcastIndex(out_idx: usize, out_shape: Shape, in_shape: Shape, in_strides: Strides) usize {
     var result: usize = 0;
-    // Walk dimensions from right to left (broadcasting aligns trailing dims)
-    var i: usize = out_shape.ndim();
+    const out_ndim = out_shape.ndim();
+    const in_ndim = in_shape.ndim();
+    // Extra leading dims in the output that don't exist in the input.
+    // These are broadcasted (input index 0 for all of them).
+    // Example: output (B,T,D), input (1,D) → extra_dims = 1
+    const extra_dims: usize = if (out_ndim > in_ndim) out_ndim - in_ndim else 0;
+    // Walk dimensions from right to left (broadcasting right-aligns shapes)
+    var i: usize = out_ndim;
     var remaining = out_idx;
     while (i > 0) {
         i -= 1;
         const dim_size = out_shape.dims[i];
         const coord = remaining % dim_size;
         remaining = remaining / dim_size;
-        // If the input has size 1 at this dim (broadcast), coord should be 0
-        const in_coord: usize = if (i < in_shape.ndim() and in_shape.dims[i] == 1) 0 else coord;
-        if (i < in_shape.ndim()) {
-            result += in_coord * in_strides.values[i];
+        if (i >= extra_dims) {
+            // This output dim maps to an input dim (right-aligned).
+            // Output dim i → input dim (i - extra_dims).
+            const in_dim = i - extra_dims;
+            // If the input has size 1 at this dim (broadcast), coord should be 0
+            const in_coord: usize = if (in_shape.dims[in_dim] == 1) 0 else coord;
+            result += in_coord * in_strides.values[in_dim];
         }
+        // else: extra leading dim in output not present in input → broadcast → add 0
     }
     return result;
 }
@@ -420,6 +430,57 @@ test "addInPlace" {
     try addInPlace(&a, b);
     try std.testing.expectEqual(@as(f32, 11.0), a.data[0]);
     try std.testing.expectEqual(@as(f32, 33.0), a.data[2]);
+}
+
+test "add broadcast 3D + 2D: (2,3,8) + (1,8) = (2,3,8)" {
+    const allocator = std.testing.allocator;
+    // gamma-like broadcasting: (1,8) over (2,3,8)
+    var a = try Tensor.init(allocator, Shape.init3D(2, 3, 8));
+    defer a.deinit(allocator);
+    for (0..48) |i| a.data[i] = @floatFromInt(i);
+
+    var b = try Tensor.init(allocator, Shape.init2D(1, 8));
+    defer b.deinit(allocator);
+    for (0..8) |i| b.data[i] = @floatFromInt(i * 10);
+
+    var out = try add(allocator, a, b, null);
+    defer out.deinit(allocator);
+
+    // Position (0, 0, 5): a[0,0,5]=5, b[0,5]=50 → out = 55
+    try std.testing.expectApproxEqAbs(@as(f32, 55.0), out.data[0 * 24 + 0 * 8 + 5], 1e-4);
+    // Position (1, 2, 5): a[1,2,5]=1*24+2*8+5=45, b[0,5]=50 → out = 95
+    try std.testing.expectApproxEqAbs(@as(f32, 95.0), out.data[1 * 24 + 2 * 8 + 5], 1e-4);
+    // Position (0, 1, 3): a[0,1,3]=11, b[0,3]=30 → out = 41
+    try std.testing.expectApproxEqAbs(@as(f32, 41.0), out.data[0 * 24 + 1 * 8 + 3], 1e-4);
+}
+
+test "add broadcast 2D + 1D: (2,3) + (3,) = (2,3)" {
+    const allocator = std.testing.allocator;
+    var a = try Tensor.init(allocator, Shape.init2D(2, 3));
+    defer a.deinit(allocator);
+    a.data[0] = 1;
+    a.data[1] = 2;
+    a.data[2] = 3;
+    a.data[3] = 4;
+    a.data[4] = 5;
+    a.data[5] = 6;
+
+    var b = try Tensor.init(allocator, Shape.init1D(3));
+    defer b.deinit(allocator);
+    b.data[0] = 10;
+    b.data[1] = 20;
+    b.data[2] = 30;
+
+    var out = try add(allocator, a, b, null);
+    defer out.deinit(allocator);
+    // Row 0: [1+10, 2+20, 3+30] = [11, 22, 33]
+    try std.testing.expectEqual(@as(f32, 11.0), out.data[0]);
+    try std.testing.expectEqual(@as(f32, 22.0), out.data[1]);
+    try std.testing.expectEqual(@as(f32, 33.0), out.data[2]);
+    // Row 1: [4+10, 5+20, 6+30] = [14, 25, 36]
+    try std.testing.expectEqual(@as(f32, 14.0), out.data[3]);
+    try std.testing.expectEqual(@as(f32, 25.0), out.data[4]);
+    try std.testing.expectEqual(@as(f32, 36.0), out.data[5]);
 }
 
 test "addInPlace rejects shape mismatch" {

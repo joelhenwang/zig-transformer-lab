@@ -34,12 +34,14 @@ const Shape = @import("../shape.zig").Shape;
 const computeStrides = @import("../shape.zig").computeStrides;
 const totalElements = @import("../shape.zig").totalElements;
 const shape_equals = @import("../shape.zig").equals;
+const isContiguous = @import("../shape.zig").isContiguous;
 const Tensor = @import("../tensor.zig").Tensor;
 const DType = @import("../../core/dtype.zig").DType;
 const Device = @import("../../core/device.zig").Device;
 const Tape = @import("../../autograd/tape.zig").Tape;
 const Node = @import("../../autograd/node.zig").Node;
 const OpKind = @import("../../autograd/node.zig").OpKind;
+const ops_shape = @import("shape_ops.zig");
 
 /// Sum all elements along the given axis.
 ///
@@ -231,10 +233,19 @@ pub fn sumAll(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) !Tenso
 pub fn sumToShape(allocator: std.mem.Allocator, grad: Tensor, target: Shape) LabError!Tensor {
     // Same shape → return an owned copy (not a view) because callers
     // may deinit the source tensor, which would invalidate a view.
+    // CRITICAL: must check contiguity before @memcpy. If grad is a
+    // non-contiguous view (e.g., from transpose2d), @memcpy copies
+    // raw buffer bytes in memory order, ignoring strides, producing
+    // silently wrong data. reshapeTracked handles non-contiguous
+    // inputs correctly via stride-aware element-by-element copy.
     if (shape_equals(grad.shape, target)) {
-        const out = try Tensor.init(allocator, target);
-        @memcpy(out.data, grad.data[0..out.data.len]);
-        return out;
+        if (isContiguous(grad.shape, grad.strides)) {
+            const out = try Tensor.init(allocator, target);
+            @memcpy(out.data, grad.data[0..out.data.len]);
+            return out;
+        } else {
+            return ops_shape.reshapeTracked(allocator, grad, target, null);
+        }
     }
 
     // Collect axes that need summing.
@@ -263,11 +274,9 @@ pub fn sumToShape(allocator: std.mem.Allocator, grad: Tensor, target: Shape) Lab
     }
 
     if (n_axes == 0) {
-        // No axes to sum, but shapes differ — try reshape.
-        // Allocate an owned copy with the target shape.
-        const result = try Tensor.init(allocator, target);
-        @memcpy(result.data, grad.data[0..totalElements(target)]);
-        return result;
+        // No axes to sum, but shapes differ — reshape.
+        // Use reshapeTracked which handles non-contiguous views correctly.
+        return ops_shape.reshapeTracked(allocator, grad, target, null);
     }
 
     // Sum axes from rightmost to leftmost to avoid index shifting.
@@ -285,9 +294,8 @@ pub fn sumToShape(allocator: std.mem.Allocator, grad: Tensor, target: Shape) Lab
     // After summing, we may still need to reshape (e.g., (1,3) → (3,))
     if (!shape_equals(current.shape, target)) {
         if (totalElements(current.shape) == totalElements(target)) {
-            // Allocate a fresh owned tensor with target shape and copy data
-            const result = try Tensor.init(allocator, target);
-            @memcpy(result.data, current.data);
+            // reshapeTracked handles non-contiguous tensors correctly.
+            const result = try ops_shape.reshapeTracked(allocator, current, target, null);
             if (current_owned) current.deinit(allocator);
             return result;
         }
@@ -477,4 +485,45 @@ test "sumToShape — reduce rank (2,3) → (3,)" {
     try std.testing.expectEqual(@as(f32, 5.0), result.data[0]);
     try std.testing.expectEqual(@as(f32, 7.0), result.data[1]);
     try std.testing.expectEqual(@as(f32, 9.0), result.data[2]);
+}
+
+test "sumToShape — transposed (non-contiguous) view" {
+    const allocator = std.testing.allocator;
+    // Build a 2x3 tensor, transpose it, then sumToShape back to (3,2).
+    // This tests the fix for the @memcpy-on-non-contiguous bug:
+    // before the fix, @memcpy copied raw bytes ignoring strides,
+    // silently producing the original (non-transposed) data.
+    var t = try Tensor.init(allocator, Shape.init2D(2, 3));
+    defer t.deinit(allocator);
+    // t = [[1, 2, 3],
+    //      [4, 5, 6]]
+    t.data[0] = 1;
+    t.data[1] = 2;
+    t.data[2] = 3;
+    t.data[3] = 4;
+    t.data[4] = 5;
+    t.data[5] = 6;
+
+    // transpose2d returns a non-contiguous VIEW with strides [1, 3]
+    // and shape (3, 2). Logically: [[1, 4], [2, 5], [3, 6]]
+    const t_view = try t.transpose2d();
+    try std.testing.expect(!t_view.isContiguous());
+
+    // sumToShape with same shape must produce an owned contiguous copy
+    // that respects the logical (transposed) element ordering.
+    var result = try sumToShape(allocator, t_view, Shape.init2D(3, 2));
+    defer result.deinit(allocator);
+
+    // result[0,0] = t_view[0,0] = t[0,0] = 1
+    // result[0,1] = t_view[0,1] = t[1,0] = 4
+    // result[1,0] = t_view[1,0] = t[0,1] = 2
+    // result[1,1] = t_view[1,1] = t[1,1] = 5
+    // result[2,0] = t_view[2,0] = t[0,2] = 3
+    // result[2,1] = t_view[2,1] = t[1,2] = 6
+    try std.testing.expectEqual(@as(f32, 1.0), result.data[0]);
+    try std.testing.expectEqual(@as(f32, 4.0), result.data[1]);
+    try std.testing.expectEqual(@as(f32, 2.0), result.data[2]);
+    try std.testing.expectEqual(@as(f32, 5.0), result.data[3]);
+    try std.testing.expectEqual(@as(f32, 3.0), result.data[4]);
+    try std.testing.expectEqual(@as(f32, 6.0), result.data[5]);
 }

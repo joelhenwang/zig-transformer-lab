@@ -117,11 +117,18 @@ pub const Linear = struct {
         // backward can then convert the 2D matmul gradient back to 3D,
         // matching the original input's shape for the caller.
         var x = input;
+        var x_flat_owned: ?Tensor = null;
         if (is_3d) {
             var x_flat = try ops_shape.reshapeTracked(self.allocator, input, Shape.init2D(B * T, self.d_in), tape);
             if (tape) |t| try t.keepAlive(&x_flat);
-            defer x_flat.deinit(self.allocator);
             x = x_flat;
+            x_flat_owned = x_flat;
+        }
+        defer {
+            // When tape!=null: keepAlive set owned=false, deinit is no-op.
+            // When tape=null: owned=true, must free AFTER matmul consumes x.
+            // defer is at function scope so this fires at the right time.
+            if (x_flat_owned) |*xf| xf.deinit(self.allocator);
         }
 
         // Transpose weight: W^T, shape (D_in, D_out)
@@ -139,20 +146,18 @@ pub const Linear = struct {
 
         // Add bias if present
         if (self.use_bias) {
-            // bias is (D_out,), reshape to (1, D_out) for broadcasting.
-            // Use reshapeTracked so the tape records the shape change —
-            // backward can then reshape the add's gradient for the
-            // broadcast bias back to (D_out,) matching the original bias.
             var bias_2d = try ops_shape.reshapeTracked(self.allocator, self.bias.?, Shape.init2D(1, self.d_out), tape);
             if (tape) |t| try t.keepAlive(&bias_2d);
-            defer bias_2d.deinit(self.allocator);
-
+            // bias_2d is used by the add op below. With tape=null,
+            // keepAlive is skipped and bias_2d.owned stays true.
+            // We must NOT defer inside this if-block (Zig defer fires at
+            // block end, not function end). Instead, free after the add
+            // consumes it.
             const biased = try ops_elementwise.add(self.allocator, output, bias_2d, tape);
-            // The add op saved a snapshot of the matmul output in SavedData.
-            // Transfer data ownership to the tape so it survives backward.
             if (tape) |t| try t.keepAlive(&output);
             output.deinit(self.allocator);
             output = biased;
+            bias_2d.deinit(self.allocator);
         }
 
         // Reshape output back to 3D if input was 3D.

@@ -369,6 +369,34 @@ Real errors encountered during implementation. New entries added per stage:
     the effective learning rate oscillate when gradient directions
     change. Changed default from 0.95 to 0.999.
 
+36. **`denom_floor=1e-2` needed for all softmax-related grad checks.**
+    Near-zero gradients (< 0.01) cause inflated relative errors
+    (often > 1.0) from finite-difference noise, even when the
+    backward implementation is correct. Using `1e-8` as the denom
+    floor makes relative error meaningless for these cases. Fix:
+    use `denom_floor=1e-2` and pair with `max_abs_diff` check.
+
+37. **Combined assertion: `max_rel_err < 0.05 OR max_abs_diff < 1e-2`.**
+    High relative error with tiny absolute error is finite-difference
+    noise on near-zero gradients, not a backward bug. The correct
+    pattern for grad check assertions is: pass if EITHER relative
+    error is small (real gradient, precise check) OR absolute error
+    is tiny (near-zero gradient, noise-dominated). This pattern is
+    used in the full model, TransformerBlock, CausalSelfAttention,
+    and pipeline grad check tests.
+
+38. **`sumAll(softmax(x))` is constant — gradient is exactly 0.**
+    Each row of softmax sums to 1, so `sumAll(softmax(x)) = B*T`
+    regardless of x. The gradient through this path is exactly 0,
+    making it a degenerate case for grad checks. The "softmaxed"
+    pipeline stage must be skipped in assertions. A non-trivial
+    test requires `loss = sumAll(softmax(x) * target)` instead.
+
+39. **Linear bias gradient for 3D input is correct.**
+    `dL/db[j] = sum over (b,t) of dL/dy[b,t,j]` because bias
+    broadcasts across batch and time dimensions. Verified with
+    finite-difference grad check: max_rel_err=0.000002.
+
 ## CUDA sacred spots
 
 - Row-major to column-major wrapping in `src/backend/cuda/gemm.zig`. Dedicated tests.

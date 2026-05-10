@@ -43,6 +43,7 @@ const Tensor = @import("../tensor/tensor.zig").Tensor;
 const Shape = @import("../tensor/shape.zig").Shape;
 const totalElements = @import("../tensor/shape.zig").totalElements;
 const shape_equals = @import("../tensor/shape.zig").equals;
+const isContiguous = @import("../tensor/shape.zig").isContiguous;
 const Node = @import("node.zig").Node;
 const OpKind = @import("node.zig").OpKind;
 const SavedData = @import("node.zig").SavedData;
@@ -368,10 +369,18 @@ fn backwardTranspose2d(
 ) LabError!void {
     switch (node.saved) {
         .tensor_ref => |a| {
-            // Transpose the gradient back. Since transpose returns a view,
-            // we need to make it contiguous (copy) for the parent's shape.
+            // Transpose the gradient back. transpose2d() returns a
+            // non-contiguous VIEW (strides are swapped, no data copy).
+            // We MUST use reshapeTracked (which does stride-aware
+            // element-by-element copy) instead of sumToShape (which
+            // uses @memcpy in its fast path and ignores strides).
+            //
+            // Without this fix, the gradient for Linear.weight is
+            // silently transposed — sumToShape sees the view's shape
+            // matches the target, does @memcpy of the raw buffer, and
+            // copies data in the wrong (non-transposed) order.
             const grad_t = try grad_output.transpose2d();
-            const da = try ops_reduce.sumToShape(allocator, grad_t, a.shape);
+            const da = try ops_shape.reshapeTracked(allocator, grad_t, a.shape, null);
             result[0] = try heapAlloc(allocator, da);
         },
         else => return error.InvalidArgument,
@@ -767,9 +776,35 @@ fn backwardEmbedding(
 pub fn broadcastTo(allocator: std.mem.Allocator, tensor: Tensor, target: Shape) LabError!Tensor {
     // Same shape → return an owned copy (not a view) because callers
     // may deinit the source tensor, which would invalidate a view.
+    // CRITICAL: must check contiguity before @memcpy. If the tensor
+    // is a non-contiguous view (e.g., from transpose2d), @memcpy
+    // copies raw buffer bytes in memory order, ignoring strides,
+    // producing silently wrong data. The stride-aware loop reads
+    // elements in logical (shape) order using strides for correct
+    // indexing.
     if (shape_equals(tensor.shape, target)) {
         const out = try Tensor.init(allocator, target);
-        @memcpy(out.data, tensor.data[0..out.data.len]);
+        if (isContiguous(tensor.shape, tensor.strides)) {
+            @memcpy(out.data, tensor.data[0..out.data.len]);
+        } else {
+            const n = totalElements(target);
+            const ndim = tensor.shape.ndim();
+            for (0..n) |flat| {
+                var offset: usize = 0;
+                var remaining: usize = flat;
+                var axis: usize = 0;
+                while (axis + 1 < ndim) : (axis += 1) {
+                    var block: usize = 1;
+                    var a2: usize = axis + 1;
+                    while (a2 < ndim) : (a2 += 1) block *= tensor.shape.dims[a2];
+                    const idx = remaining / block;
+                    remaining %= block;
+                    offset += idx * tensor.strides.values[axis];
+                }
+                offset += remaining * tensor.strides.values[axis];
+                out.data[flat] = tensor.data[offset];
+            }
+        }
         return out;
     }
 
@@ -1142,4 +1177,94 @@ test "broadcastTo — same shape returns owned copy" {
     try std.testing.expect(result.owned);
     try std.testing.expect(result.data.ptr != t.data.ptr);
     try std.testing.expectEqual(@as(f32, 0.0), result.data[0]);
+}
+
+test "broadcastTo — non-contiguous (transposed) view same shape" {
+    const allocator = std.testing.allocator;
+    // Build a 2x3 tensor, transpose it, then broadcastTo with the same
+    // shape (3,2). This tests the fix for @memcpy-on-non-contiguous:
+    // before the fix, @memcpy copied raw bytes ignoring strides,
+    // silently producing the original (non-transposed) data.
+    var t = try Tensor.init(allocator, Shape.init2D(2, 3));
+    defer t.deinit(allocator);
+    // t = [[1, 2, 3], [4, 5, 6]]
+    t.data[0] = 1.0;
+    t.data[1] = 2.0;
+    t.data[2] = 3.0;
+    t.data[3] = 4.0;
+    t.data[4] = 5.0;
+    t.data[5] = 6.0;
+
+    // transpose2d returns a non-contiguous VIEW: shape (3,2), strides [1,3]
+    // Logically: [[1,4], [2,5], [3,6]]
+    const t_view = try t.transpose2d();
+    try std.testing.expect(!t_view.isContiguous());
+
+    var result = try broadcastTo(allocator, t_view, Shape.init2D(3, 2));
+    defer result.deinit(allocator);
+
+    // result must reflect the transposed (logical) ordering, not the
+    // raw memory layout of the original tensor.
+    try std.testing.expectEqual(@as(f32, 1.0), result.data[0]);
+    try std.testing.expectEqual(@as(f32, 4.0), result.data[1]);
+    try std.testing.expectEqual(@as(f32, 2.0), result.data[2]);
+    try std.testing.expectEqual(@as(f32, 5.0), result.data[3]);
+    try std.testing.expectEqual(@as(f32, 3.0), result.data[4]);
+    try std.testing.expectEqual(@as(f32, 6.0), result.data[5]);
+}
+
+test "backward transpose2d — correct gradient through non-contiguous view" {
+    const allocator = std.testing.allocator;
+    // Simulate the exact scenario that was broken: a Linear layer's
+    // weight (D_out, D_in) is transposed to (D_in, D_out) for matmul,
+    // and the backward must produce a gradient of shape (D_out, D_in).
+    // Before the fix, backwardTranspose2d called sumToShape on a
+    // transposed view, which used @memcpy ignoring strides, producing
+    // a silently transposed gradient.
+    var w = try Tensor.init(allocator, Shape.init2D(3, 2));
+    defer w.deinit(allocator);
+    // w = [[1, 2], [3, 4], [5, 6]]  shape (3, 2)
+    w.data[0] = 1.0;
+    w.data[1] = 2.0;
+    w.data[2] = 3.0;
+    w.data[3] = 4.0;
+    w.data[4] = 5.0;
+    w.data[5] = 6.0;
+
+    // Upstream gradient for w^T has shape (2, 3)
+    var grad_wt = try Tensor.init(allocator, Shape.init2D(2, 3));
+    defer grad_wt.deinit(allocator);
+    // grad_wt = [[10, 20, 30], [40, 50, 60]]
+    grad_wt.data[0] = 10.0;
+    grad_wt.data[1] = 20.0;
+    grad_wt.data[2] = 30.0;
+    grad_wt.data[3] = 40.0;
+    grad_wt.data[4] = 50.0;
+    grad_wt.data[5] = 60.0;
+
+    const node = Node{
+        .id = 0,
+        .op = .transpose2d,
+        .parents = .{ null, null },
+        .n_parents = 1,
+        .saved = .{ .tensor_ref = w },
+    };
+
+    const result = try backward(allocator, node, &grad_wt);
+    const da = result[0] orelse unreachable;
+    defer {
+        da.deinit(allocator);
+        allocator.destroy(da);
+    }
+
+    // da should have shape (3, 2) = w's shape
+    // da = transpose(grad_wt) = [[10, 40], [20, 50], [30, 60]]
+    try std.testing.expectEqual(@as(usize, 3), da.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 2), da.shape.dims[1]);
+    try std.testing.expectEqual(@as(f32, 10.0), da.data[0]);
+    try std.testing.expectEqual(@as(f32, 40.0), da.data[1]);
+    try std.testing.expectEqual(@as(f32, 20.0), da.data[2]);
+    try std.testing.expectEqual(@as(f32, 50.0), da.data[3]);
+    try std.testing.expectEqual(@as(f32, 30.0), da.data[4]);
+    try std.testing.expectEqual(@as(f32, 60.0), da.data[5]);
 }

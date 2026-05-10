@@ -345,3 +345,1734 @@ test "gradCheck — matmul gradient" {
 
     try std.testing.expect(result.passed);
 }
+
+test "gradCheck — Linear layer weight gradient (transpose2d path)" {
+    const allocator = std.testing.allocator;
+    const Linear = @import("../nn/linear.zig").Linear;
+    const Rng = @import("../core/rng.zig").Rng;
+    const ops_reduce = @import("../tensor/ops/reduce.zig");
+
+    var rng = Rng.init(42);
+    var layer = try Linear.init(allocator, 4, 3, false, &rng);
+    defer layer.deinit();
+
+    // Scale down weights for numerical stability
+    for (layer.weight.data) |*v| v.* *= 0.1;
+
+    var x = try @import("../tensor/ops/create.zig").randn(allocator, Shape.init2D(2, 4), &rng, 0.0, 0.1);
+    defer x.deinit(allocator);
+
+    // Analytical forward + backward
+    var tape = Tape.init(allocator);
+    defer tape.deinit();
+
+    layer.weight.requires_grad = true;
+    _ = try tape.trackLeaf(&layer.weight);
+
+    var out = try layer.forward(x, &tape);
+    try tape.keepAlive(&out);
+    defer out.deinit(allocator);
+
+    var loss = try ops_reduce.sumAll(allocator, out, &tape);
+    defer loss.deinit(allocator);
+
+    try tape.backward(&loss);
+
+    const grad = layer.weight.grad orelse unreachable;
+
+    // Manual numerical gradient check
+    const h: f32 = 1e-4;
+    var max_rel_err: f32 = 0;
+    const n = layer.weight.data.len;
+
+    for (0..n) |idx| {
+        const original = layer.weight.data[idx];
+
+        // Forward with +h
+        layer.weight.data[idx] = original + h;
+        var logits_p = try layer.forward(x, null);
+        defer logits_p.deinit(allocator);
+        var loss_p = try ops_reduce.sumAll(allocator, logits_p, null);
+        defer loss_p.deinit(allocator);
+        const lp = loss_p.data[0];
+
+        // Forward with -h
+        layer.weight.data[idx] = original - h;
+        var logits_m = try layer.forward(x, null);
+        defer logits_m.deinit(allocator);
+        var loss_m = try ops_reduce.sumAll(allocator, logits_m, null);
+        defer loss_m.deinit(allocator);
+        const lm = loss_m.data[0];
+
+        // Restore
+        layer.weight.data[idx] = original;
+
+        const numerical = (lp - lm) / (2.0 * h);
+        const analytical = grad.data[idx];
+        const abs_diff = @abs(analytical - numerical);
+        const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
+        const rel_err = abs_diff / denom;
+
+        if (rel_err > max_rel_err) max_rel_err = rel_err;
+    }
+
+    try std.testing.expect(max_rel_err < 0.01);
+}
+
+test "gradCheck — Linear layer 3D input (reshape path)" {
+    const allocator = std.testing.allocator;
+    const Linear = @import("../nn/linear.zig").Linear;
+    const Rng = @import("../core/rng.zig").Rng;
+    const ops_reduce = @import("../tensor/ops/reduce.zig");
+
+    var rng = Rng.init(42);
+    var layer = try Linear.init(allocator, 4, 3, false, &rng);
+    defer layer.deinit();
+
+    for (layer.weight.data) |*v| v.* *= 0.1;
+
+    // 3D input — tests the reshape→matmul→reshape path
+    var x = try @import("../tensor/ops/create.zig").randn(allocator, Shape.init3D(2, 3, 4), &rng, 0.0, 0.1);
+    defer x.deinit(allocator);
+
+    var tape = Tape.init(allocator);
+    defer tape.deinit();
+
+    layer.weight.requires_grad = true;
+    _ = try tape.trackLeaf(&layer.weight);
+
+    var out = try layer.forward(x, &tape);
+    try tape.keepAlive(&out);
+    defer out.deinit(allocator);
+
+    var loss = try ops_reduce.sumAll(allocator, out, &tape);
+    defer loss.deinit(allocator);
+
+    try tape.backward(&loss);
+
+    const grad = layer.weight.grad orelse unreachable;
+
+    const h: f32 = 1e-4;
+    var max_rel_err: f32 = 0;
+    const n = layer.weight.data.len;
+
+    for (0..n) |idx| {
+        const original = layer.weight.data[idx];
+
+        layer.weight.data[idx] = original + h;
+        var out_p = try layer.forward(x, null);
+        defer out_p.deinit(allocator);
+        var loss_p = try ops_reduce.sumAll(allocator, out_p, null);
+        defer loss_p.deinit(allocator);
+
+        layer.weight.data[idx] = original - h;
+        var out_m = try layer.forward(x, null);
+        defer out_m.deinit(allocator);
+        var loss_m = try ops_reduce.sumAll(allocator, out_m, null);
+        defer loss_m.deinit(allocator);
+
+        layer.weight.data[idx] = original;
+
+        const numerical = (loss_p.data[0] - loss_m.data[0]) / (2.0 * h);
+        const analytical = grad.data[idx];
+        const abs_diff = @abs(analytical - numerical);
+        const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
+        const rel_err = abs_diff / denom;
+
+        if (rel_err > max_rel_err) max_rel_err = rel_err;
+    }
+
+    try std.testing.expect(max_rel_err < 0.01);
+}
+
+test "gradCheck — Linear in residual path (add + identity)" {
+    const allocator = std.testing.allocator;
+    const Linear = @import("../nn/linear.zig").Linear;
+    const Rng = @import("../core/rng.zig").Rng;
+    const ops_reduce = @import("../tensor/ops/reduce.zig");
+    const ops_elementwise = @import("../tensor/ops/elementwise.zig");
+
+    var rng = Rng.init(42);
+    // Simulates: output = x + Linear(x)  (residual connection)
+    var layer = try Linear.init(allocator, 4, 4, false, &rng);
+    defer layer.deinit();
+
+    for (layer.weight.data) |*v| v.* *= 0.1;
+
+    var x = try @import("../tensor/ops/create.zig").randn(allocator, Shape.init3D(2, 3, 4), &rng, 0.0, 0.1);
+    defer x.deinit(allocator);
+
+    var tape = Tape.init(allocator);
+    defer tape.deinit();
+
+    x.requires_grad = true;
+    _ = try tape.trackLeaf(&x);
+    layer.weight.requires_grad = true;
+    _ = try tape.trackLeaf(&layer.weight);
+
+    // residual: out = x + Linear(x)
+    var lin_out = try layer.forward(x, &tape);
+    try tape.keepAlive(&lin_out);
+    defer lin_out.deinit(allocator);
+
+    var output = try ops_elementwise.add(allocator, x, lin_out, &tape);
+    try tape.keepAlive(&output);
+    defer output.deinit(allocator);
+
+    var loss = try ops_reduce.sumAll(allocator, output, &tape);
+    defer loss.deinit(allocator);
+
+    try tape.backward(&loss);
+
+    const grad = layer.weight.grad orelse unreachable;
+
+    // Numerical check: perturb weight, recompute x + Linear(x) with tape=null
+    const h: f32 = 1e-4;
+    var max_rel_err: f32 = 0;
+    const n = layer.weight.data.len;
+
+    for (0..n) |idx| {
+        const original = layer.weight.data[idx];
+
+        layer.weight.data[idx] = original + h;
+        var lo_p = try layer.forward(x, null);
+        defer lo_p.deinit(allocator);
+        var op_p = try ops_elementwise.add(allocator, x, lo_p, null);
+        defer op_p.deinit(allocator);
+        var lp = try ops_reduce.sumAll(allocator, op_p, null);
+        defer lp.deinit(allocator);
+
+        layer.weight.data[idx] = original - h;
+        var lo_m = try layer.forward(x, null);
+        defer lo_m.deinit(allocator);
+        var op_m = try ops_elementwise.add(allocator, x, lo_m, null);
+        defer op_m.deinit(allocator);
+        var lm = try ops_reduce.sumAll(allocator, op_m, null);
+        defer lm.deinit(allocator);
+
+        layer.weight.data[idx] = original;
+
+        const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
+        const analytical = grad.data[idx];
+        const abs_diff = @abs(analytical - numerical);
+        const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
+        const rel_err = abs_diff / denom;
+
+        if (rel_err > max_rel_err) max_rel_err = rel_err;
+    }
+
+    try std.testing.expect(max_rel_err < 0.01);
+}
+
+test "gradCheck — Linear bias gradient (3D input)" {
+    const allocator = std.testing.allocator;
+    const Linear = @import("../nn/linear.zig").Linear;
+    const Rng = @import("../core/rng.zig").Rng;
+    const ops_reduce = @import("../tensor/ops/reduce.zig");
+
+    var rng = Rng.init(42);
+    var layer = try Linear.init(allocator, 4, 3, true, &rng);
+    defer layer.deinit();
+
+    for (layer.weight.data) |*v| v.* *= 0.1;
+
+    var x = try @import("../tensor/ops/create.zig").randn(allocator, Shape.init3D(2, 3, 4), &rng, 0.0, 0.1);
+    defer x.deinit(allocator);
+
+    var tape = Tape.init(allocator);
+    defer tape.deinit();
+
+    layer.bias.?.requires_grad = true;
+    _ = try tape.trackLeaf(&layer.bias.?);
+
+    var out = try layer.forward(x, &tape);
+    try tape.keepAlive(&out);
+    defer out.deinit(allocator);
+
+    var loss = try ops_reduce.sumAll(allocator, out, &tape);
+    defer loss.deinit(allocator);
+
+    try tape.backward(&loss);
+
+    const grad = layer.bias.?.grad orelse unreachable;
+
+    const h: f32 = 1e-4;
+    var max_rel_err: f32 = 0;
+    const n = layer.bias.?.data.len;
+
+    for (0..n) |idx| {
+        const original = layer.bias.?.data[idx];
+
+        layer.bias.?.data[idx] = original + h;
+        var out_p = try layer.forward(x, null);
+        defer out_p.deinit(allocator);
+        var loss_p = try ops_reduce.sumAll(allocator, out_p, null);
+        defer loss_p.deinit(allocator);
+
+        layer.bias.?.data[idx] = original - h;
+        var out_m = try layer.forward(x, null);
+        defer out_m.deinit(allocator);
+        var loss_m = try ops_reduce.sumAll(allocator, out_m, null);
+        defer loss_m.deinit(allocator);
+
+        layer.bias.?.data[idx] = original;
+
+        const numerical = (loss_p.data[0] - loss_m.data[0]) / (2.0 * h);
+        const analytical = grad.data[idx];
+        const abs_diff = @abs(analytical - numerical);
+        const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
+        const rel_err = abs_diff / denom;
+
+        if (rel_err > max_rel_err) max_rel_err = rel_err;
+    }
+
+    std.debug.print("  Linear bias (3D input) max_rel_err={d:.6}\n", .{max_rel_err});
+    try std.testing.expect(max_rel_err < 0.01);
+}
+
+test "gradCheck — full TinyWordTransformer model (sumAll loss)" {
+    const allocator = std.testing.allocator;
+    const TransformerConfig = @import("../nn/module.zig").TransformerConfig;
+    const TinyWordTransformer = @import("../nn/model.zig").TinyWordTransformer;
+    const NamedParam = @import("../nn/model.zig").NamedParam;
+    const Rng = @import("../core/rng.zig").Rng;
+    const ops_reduce = @import("../tensor/ops/reduce.zig");
+
+    var rng = Rng.init(42);
+    const cfg = TransformerConfig{
+        .vocab_size = 8,
+        .d_model = 4,
+        .max_seq_len = 3,
+        .d_ff = 8,
+        .ln_eps = 1e-5,
+        .bias = false,
+    };
+
+    var model = try TinyWordTransformer.init(allocator, cfg, &rng);
+    defer model.deinit();
+
+    // Scale down weights for numerical stability
+    var named: std.ArrayList(NamedParam) = .empty;
+    defer named.deinit(allocator);
+    try model.collectNamedParams(&named);
+    for (named.items) |entry| {
+        for (entry.tensor.data) |*v| v.* *= 0.1;
+    }
+
+    // Use -1 mask for grad check (not -1e9 or -10).
+    // With -10, softmax is extremely peaked (exp(-10) ≈ 4.5e-5),
+    // making numerical gradients unreliable. With -1, softmax is
+    // smooth enough for accurate finite differences while still
+    // enforcing the causal pattern (exp(-1) ≈ 0.368).
+    for (model.block.attn.causal_mask.data) |*v| {
+        if (v.* < 0.0) v.* = -1.0;
+    }
+
+    // Small fixed input
+    var ids = try Tensor.init(allocator, Shape.init2D(2, 3));
+    defer ids.deinit(allocator);
+    for (0..6) |i| ids.data[i] = @floatFromInt(i % 8);
+
+    // Track all parameters
+    var params: std.ArrayList(*Tensor) = .empty;
+    defer params.deinit(allocator);
+    try params.ensureTotalCapacity(allocator, 32);
+    model.parameters(&params);
+
+    // Forward + backward
+    var tape = Tape.init(allocator);
+    defer tape.deinit();
+
+    for (params.items) |param| {
+        param.requires_grad = true;
+        _ = try tape.trackLeaf(param);
+    }
+
+    var logits = try model.forward(ids, &tape);
+    try tape.keepAlive(&logits);
+    defer logits.deinit(allocator);
+
+    var loss = try ops_reduce.sumAll(allocator, logits, &tape);
+    defer loss.deinit(allocator);
+
+    try tape.backward(&loss);
+
+    // Per-parameter numerical gradient check
+    var overall_max_rel_err: f32 = 0;
+    var overall_max_abs_diff: f32 = 0;
+    for (named.items) |entry| {
+        const grad = entry.tensor.grad orelse continue;
+        const n = entry.tensor.data.len;
+        const n_check = @min(n, 5);
+        var max_rel_err: f32 = 0;
+        var max_abs_diff: f32 = 0;
+        var check_rng = std.Random.Xoshiro256.init(77);
+
+        for (0..n_check) |_| {
+            const idx = check_rng.next() % n;
+            const original = entry.tensor.data[idx];
+            const h: f32 = 1e-4;
+
+            entry.tensor.data[idx] = original + h;
+            var lp_logits = try model.forward(ids, null);
+            defer lp_logits.deinit(allocator);
+            var lp_loss = try ops_reduce.sumAll(allocator, lp_logits, null);
+            defer lp_loss.deinit(allocator);
+
+            entry.tensor.data[idx] = original - h;
+            var lm_logits = try model.forward(ids, null);
+            defer lm_logits.deinit(allocator);
+            var lm_loss = try ops_reduce.sumAll(allocator, lm_logits, null);
+            defer lm_loss.deinit(allocator);
+
+            entry.tensor.data[idx] = original;
+
+            const numerical = (lp_loss.data[0] - lm_loss.data[0]) / (2.0 * h);
+            const analytical = grad.data[idx];
+            const abs_diff = @abs(analytical - numerical);
+            const denom = @max(@abs(analytical), @abs(numerical), 1e-2);
+            const rel_err = abs_diff / denom;
+
+            if (rel_err > max_rel_err) max_rel_err = rel_err;
+            max_abs_diff = @max(max_abs_diff, abs_diff);
+        }
+
+        const status = if (max_rel_err < 0.01) "PASS" else if (max_rel_err < 0.05) "WARN" else "FAIL";
+        std.debug.print("  {s:<30}  max_rel_err={d:.6} max_abs_diff={d:.6}  {s}\n", .{ entry.name, max_rel_err, max_abs_diff, status });
+        overall_max_rel_err = @max(overall_max_rel_err, max_rel_err);
+        overall_max_abs_diff = @max(overall_max_abs_diff, max_abs_diff);
+    }
+    // Combined check: pass if either relative error is small OR absolute
+    // error is tiny. High relative error with tiny absolute error occurs
+    // when both analytical and numerical gradients are near zero — this
+    // is finite-difference noise, not a backward bug.
+    try std.testing.expect(overall_max_rel_err < 0.05 or overall_max_abs_diff < 5e-3);
+}
+
+test "gradCheck — TransformerBlock (residual connections)" {
+    const allocator = std.testing.allocator;
+    const TransformerConfig = @import("../nn/module.zig").TransformerConfig;
+    const TransformerBlock = @import("../nn/block.zig").TransformerBlock;
+    const Rng = @import("../core/rng.zig").Rng;
+    const ops_reduce = @import("../tensor/ops/reduce.zig");
+    const ops_create = @import("../tensor/ops/create.zig");
+
+    var rng = Rng.init(42);
+    const cfg = TransformerConfig{
+        .vocab_size = 8,
+        .d_model = 4,
+        .max_seq_len = 3,
+        .d_ff = 8,
+        .ln_eps = 1e-5,
+        .bias = false,
+    };
+
+    var block = try TransformerBlock.init(allocator, cfg, &rng);
+    defer block.deinit();
+
+    // Use -1 mask for grad check (not -1e9 or -10)
+    for (block.attn.causal_mask.data) |*v| {
+        if (v.* < 0.0) v.* = -1.0;
+    }
+
+    var x = try ops_create.randn(allocator, Shape.init3D(2, 3, 4), &rng, 0.0, 0.1);
+    defer x.deinit(allocator);
+
+    var params: std.ArrayList(*Tensor) = .empty;
+    defer params.deinit(allocator);
+    try params.ensureTotalCapacity(allocator, 32);
+    block.parameters(&params);
+
+    var tape = Tape.init(allocator);
+    defer tape.deinit();
+
+    for (params.items) |param| {
+        param.requires_grad = true;
+        _ = try tape.trackLeaf(param);
+    }
+
+    var out = try block.forward(x, &tape);
+    try tape.keepAlive(&out);
+    defer out.deinit(allocator);
+
+    var loss = try ops_reduce.sumAll(allocator, out, &tape);
+    defer loss.deinit(allocator);
+
+    try tape.backward(&loss);
+
+    const h: f32 = 1e-4;
+    var max_overall: f32 = 0;
+    var max_overall_abs: f32 = 0;
+    var worst_name: []const u8 = "";
+
+    for (params.items) |param| {
+        const grad = param.grad orelse continue;
+        const n = param.data.len;
+        const n_check = @min(n, 5);
+        var max_rel_err: f32 = 0;
+        var max_abs_diff: f32 = 0;
+        var check_rng = std.Random.Xoshiro256.init(77);
+
+        for (0..n_check) |_| {
+            const idx = check_rng.next() % n;
+            const original = param.data[idx];
+
+            param.data[idx] = original + h;
+            var op = try block.forward(x, null);
+            defer op.deinit(allocator);
+            var lp = try ops_reduce.sumAll(allocator, op, null);
+            defer lp.deinit(allocator);
+
+            param.data[idx] = original - h;
+            var om = try block.forward(x, null);
+            defer om.deinit(allocator);
+            var lm = try ops_reduce.sumAll(allocator, om, null);
+            defer lm.deinit(allocator);
+
+            param.data[idx] = original;
+
+            const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
+            const analytical = grad.data[idx];
+            const abs_diff = @abs(analytical - numerical);
+            const denom = @max(@abs(analytical), @abs(numerical), 1e-2);
+            const rel_err = abs_diff / denom;
+
+            if (rel_err > max_rel_err) max_rel_err = rel_err;
+            max_abs_diff = @max(max_abs_diff, abs_diff);
+        }
+
+        if (max_rel_err > max_overall) {
+            max_overall = max_rel_err;
+            worst_name = "param";
+        }
+        max_overall_abs = @max(max_overall_abs, max_abs_diff);
+
+        const status = if (max_rel_err < 0.01) "PASS" else if (max_rel_err < 0.05) "WARN" else "FAIL";
+        std.debug.print("  block param  max_rel_err={d:.6} max_abs_diff={d:.6}  {s}\n", .{ max_rel_err, max_abs_diff, status });
+    }
+
+    std.debug.print("  WORST: max_rel_err={d:.6} max_abs_diff={d:.6}\n", .{ max_overall, max_overall_abs });
+    try std.testing.expect(max_overall < 0.05 or max_overall_abs < 1e-2);
+}
+
+test "gradCheck — LayerNorm alone (3D input)" {
+    const allocator = std.testing.allocator;
+    const LayerNorm = @import("../nn/layernorm.zig").LayerNorm;
+    const Rng = @import("../core/rng.zig").Rng;
+    const ops_reduce = @import("../tensor/ops/reduce.zig");
+    const ops_create = @import("../tensor/ops/create.zig");
+
+    var rng = Rng.init(42);
+    var ln = try LayerNorm.init(allocator, 4, 1e-5, &rng);
+    defer ln.deinit();
+
+    var x = try ops_create.randn(allocator, Shape.init3D(2, 3, 4), &rng, 0.0, 1.0);
+    defer x.deinit(allocator);
+
+    var tape = Tape.init(allocator);
+    defer tape.deinit();
+
+    ln.gamma.requires_grad = true;
+    _ = try tape.trackLeaf(&ln.gamma);
+    ln.beta.requires_grad = true;
+    _ = try tape.trackLeaf(&ln.beta);
+
+    var out = try ln.forward(x, &tape);
+    try tape.keepAlive(&out);
+    defer out.deinit(allocator);
+
+    var loss = try ops_reduce.sumAll(allocator, out, &tape);
+    defer loss.deinit(allocator);
+
+    try tape.backward(&loss);
+
+    const h: f32 = 1e-4;
+
+    // Check gamma
+    {
+        const grad = ln.gamma.grad.?;
+        const n = ln.gamma.data.len;
+        var max_rel_err: f32 = 0;
+        for (0..n) |idx| {
+            const original = ln.gamma.data[idx];
+            ln.gamma.data[idx] = original + h;
+            var op = try ln.forward(x, null);
+            defer op.deinit(allocator);
+            var lp = try ops_reduce.sumAll(allocator, op, null);
+            defer lp.deinit(allocator);
+            ln.gamma.data[idx] = original - h;
+            var om = try ln.forward(x, null);
+            defer om.deinit(allocator);
+            var lm = try ops_reduce.sumAll(allocator, om, null);
+            defer lm.deinit(allocator);
+            ln.gamma.data[idx] = original;
+            const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
+            const analytical = grad.data[idx];
+            const abs_diff = @abs(analytical - numerical);
+            const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
+            const rel_err = abs_diff / denom;
+            if (rel_err > max_rel_err) max_rel_err = rel_err;
+        }
+        std.debug.print("  LN gamma max_rel_err={d:.6}\n", .{max_rel_err});
+        try std.testing.expect(max_rel_err < 0.01);
+    }
+
+    // Check beta
+    {
+        const grad = ln.beta.grad.?;
+        const n = ln.beta.data.len;
+        var max_rel_err: f32 = 0;
+        for (0..n) |idx| {
+            const original = ln.beta.data[idx];
+            ln.beta.data[idx] = original + h;
+            var op = try ln.forward(x, null);
+            defer op.deinit(allocator);
+            var lp = try ops_reduce.sumAll(allocator, op, null);
+            defer lp.deinit(allocator);
+            ln.beta.data[idx] = original - h;
+            var om = try ln.forward(x, null);
+            defer om.deinit(allocator);
+            var lm = try ops_reduce.sumAll(allocator, om, null);
+            defer lm.deinit(allocator);
+            ln.beta.data[idx] = original;
+            const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
+            const analytical = grad.data[idx];
+            const abs_diff = @abs(analytical - numerical);
+            const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
+            const rel_err = abs_diff / denom;
+            if (rel_err > max_rel_err) max_rel_err = rel_err;
+        }
+        std.debug.print("  LN beta max_rel_err={d:.6}\n", .{max_rel_err});
+        try std.testing.expect(max_rel_err < 0.01);
+    }
+}
+
+test "gradCheck — matmulBatch backward (Q @ K^T pattern)" {
+    const allocator = std.testing.allocator;
+    const ops_matmul = @import("../tensor/ops/matmul.zig");
+    const ops_shape = @import("../tensor/ops/shape_ops.zig");
+    const ops_reduce = @import("../tensor/ops/reduce.zig");
+    const ops_create = @import("../tensor/ops/create.zig");
+    const Rng = @import("../core/rng.zig").Rng;
+
+    var rng = Rng.init(42);
+
+    // Simulate the Q @ K^T pattern:
+    // Q: (B=2, T=3, D=4), K: (B=2, T=3, D=4)
+    // K^T = transposeInner2dTracked(K) → (2, 4, 3)
+    // scores = matmulBatch(Q, K^T) → (2, 3, 3)
+    var Q = try ops_create.randn(allocator, Shape.init3D(2, 3, 4), &rng, 0.0, 0.1);
+    defer Q.deinit(allocator);
+    var K = try ops_create.randn(allocator, Shape.init3D(2, 3, 4), &rng, 0.0, 0.1);
+    defer K.deinit(allocator);
+
+    Q.requires_grad = true;
+    K.requires_grad = true;
+
+    var tape = Tape.init(allocator);
+    defer tape.deinit();
+
+    _ = try tape.trackLeaf(&Q);
+    _ = try tape.trackLeaf(&K);
+
+    // Replicate attention forward pattern
+    var k_t = try ops_shape.transposeInner2dTracked(allocator, K, &tape);
+    try tape.keepAlive(&k_t);
+    defer k_t.deinit(allocator);
+
+    var scores = try ops_matmul.matmulBatch(allocator, Q, k_t, &tape);
+    try tape.keepAlive(&scores);
+    defer scores.deinit(allocator);
+
+    var loss = try ops_reduce.sumAll(allocator, scores, &tape);
+    defer loss.deinit(allocator);
+
+    try tape.backward(&loss);
+
+    // Check Q gradient
+    {
+        const grad = Q.grad.?;
+        const h: f32 = 1e-4;
+        var max_rel_err: f32 = 0;
+        const n = Q.data.len;
+        const n_check = @min(n, 10);
+        var check_rng = std.Random.Xoshiro256.init(77);
+
+        for (0..n_check) |_| {
+            const idx = check_rng.next() % n;
+            const original = Q.data[idx];
+
+            Q.data[idx] = original + h;
+            var kt_p = try ops_shape.transposeInner2dTracked(allocator, K, null);
+            defer kt_p.deinit(allocator);
+            var sc_p = try ops_matmul.matmulBatch(allocator, Q, kt_p, null);
+            defer sc_p.deinit(allocator);
+            var lp = try ops_reduce.sumAll(allocator, sc_p, null);
+            defer lp.deinit(allocator);
+
+            Q.data[idx] = original - h;
+            var kt_m = try ops_shape.transposeInner2dTracked(allocator, K, null);
+            defer kt_m.deinit(allocator);
+            var sc_m = try ops_matmul.matmulBatch(allocator, Q, kt_m, null);
+            defer sc_m.deinit(allocator);
+            var lm = try ops_reduce.sumAll(allocator, sc_m, null);
+            defer lm.deinit(allocator);
+
+            Q.data[idx] = original;
+
+            const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
+            const analytical = grad.data[idx];
+            const abs_diff = @abs(analytical - numerical);
+            const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
+            const rel_err = abs_diff / denom;
+            if (rel_err > max_rel_err) max_rel_err = rel_err;
+        }
+        std.debug.print("  matmulBatch Q grad max_rel_err={d:.6}\n", .{max_rel_err});
+        try std.testing.expect(max_rel_err < 0.01);
+    }
+
+    // Check K gradient (flows through transposeInner2dTracked backward)
+    {
+        const grad = K.grad.?;
+        const h: f32 = 1e-4;
+        var max_rel_err: f32 = 0;
+        const n = K.data.len;
+        const n_check = @min(n, 10);
+        var check_rng = std.Random.Xoshiro256.init(88);
+
+        for (0..n_check) |_| {
+            const idx = check_rng.next() % n;
+            const original = K.data[idx];
+
+            K.data[idx] = original + h;
+            var kt_p = try ops_shape.transposeInner2dTracked(allocator, K, null);
+            defer kt_p.deinit(allocator);
+            var sc_p = try ops_matmul.matmulBatch(allocator, Q, kt_p, null);
+            defer sc_p.deinit(allocator);
+            var lp = try ops_reduce.sumAll(allocator, sc_p, null);
+            defer lp.deinit(allocator);
+
+            K.data[idx] = original - h;
+            var kt_m = try ops_shape.transposeInner2dTracked(allocator, K, null);
+            defer kt_m.deinit(allocator);
+            var sc_m = try ops_matmul.matmulBatch(allocator, Q, kt_m, null);
+            defer sc_m.deinit(allocator);
+            var lm = try ops_reduce.sumAll(allocator, sc_m, null);
+            defer lm.deinit(allocator);
+
+            K.data[idx] = original;
+
+            const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
+            const analytical = grad.data[idx];
+            const abs_diff = @abs(analytical - numerical);
+            const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
+            const rel_err = abs_diff / denom;
+            if (rel_err > max_rel_err) max_rel_err = rel_err;
+        }
+        std.debug.print("  matmulBatch K grad max_rel_err={d:.6}\n", .{max_rel_err});
+        try std.testing.expect(max_rel_err < 0.01);
+    }
+}
+
+test "gradCheck — attention Q@K^T path without softmax" {
+    const allocator = std.testing.allocator;
+    const Linear = @import("../nn/linear.zig").Linear;
+    const Rng = @import("../core/rng.zig").Rng;
+    const ops_matmul = @import("../tensor/ops/matmul.zig");
+    const ops_shape = @import("../tensor/ops/shape_ops.zig");
+    const ops_reduce = @import("../tensor/ops/reduce.zig");
+    const ops_create = @import("../tensor/ops/create.zig");
+
+    var rng = Rng.init(42);
+
+    // Simulates: Q = Linear(x), K = Linear(x), scores = Q @ K^T, loss = sumAll(scores)
+    var w_q = try Linear.init(allocator, 4, 4, false, &rng);
+    defer w_q.deinit();
+    var w_k = try Linear.init(allocator, 4, 4, false, &rng);
+    defer w_k.deinit();
+
+    for (w_q.weight.data) |*v| v.* *= 0.1;
+    for (w_k.weight.data) |*v| v.* *= 0.1;
+
+    var x = try ops_create.randn(allocator, Shape.init3D(2, 3, 4), &rng, 0.0, 0.1);
+    defer x.deinit(allocator);
+
+    var tape = Tape.init(allocator);
+    defer tape.deinit();
+
+    w_q.weight.requires_grad = true;
+    _ = try tape.trackLeaf(&w_q.weight);
+    w_k.weight.requires_grad = true;
+    _ = try tape.trackLeaf(&w_k.weight);
+
+    // Q = w_q.forward(x)
+    var q = try w_q.forward(x, &tape);
+    try tape.keepAlive(&q);
+    defer q.deinit(allocator);
+
+    // K = w_k.forward(x)
+    var k = try w_k.forward(x, &tape);
+    try tape.keepAlive(&k);
+    defer k.deinit(allocator);
+
+    // K^T = transposeInner2dTracked(K)
+    var k_t = try ops_shape.transposeInner2dTracked(allocator, k, &tape);
+    try tape.keepAlive(&k_t);
+    defer k_t.deinit(allocator);
+
+    // scores = matmulBatch(Q, K^T)
+    var scores = try ops_matmul.matmulBatch(allocator, q, k_t, &tape);
+    try tape.keepAlive(&scores);
+    defer scores.deinit(allocator);
+
+    // loss = sumAll(scores)
+    var loss = try ops_reduce.sumAll(allocator, scores, &tape);
+    defer loss.deinit(allocator);
+
+    try tape.backward(&loss);
+
+    // Check w_q.weight
+    {
+        const grad = w_q.weight.grad.?;
+        const h: f32 = 1e-4;
+        var max_rel_err: f32 = 0;
+        const n = w_q.weight.data.len;
+        for (0..n) |idx| {
+            const original = w_q.weight.data[idx];
+
+            w_q.weight.data[idx] = original + h;
+            var q_p = try w_q.forward(x, null);
+            defer q_p.deinit(allocator);
+            var s_p = try ops_matmul.matmulBatch(allocator, q_p, k_t, null);
+            defer s_p.deinit(allocator);
+            var lp = try ops_reduce.sumAll(allocator, s_p, null);
+            defer lp.deinit(allocator);
+
+            w_q.weight.data[idx] = original - h;
+            var q_m = try w_q.forward(x, null);
+            defer q_m.deinit(allocator);
+            var s_m = try ops_matmul.matmulBatch(allocator, q_m, k_t, null);
+            defer s_m.deinit(allocator);
+            var lm = try ops_reduce.sumAll(allocator, s_m, null);
+            defer lm.deinit(allocator);
+
+            w_q.weight.data[idx] = original;
+
+            const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
+            const analytical = grad.data[idx];
+            const abs_diff = @abs(analytical - numerical);
+            const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
+            const rel_err = abs_diff / denom;
+            if (rel_err > max_rel_err) max_rel_err = rel_err;
+        }
+        std.debug.print("  Q@K^T path: w_q.weight max_rel_err={d:.6}\n", .{max_rel_err});
+        try std.testing.expect(max_rel_err < 0.01);
+    }
+}
+
+test "gradCheck — add broadcast 3D + 3D(1,T,T) backward" {
+    const allocator = std.testing.allocator;
+    const ops_reduce = @import("../tensor/ops/reduce.zig");
+    const ops_create = @import("../tensor/ops/create.zig");
+    const ops_elementwise = @import("../tensor/ops/elementwise.zig");
+    const Rng = @import("../core/rng.zig").Rng;
+
+    var rng = Rng.init(42);
+
+    var a = try ops_create.randn(allocator, Shape.init3D(2, 3, 3), &rng, 0.0, 1.0);
+    defer a.deinit(allocator);
+
+    // Use -10 instead of -1e9 to avoid f32 precision loss in numerical grad.
+    // With -1e9 in sumAll, perturbations of 1e-4 are below f32's ULP at 1e9,
+    // making numerical gradients return 0 while analytical returns 1.
+    // Even with -10, sumAll precision is limited (~0.03 max_rel_err),
+    // so use a more relaxed tolerance for this specific test.
+    var b = try Tensor.init(allocator, Shape.init3D(1, 3, 3));
+    defer b.deinit(allocator);
+    for (0..3) |i| {
+        for (0..3) |j| {
+            b.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+        }
+    }
+
+    a.requires_grad = true;
+
+    var tape = Tape.init(allocator);
+    defer tape.deinit();
+
+    _ = try tape.trackLeaf(&a);
+
+    var c = try ops_elementwise.add(allocator, a, b, &tape);
+    try tape.keepAlive(&c);
+    defer c.deinit(allocator);
+
+    var loss = try ops_reduce.sumAll(allocator, c, &tape);
+    defer loss.deinit(allocator);
+
+    try tape.backward(&loss);
+
+    const grad = a.grad orelse unreachable;
+    const h: f32 = 1e-4;
+    const n = a.data.len;
+    var max_rel_err: f32 = 0;
+
+    for (0..n) |idx| {
+        const original = a.data[idx];
+
+        a.data[idx] = original + h;
+        var cp = try ops_elementwise.add(allocator, a, b, null);
+        defer cp.deinit(allocator);
+        var lp = try ops_reduce.sumAll(allocator, cp, null);
+        defer lp.deinit(allocator);
+
+        a.data[idx] = original - h;
+        var cm = try ops_elementwise.add(allocator, a, b, null);
+        defer cm.deinit(allocator);
+        var lm = try ops_reduce.sumAll(allocator, cm, null);
+        defer lm.deinit(allocator);
+
+        a.data[idx] = original;
+
+        const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
+        const analytical = grad.data[idx];
+        const abs_diff = @abs(analytical - numerical);
+        const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
+        const rel_err = abs_diff / denom;
+
+        if (rel_err > max_rel_err) max_rel_err = rel_err;
+    }
+
+    std.debug.print("  add broadcast 3D+(1,T,T): max_rel_err={d:.6}\n", .{max_rel_err});
+    try std.testing.expect(max_rel_err < 0.01);
+}
+
+test "gradCheck — attention pipeline step-by-step" {
+    const allocator = std.testing.allocator;
+    const Linear = @import("../nn/linear.zig").Linear;
+    const Rng = @import("../core/rng.zig").Rng;
+    const ops_matmul = @import("../tensor/ops/matmul.zig");
+    const ops_shape = @import("../tensor/ops/shape_ops.zig");
+    const ops_reduce = @import("../tensor/ops/reduce.zig");
+    const ops_elementwise = @import("../tensor/ops/elementwise.zig");
+    const ops_softmax = @import("../tensor/ops/softmax.zig");
+    const ops_create = @import("../tensor/ops/create.zig");
+
+    var rng = Rng.init(42);
+
+    var w_q = try Linear.init(allocator, 4, 4, true, &rng);
+    defer w_q.deinit();
+    var w_k = try Linear.init(allocator, 4, 4, true, &rng);
+    defer w_k.deinit();
+    var w_v = try Linear.init(allocator, 4, 4, true, &rng);
+    defer w_v.deinit();
+    var w_o = try Linear.init(allocator, 4, 4, true, &rng);
+    defer w_o.deinit();
+
+    for (w_q.weight.data) |*v| v.* *= 0.1;
+    for (w_k.weight.data) |*v| v.* *= 0.1;
+    for (w_v.weight.data) |*v| v.* *= 0.1;
+    for (w_o.weight.data) |*v| v.* *= 0.1;
+
+    var x = try ops_create.randn(allocator, Shape.init3D(2, 3, 4), &rng, 0.0, 0.1);
+    defer x.deinit(allocator);
+
+    const h: f32 = 1e-4;
+    const D: usize = 4;
+
+    inline for (.{
+        @as(enum { scores_only, scaled, masked, softmaxed, full_attn }, .scores_only),
+        @as(enum { scores_only, scaled, masked, softmaxed, full_attn }, .scaled),
+        @as(enum { scores_only, scaled, masked, softmaxed, full_attn }, .masked),
+        @as(enum { scores_only, scaled, masked, softmaxed, full_attn }, .softmaxed),
+        @as(enum { scores_only, scaled, masked, softmaxed, full_attn }, .full_attn),
+    }) |stage| {
+        var tape = Tape.init(allocator);
+        defer tape.deinit();
+
+        w_q.weight.requires_grad = true;
+        _ = try tape.trackLeaf(&w_q.weight);
+
+        var q = try w_q.forward(x, &tape);
+        try tape.keepAlive(&q);
+        defer q.deinit(allocator);
+
+        var k = try w_k.forward(x, &tape);
+        try tape.keepAlive(&k);
+        defer k.deinit(allocator);
+
+        var k_t = try ops_shape.transposeInner2dTracked(allocator, k, &tape);
+        try tape.keepAlive(&k_t);
+        defer k_t.deinit(allocator);
+
+        var scores = try ops_matmul.matmulBatch(allocator, q, k_t, &tape);
+        try tape.keepAlive(&scores);
+        defer scores.deinit(allocator);
+
+        var loss: Tensor = undefined;
+        const loss_owned = true;
+
+        switch (stage) {
+            .scores_only => {
+                loss = try ops_reduce.sumAll(allocator, scores, &tape);
+            },
+            .scaled => {
+                const scale: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
+                var scaled = try ops_elementwise.mulScalar(allocator, scores, scale, &tape);
+                try tape.keepAlive(&scaled);
+                defer scaled.deinit(allocator);
+                loss = try ops_reduce.sumAll(allocator, scaled, &tape);
+            },
+            .masked => {
+                const scale: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
+                var scaled = try ops_elementwise.mulScalar(allocator, scores, scale, &tape);
+                try tape.keepAlive(&scaled);
+                defer scaled.deinit(allocator);
+                var mask = try Tensor.init(allocator, Shape.init3D(1, 3, 3));
+                defer mask.deinit(allocator);
+                for (0..3) |i| {
+                    for (0..3) |j| {
+                        mask.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+                    }
+                }
+                var masked = try ops_elementwise.add(allocator, scaled, mask, &tape);
+                try tape.keepAlive(&masked);
+                defer masked.deinit(allocator);
+                loss = try ops_reduce.sumAll(allocator, masked, &tape);
+            },
+            .softmaxed => {
+                const scale: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
+                var scaled = try ops_elementwise.mulScalar(allocator, scores, scale, &tape);
+                try tape.keepAlive(&scaled);
+                defer scaled.deinit(allocator);
+                var mask = try Tensor.init(allocator, Shape.init3D(1, 3, 3));
+                defer mask.deinit(allocator);
+                for (0..3) |i| {
+                    for (0..3) |j| {
+                        mask.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+                    }
+                }
+                var masked = try ops_elementwise.add(allocator, scaled, mask, &tape);
+                try tape.keepAlive(&masked);
+                defer masked.deinit(allocator);
+                var weights = try ops_softmax.softmax(allocator, masked, &tape);
+                try tape.keepAlive(&weights);
+                defer weights.deinit(allocator);
+                loss = try ops_reduce.sumAll(allocator, weights, &tape);
+            },
+            .full_attn => {
+                const scale: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
+                var scaled = try ops_elementwise.mulScalar(allocator, scores, scale, &tape);
+                try tape.keepAlive(&scaled);
+                defer scaled.deinit(allocator);
+                var mask = try Tensor.init(allocator, Shape.init3D(1, 3, 3));
+                defer mask.deinit(allocator);
+                for (0..3) |i| {
+                    for (0..3) |j| {
+                        mask.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+                    }
+                }
+                var masked = try ops_elementwise.add(allocator, scaled, mask, &tape);
+                try tape.keepAlive(&masked);
+                defer masked.deinit(allocator);
+                var weights = try ops_softmax.softmax(allocator, masked, &tape);
+                try tape.keepAlive(&weights);
+                defer weights.deinit(allocator);
+                var v_tensor = try w_v.forward(x, &tape);
+                try tape.keepAlive(&v_tensor);
+                defer v_tensor.deinit(allocator);
+                var attn_out = try ops_matmul.matmulBatch(allocator, weights, v_tensor, &tape);
+                try tape.keepAlive(&attn_out);
+                defer attn_out.deinit(allocator);
+                var output = try w_o.forward(attn_out, &tape);
+                try tape.keepAlive(&output);
+                defer output.deinit(allocator);
+                loss = try ops_reduce.sumAll(allocator, output, &tape);
+            },
+        }
+        defer if (loss_owned) loss.deinit(allocator);
+
+        try tape.backward(&loss);
+
+        const grad = w_q.weight.grad orelse unreachable;
+        const n = w_q.weight.data.len;
+        var max_rel_err: f32 = 0;
+        var max_abs_diff: f32 = 0;
+        for (0..n) |idx| {
+            const original = w_q.weight.data[idx];
+
+            w_q.weight.data[idx] = original + h;
+            var q_p = try w_q.forward(x, null);
+            defer q_p.deinit(allocator);
+            var k_p = try w_k.forward(x, null);
+            defer k_p.deinit(allocator);
+            var kt_p = try ops_shape.transposeInner2dTracked(allocator, k_p, null);
+            defer kt_p.deinit(allocator);
+            var sc_p = try ops_matmul.matmulBatch(allocator, q_p, kt_p, null);
+            defer sc_p.deinit(allocator);
+
+            var lp: f32 = undefined;
+            switch (stage) {
+                .scores_only => {
+                    var l = try ops_reduce.sumAll(allocator, sc_p, null);
+                    defer l.deinit(allocator);
+                    lp = l.data[0];
+                },
+                .scaled => {
+                    const sc: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
+                    var s = try ops_elementwise.mulScalar(allocator, sc_p, sc, null);
+                    defer s.deinit(allocator);
+                    var l = try ops_reduce.sumAll(allocator, s, null);
+                    defer l.deinit(allocator);
+                    lp = l.data[0];
+                },
+                .masked => {
+                    const sc: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
+                    var s = try ops_elementwise.mulScalar(allocator, sc_p, sc, null);
+                    defer s.deinit(allocator);
+                    var mask = try Tensor.init(allocator, Shape.init3D(1, 3, 3));
+                    defer mask.deinit(allocator);
+                    for (0..3) |i| {
+                        for (0..3) |j| {
+                            mask.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+                        }
+                    }
+                    var m = try ops_elementwise.add(allocator, s, mask, null);
+                    defer m.deinit(allocator);
+                    var l = try ops_reduce.sumAll(allocator, m, null);
+                    defer l.deinit(allocator);
+                    lp = l.data[0];
+                },
+                .softmaxed => {
+                    const sc: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
+                    var s = try ops_elementwise.mulScalar(allocator, sc_p, sc, null);
+                    defer s.deinit(allocator);
+                    var mask = try Tensor.init(allocator, Shape.init3D(1, 3, 3));
+                    defer mask.deinit(allocator);
+                    for (0..3) |i| {
+                        for (0..3) |j| {
+                            mask.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+                        }
+                    }
+                    var m = try ops_elementwise.add(allocator, s, mask, null);
+                    defer m.deinit(allocator);
+                    var w = try ops_softmax.softmax(allocator, m, null);
+                    defer w.deinit(allocator);
+                    var l = try ops_reduce.sumAll(allocator, w, null);
+                    defer l.deinit(allocator);
+                    lp = l.data[0];
+                },
+                .full_attn => {
+                    const sc: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
+                    var s = try ops_elementwise.mulScalar(allocator, sc_p, sc, null);
+                    defer s.deinit(allocator);
+                    var mask = try Tensor.init(allocator, Shape.init3D(1, 3, 3));
+                    defer mask.deinit(allocator);
+                    for (0..3) |i| {
+                        for (0..3) |j| {
+                            mask.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+                        }
+                    }
+                    var m = try ops_elementwise.add(allocator, s, mask, null);
+                    defer m.deinit(allocator);
+                    var w = try ops_softmax.softmax(allocator, m, null);
+                    defer w.deinit(allocator);
+                    var v_p = try w_v.forward(x, null);
+                    defer v_p.deinit(allocator);
+                    var ao_p = try ops_matmul.matmulBatch(allocator, w, v_p, null);
+                    defer ao_p.deinit(allocator);
+                    var out_p = try w_o.forward(ao_p, null);
+                    defer out_p.deinit(allocator);
+                    var l = try ops_reduce.sumAll(allocator, out_p, null);
+                    defer l.deinit(allocator);
+                    lp = l.data[0];
+                },
+            }
+
+            w_q.weight.data[idx] = original - h;
+            var q_m = try w_q.forward(x, null);
+            defer q_m.deinit(allocator);
+            var k_m = try w_k.forward(x, null);
+            defer k_m.deinit(allocator);
+            var kt_m = try ops_shape.transposeInner2dTracked(allocator, k_m, null);
+            defer kt_m.deinit(allocator);
+            var sc_m = try ops_matmul.matmulBatch(allocator, q_m, kt_m, null);
+            defer sc_m.deinit(allocator);
+
+            var lm: f32 = undefined;
+            switch (stage) {
+                .scores_only => {
+                    var l = try ops_reduce.sumAll(allocator, sc_m, null);
+                    defer l.deinit(allocator);
+                    lm = l.data[0];
+                },
+                .scaled => {
+                    const sc: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
+                    var s = try ops_elementwise.mulScalar(allocator, sc_m, sc, null);
+                    defer s.deinit(allocator);
+                    var l = try ops_reduce.sumAll(allocator, s, null);
+                    defer l.deinit(allocator);
+                    lm = l.data[0];
+                },
+                .masked => {
+                    const sc: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
+                    var s = try ops_elementwise.mulScalar(allocator, sc_m, sc, null);
+                    defer s.deinit(allocator);
+                    var mask = try Tensor.init(allocator, Shape.init3D(1, 3, 3));
+                    defer mask.deinit(allocator);
+                    for (0..3) |i| {
+                        for (0..3) |j| {
+                            mask.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+                        }
+                    }
+                    var m = try ops_elementwise.add(allocator, s, mask, null);
+                    defer m.deinit(allocator);
+                    var l = try ops_reduce.sumAll(allocator, m, null);
+                    defer l.deinit(allocator);
+                    lm = l.data[0];
+                },
+                .softmaxed => {
+                    const sc: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
+                    var s = try ops_elementwise.mulScalar(allocator, sc_m, sc, null);
+                    defer s.deinit(allocator);
+                    var mask = try Tensor.init(allocator, Shape.init3D(1, 3, 3));
+                    defer mask.deinit(allocator);
+                    for (0..3) |i| {
+                        for (0..3) |j| {
+                            mask.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+                        }
+                    }
+                    var m = try ops_elementwise.add(allocator, s, mask, null);
+                    defer m.deinit(allocator);
+                    var w = try ops_softmax.softmax(allocator, m, null);
+                    defer w.deinit(allocator);
+                    var l = try ops_reduce.sumAll(allocator, w, null);
+                    defer l.deinit(allocator);
+                    lm = l.data[0];
+                },
+                .full_attn => {
+                    const sc: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
+                    var s = try ops_elementwise.mulScalar(allocator, sc_m, sc, null);
+                    defer s.deinit(allocator);
+                    var mask = try Tensor.init(allocator, Shape.init3D(1, 3, 3));
+                    defer mask.deinit(allocator);
+                    for (0..3) |i| {
+                        for (0..3) |j| {
+                            mask.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+                        }
+                    }
+                    var m = try ops_elementwise.add(allocator, s, mask, null);
+                    defer m.deinit(allocator);
+                    var w = try ops_softmax.softmax(allocator, m, null);
+                    defer w.deinit(allocator);
+                    var v_m = try w_v.forward(x, null);
+                    defer v_m.deinit(allocator);
+                    var ao_m = try ops_matmul.matmulBatch(allocator, w, v_m, null);
+                    defer ao_m.deinit(allocator);
+                    var out_m = try w_o.forward(ao_m, null);
+                    defer out_m.deinit(allocator);
+                    var l = try ops_reduce.sumAll(allocator, out_m, null);
+                    defer l.deinit(allocator);
+                    lm = l.data[0];
+                },
+            }
+
+            w_q.weight.data[idx] = original;
+
+            const numerical = (lp - lm) / (2.0 * h);
+            const analytical = grad.data[idx];
+            const abs_diff = @abs(analytical - numerical);
+            // denom_floor=1e-2: near-zero gradients (< 0.01) cause inflated
+            // relative error from finite-difference noise, especially in
+            // softmax-heavy paths. Pair with max_abs_diff check.
+            const denom = @max(@abs(analytical), @abs(numerical), 1e-2);
+            const rel_err = abs_diff / denom;
+            if (rel_err > max_rel_err) max_rel_err = rel_err;
+            max_abs_diff = @max(max_abs_diff, abs_diff);
+        }
+
+        const stage_name = switch (stage) {
+            .scores_only => "scores_only",
+            .scaled => "scaled",
+            .masked => "masked",
+            .softmaxed => "softmaxed",
+            .full_attn => "full_attn",
+        };
+        const status = if (max_rel_err < 0.01) "PASS" else if (max_rel_err < 0.05) "WARN" else "FAIL";
+        std.debug.print("  pipeline {s:<15} w_q.weight max_rel_err={d:.6} max_abs_diff={d:.6}  {s}\n", .{ stage_name, max_rel_err, max_abs_diff, status });
+        // softmaxed stage is a degenerate case: loss = sumAll(softmax(x))
+        // is constant, so both gradients are ~0 and relative error is
+        // meaningless. Skip assertion for that stage.
+        if (stage != .softmaxed) {
+            try std.testing.expect(max_rel_err < 0.05 or max_abs_diff < 5e-3);
+        }
+    }
+}
+
+test "gradCheck — CausalSelfAttention alone" {
+    const allocator = std.testing.allocator;
+    const CausalSelfAttention = @import("../nn/attention.zig").CausalSelfAttention;
+    const Rng = @import("../core/rng.zig").Rng;
+    const ops_reduce = @import("../tensor/ops/reduce.zig");
+    const ops_create = @import("../tensor/ops/create.zig");
+
+    var rng = Rng.init(42);
+    var attn = try CausalSelfAttention.init(allocator, 4, 3, true, &rng);
+    defer attn.deinit();
+
+    // DO NOT scale down weights — we need non-trivial attention scores
+    // for the gradient check to be reliable. With 0.1-scaled weights,
+    // the scores are ~0.0003 while the mask is -1, making softmax
+    // dominated by the mask and gradients too small for accurate
+    // finite-difference checks.
+
+    // Use -0.5 mask (not -1e9 or -10).
+    // With -0.5, the softmax of the upper triangle gets exp(-0.5) ≈ 0.607,
+    // keeping the distribution smooth enough for accurate gradients
+    // while still enforcing the causal pattern.
+    for (attn.causal_mask.data) |*v| {
+        if (v.* < 0.0) v.* = -0.5;
+    }
+
+    // Use larger input so attention scores are comparable to mask
+    var x = try ops_create.randn(allocator, Shape.init3D(2, 3, 4), &rng, 0.0, 1.0);
+    defer x.deinit(allocator);
+
+    var params: std.ArrayList(*Tensor) = .empty;
+    defer params.deinit(allocator);
+    try params.ensureTotalCapacity(allocator, 8);
+    attn.parameters(&params);
+
+    var tape = Tape.init(allocator);
+    defer tape.deinit();
+
+    for (params.items) |param| {
+        param.requires_grad = true;
+        _ = try tape.trackLeaf(param);
+    }
+
+    var out = try attn.forward(x, &tape);
+    try tape.keepAlive(&out);
+    defer out.deinit(allocator);
+
+    var loss = try ops_reduce.sumAll(allocator, out, &tape);
+    defer loss.deinit(allocator);
+
+    try tape.backward(&loss);
+
+    const h: f32 = 1e-4;
+    var param_idx: usize = 0;
+    var max_overall_rel: f32 = 0;
+    var max_overall_abs: f32 = 0;
+    for (params.items) |param| {
+        const grad = param.grad orelse continue;
+        const n = param.data.len;
+        const n_check = @min(n, 5);
+        var max_rel_err: f32 = 0;
+        var max_abs_analytical: f32 = 0;
+        var max_abs_numerical: f32 = 0;
+        var max_abs_diff: f32 = 0;
+        var check_rng = std.Random.Xoshiro256.init(77);
+
+        for (0..n_check) |_| {
+            const idx = check_rng.next() % n;
+            const original = param.data[idx];
+
+            param.data[idx] = original + h;
+            var op = try attn.forward(x, null);
+            defer op.deinit(allocator);
+            var lp = try ops_reduce.sumAll(allocator, op, null);
+            defer lp.deinit(allocator);
+
+            param.data[idx] = original - h;
+            var om = try attn.forward(x, null);
+            defer om.deinit(allocator);
+            var lm = try ops_reduce.sumAll(allocator, om, null);
+            defer lm.deinit(allocator);
+
+            param.data[idx] = original;
+
+            const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
+            const analytical = grad.data[idx];
+            const abs_diff = @abs(analytical - numerical);
+            const denom = @max(@abs(analytical), @abs(numerical), 1e-2);
+            const rel_err = abs_diff / denom;
+
+            max_abs_analytical = @max(max_abs_analytical, @abs(analytical));
+            max_abs_numerical = @max(max_abs_numerical, @abs(numerical));
+            if (rel_err > max_rel_err) max_rel_err = rel_err;
+            max_abs_diff = @max(max_abs_diff, abs_diff);
+        }
+
+        const status = if (max_rel_err < 0.01) "PASS" else if (max_rel_err < 0.05) "WARN" else "FAIL";
+        std.debug.print("  attn[{}] rel_err={d:.6} max_anal={d:.6} max_num={d:.6} max_abs_diff={d:.6}  {s}\n", .{ param_idx, max_rel_err, max_abs_analytical, max_abs_numerical, max_abs_diff, status });
+        max_overall_rel = @max(max_overall_rel, max_rel_err);
+        max_overall_abs = @max(max_overall_abs, max_abs_diff);
+        param_idx += 1;
+    }
+    // Combined check: high relative error with tiny absolute error is
+    // finite-difference noise on near-zero gradients, not a backward bug.
+    try std.testing.expect(max_overall_rel < 0.05 or max_overall_abs < 5e-3);
+}
+
+test "gradCheck — softmax backward produces zero when loss=sumAll(softmax)" {
+    // If loss = sumAll(softmax(x)), the gradient should be EXACTLY 0
+    // because each row of softmax sums to 1, making the loss constant.
+    // A non-zero gradient indicates a bug in backwardSoftmax.
+    const allocator = std.testing.allocator;
+    const ops_softmax = @import("../tensor/ops/softmax.zig");
+    const ops_reduce = @import("../tensor/ops/reduce.zig");
+    const ops_create = @import("../tensor/ops/create.zig");
+    const Rng = @import("../core/rng.zig").Rng;
+
+    var rng = Rng.init(42);
+
+    var x = try ops_create.randn(allocator, Shape.init2D(2, 3), &rng, 0.0, 0.1);
+    defer x.deinit(allocator);
+    x.requires_grad = true;
+
+    var tape = Tape.init(allocator);
+    defer tape.deinit();
+
+    _ = try tape.trackLeaf(&x);
+
+    var s = try ops_softmax.softmax(allocator, x, &tape);
+    try tape.keepAlive(&s);
+    defer s.deinit(allocator);
+
+    var loss = try ops_reduce.sumAll(allocator, s, &tape);
+    defer loss.deinit(allocator);
+
+    try tape.backward(&loss);
+
+    const grad = x.grad orelse unreachable;
+    var max_abs: f32 = 0;
+    for (grad.data) |v| {
+        max_abs = @max(max_abs, @abs(v));
+    }
+
+    std.debug.print("  sumAll(softmax) backward: max_abs_grad={d:.10}\n", .{max_abs});
+    try std.testing.expect(max_abs < 1e-5);
+}
+
+test "gradCheck — softmax with mask then sumAll (pipeline softmaxed)" {
+    // This replicates the exact "softmaxed" pipeline stage:
+    // x → Linear(x)=Q → K → K^T → Q@K^T → scale → +mask → softmax → sumAll
+    // When loss = sumAll(softmax(x)), gradient of w_q.weight should be 0.
+    const allocator = std.testing.allocator;
+    const ops_softmax = @import("../tensor/ops/softmax.zig");
+    const ops_elementwise = @import("../tensor/ops/elementwise.zig");
+    const ops_matmul = @import("../tensor/ops/matmul.zig");
+    const ops_shape = @import("../tensor/ops/shape_ops.zig");
+    const ops_reduce = @import("../tensor/ops/reduce.zig");
+    const ops_create = @import("../tensor/ops/create.zig");
+    const Linear = @import("../nn/linear.zig").Linear;
+    const Rng = @import("../core/rng.zig").Rng;
+
+    var rng = Rng.init(42);
+
+    var w_q = try Linear.init(allocator, 4, 4, true, &rng);
+    defer w_q.deinit();
+    var w_k = try Linear.init(allocator, 4, 4, true, &rng);
+    defer w_k.deinit();
+
+    for (w_q.weight.data) |*v| v.* *= 0.1;
+    for (w_k.weight.data) |*v| v.* *= 0.1;
+
+    var x = try ops_create.randn(allocator, Shape.init3D(2, 3, 4), &rng, 0.0, 0.1);
+    defer x.deinit(allocator);
+
+    var tape = Tape.init(allocator);
+    defer tape.deinit();
+
+    w_q.weight.requires_grad = true;
+    _ = try tape.trackLeaf(&w_q.weight);
+
+    var q = try w_q.forward(x, &tape);
+    try tape.keepAlive(&q);
+    defer q.deinit(allocator);
+
+    var k = try w_k.forward(x, &tape);
+    try tape.keepAlive(&k);
+    defer k.deinit(allocator);
+
+    var k_t = try ops_shape.transposeInner2dTracked(allocator, k, &tape);
+    try tape.keepAlive(&k_t);
+    defer k_t.deinit(allocator);
+
+    var scores = try ops_matmul.matmulBatch(allocator, q, k_t, &tape);
+    try tape.keepAlive(&scores);
+    defer scores.deinit(allocator);
+
+    const D: usize = 4;
+    const scale: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
+    var scaled = try ops_elementwise.mulScalar(allocator, scores, scale, &tape);
+    try tape.keepAlive(&scaled);
+    defer scaled.deinit(allocator);
+
+    var mask = try Tensor.init(allocator, Shape.init3D(1, 3, 3));
+    defer mask.deinit(allocator);
+    for (0..3) |i| {
+        for (0..3) |j| {
+            mask.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+        }
+    }
+    var masked = try ops_elementwise.add(allocator, scaled, mask, &tape);
+    try tape.keepAlive(&masked);
+    defer masked.deinit(allocator);
+
+    var weights = try ops_softmax.softmax(allocator, masked, &tape);
+    try tape.keepAlive(&weights);
+    defer weights.deinit(allocator);
+
+    var loss = try ops_reduce.sumAll(allocator, weights, &tape);
+    defer loss.deinit(allocator);
+
+    try tape.backward(&loss);
+
+    const grad = w_q.weight.grad orelse unreachable;
+    var max_abs: f32 = 0;
+    for (grad.data) |v| {
+        max_abs = @max(max_abs, @abs(v));
+    }
+
+    std.debug.print("  pipeline softmaxed: w_q.weight max_abs_grad={d:.10}\n", .{max_abs});
+    try std.testing.expect(max_abs < 1e-4);
+}
+
+test "gradCheck — softmax backward (2D, non-trivial loss)" {
+    const allocator = std.testing.allocator;
+    const ops_softmax = @import("../tensor/ops/softmax.zig");
+    const ops_elementwise = @import("../tensor/ops/elementwise.zig");
+    const ops_reduce = @import("../tensor/ops/reduce.zig");
+    const ops_create = @import("../tensor/ops/create.zig");
+    const Rng = @import("../core/rng.zig").Rng;
+
+    var rng = Rng.init(42);
+
+    // Use small values to avoid peaked softmax distributions
+    var x = try ops_create.randn(allocator, Shape.init2D(2, 3), &rng, 0.0, 0.1);
+    defer x.deinit(allocator);
+    x.requires_grad = true;
+
+    var target = try ops_create.randn(allocator, Shape.init2D(2, 3), &rng, 0.0, 0.1);
+    defer target.deinit(allocator);
+
+    var tape = Tape.init(allocator);
+    defer tape.deinit();
+
+    _ = try tape.trackLeaf(&x);
+
+    var s = try ops_softmax.softmax(allocator, x, &tape);
+    try tape.keepAlive(&s);
+    defer s.deinit(allocator);
+
+    var weighted = try ops_elementwise.mul(allocator, s, target, &tape);
+    try tape.keepAlive(&weighted);
+    defer weighted.deinit(allocator);
+
+    var loss = try ops_reduce.sumAll(allocator, weighted, &tape);
+    defer loss.deinit(allocator);
+
+    try tape.backward(&loss);
+
+    const grad = x.grad orelse unreachable;
+    const h: f32 = 1e-4;
+    const n = x.data.len;
+    var max_rel_err: f32 = 0;
+
+    for (0..n) |idx| {
+        const original = x.data[idx];
+
+        x.data[idx] = original + h;
+        var sp = try ops_softmax.softmax(allocator, x, null);
+        defer sp.deinit(allocator);
+        var wp = try ops_elementwise.mul(allocator, sp, target, null);
+        defer wp.deinit(allocator);
+        var lp = try ops_reduce.sumAll(allocator, wp, null);
+        defer lp.deinit(allocator);
+
+        x.data[idx] = original - h;
+        var sm = try ops_softmax.softmax(allocator, x, null);
+        defer sm.deinit(allocator);
+        var wm = try ops_elementwise.mul(allocator, sm, target, null);
+        defer wm.deinit(allocator);
+        var lm = try ops_reduce.sumAll(allocator, wm, null);
+        defer lm.deinit(allocator);
+
+        x.data[idx] = original;
+
+        const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
+        const analytical = grad.data[idx];
+        const abs_diff = @abs(analytical - numerical);
+        const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
+        const rel_err = abs_diff / denom;
+        if (rel_err > max_rel_err) max_rel_err = rel_err;
+    }
+
+    std.debug.print("  softmax 2D backward (small x) max_rel_err={d:.6}\n", .{max_rel_err});
+    try std.testing.expect(max_rel_err < 0.01);
+}
+
+test "gradCheck — softmax backward (3D, non-trivial loss)" {
+    const allocator = std.testing.allocator;
+    const ops_softmax = @import("../tensor/ops/softmax.zig");
+    const ops_elementwise = @import("../tensor/ops/elementwise.zig");
+    const ops_reduce = @import("../tensor/ops/reduce.zig");
+    const ops_create = @import("../tensor/ops/create.zig");
+    const Rng = @import("../core/rng.zig").Rng;
+
+    // Use small input values (std=0.1) for finite-difference precision.
+    var rng = Rng.init(42);
+
+    var x = try ops_create.randn(allocator, Shape.init3D(2, 3, 3), &rng, 0.0, 0.1);
+    defer x.deinit(allocator);
+    x.requires_grad = true;
+
+    var target = try ops_create.randn(allocator, Shape.init3D(2, 3, 3), &rng, 0.0, 0.1);
+    defer target.deinit(allocator);
+
+    var tape = Tape.init(allocator);
+    defer tape.deinit();
+
+    _ = try tape.trackLeaf(&x);
+
+    var s = try ops_softmax.softmax(allocator, x, &tape);
+    try tape.keepAlive(&s);
+    defer s.deinit(allocator);
+
+    var weighted = try ops_elementwise.mul(allocator, s, target, &tape);
+    try tape.keepAlive(&weighted);
+    defer weighted.deinit(allocator);
+
+    var loss = try ops_reduce.sumAll(allocator, weighted, &tape);
+    defer loss.deinit(allocator);
+
+    try tape.backward(&loss);
+
+    const grad = x.grad orelse unreachable;
+    const h: f32 = 1e-4;
+    const n = x.data.len;
+    var max_rel_err: f32 = 0;
+    var max_abs_diff: f32 = 0;
+    // Use denom floor of 1e-2 for relative error: near-zero gradients
+    // (< 0.01) cause high relative error from finite-difference noise
+    // even when the backward is correct. Also check absolute error.
+    const denom_floor: f32 = 1e-2;
+
+    for (0..n) |idx| {
+        const original = x.data[idx];
+
+        x.data[idx] = original + h;
+        var sp = try ops_softmax.softmax(allocator, x, null);
+        defer sp.deinit(allocator);
+        var wp = try ops_elementwise.mul(allocator, sp, target, null);
+        defer wp.deinit(allocator);
+        var lp = try ops_reduce.sumAll(allocator, wp, null);
+        defer lp.deinit(allocator);
+
+        x.data[idx] = original - h;
+        var sm = try ops_softmax.softmax(allocator, x, null);
+        defer sm.deinit(allocator);
+        var wm = try ops_elementwise.mul(allocator, sm, target, null);
+        defer wm.deinit(allocator);
+        var lm = try ops_reduce.sumAll(allocator, wm, null);
+        defer lm.deinit(allocator);
+
+        x.data[idx] = original;
+
+        const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
+        const analytical = grad.data[idx];
+        const abs_diff = @abs(analytical - numerical);
+        const denom = @max(@abs(analytical), @abs(numerical), denom_floor);
+        const rel_err = abs_diff / denom;
+        if (rel_err > max_rel_err) max_rel_err = rel_err;
+        max_abs_diff = @max(max_abs_diff, abs_diff);
+    }
+
+    std.debug.print("  softmax 3D backward (std=0.1) max_rel_err={d:.6} max_abs_diff={d:.6}\n", .{ max_rel_err, max_abs_diff });
+    try std.testing.expect(max_rel_err < 0.05);
+    try std.testing.expect(max_abs_diff < 5e-3);
+}
+
+test "gradCheck — softmax→matmulBatch (weights@V path)" {
+    const allocator = std.testing.allocator;
+    const ops_softmax = @import("../tensor/ops/softmax.zig");
+    const ops_matmul = @import("../tensor/ops/matmul.zig");
+    const ops_reduce = @import("../tensor/ops/reduce.zig");
+    const ops_create = @import("../tensor/ops/create.zig");
+    const Rng = @import("../core/rng.zig").Rng;
+
+    var rng = Rng.init(42);
+
+    // Use small x values (std=0.1) for the same reason as the 3D softmax
+    // backward test: finite-difference precision degrades with peaked softmax.
+    var x = try ops_create.randn(allocator, Shape.init3D(2, 3, 3), &rng, 0.0, 0.1);
+    defer x.deinit(allocator);
+    x.requires_grad = true;
+
+    var v_tensor = try ops_create.randn(allocator, Shape.init3D(2, 3, 4), &rng, 0.0, 0.1);
+    defer v_tensor.deinit(allocator);
+
+    var tape = Tape.init(allocator);
+    defer tape.deinit();
+
+    _ = try tape.trackLeaf(&x);
+
+    var weights = try ops_softmax.softmax(allocator, x, &tape);
+    try tape.keepAlive(&weights);
+    defer weights.deinit(allocator);
+
+    var attn_out = try ops_matmul.matmulBatch(allocator, weights, v_tensor, &tape);
+    try tape.keepAlive(&attn_out);
+    defer attn_out.deinit(allocator);
+
+    var loss = try ops_reduce.sumAll(allocator, attn_out, &tape);
+    defer loss.deinit(allocator);
+
+    try tape.backward(&loss);
+
+    const grad = x.grad orelse unreachable;
+    const h: f32 = 1e-4;
+    const n = x.data.len;
+    var max_rel_err: f32 = 0;
+    var max_abs_diff: f32 = 0;
+    const denom_floor: f32 = 1e-2;
+
+    for (0..n) |idx| {
+        const original = x.data[idx];
+
+        x.data[idx] = original + h;
+        var wp = try ops_softmax.softmax(allocator, x, null);
+        defer wp.deinit(allocator);
+        var aop = try ops_matmul.matmulBatch(allocator, wp, v_tensor, null);
+        defer aop.deinit(allocator);
+        var lp = try ops_reduce.sumAll(allocator, aop, null);
+        defer lp.deinit(allocator);
+
+        x.data[idx] = original - h;
+        var wm = try ops_softmax.softmax(allocator, x, null);
+        defer wm.deinit(allocator);
+        var aom = try ops_matmul.matmulBatch(allocator, wm, v_tensor, null);
+        defer aom.deinit(allocator);
+        var lm = try ops_reduce.sumAll(allocator, aom, null);
+        defer lm.deinit(allocator);
+
+        x.data[idx] = original;
+
+        const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
+        const analytical = grad.data[idx];
+        const abs_diff = @abs(analytical - numerical);
+        const denom = @max(@abs(analytical), @abs(numerical), denom_floor);
+        const rel_err = abs_diff / denom;
+        if (rel_err > max_rel_err) max_rel_err = rel_err;
+        max_abs_diff = @max(max_abs_diff, abs_diff);
+    }
+
+    std.debug.print("  softmax→matmulBatch x grad (std=0.1) max_rel_err={d:.6} max_abs_diff={d:.6}\n", .{ max_rel_err, max_abs_diff });
+    // Near-zero gradients cause high relative error from finite-difference
+    // noise; use denom floor of 1e-2 and also check absolute error.
+    // Longer chain (softmax→matmul→sumAll) compounds finite-diff error,
+    // so use slightly relaxed tolerance.
+    try std.testing.expect(max_rel_err < 0.1);
+    try std.testing.expect(max_abs_diff < 1e-3);
+}
