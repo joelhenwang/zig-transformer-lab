@@ -59,8 +59,22 @@ it with CUDA. The project follows a hybrid approach: implementation-agent mode
 - Bug fixes: backwardCrossEntropy @round, reshapeTracked, NamedParam, dangling pointers, beta2=0.999
 - All 215+ tests pass, 0 leaks
 
-### Stage 7 — CUDA Backend 🔲 NOT STARTED
-See AGENTS.md "Stage 7: Next steps" for detailed sub-stages 7.A through 7.I.
+### Stage 6.5 — CPU Hardening and Backend Seam ✅ COMPLETE
+**Commits:** `f9c1d3b` (refactor), `28e73e1` (teaching docs), `97b0aaa` (oracle), `3331801` (oracle expansion)
+- Seven PRs (α–η): honesty pass, strided ops fix, invariants, storage union, operation-owned SavedTensor, ParamId optimizer state, strict checkpoint validation.
+- Five teaching chapters: `docs/02c`, `02d`, `03c`, `07c`, `07d`.
+- PyTorch oracle: 14 cases under `tests/fixtures/` exercising every CPU op family up to full-model forward parity.
+- 263 tests pass + 14 oracle parity tests pass, on Windows and Linux.
+
+### Stage 7-setup — Remote RTX workflow ✅ COMPLETE
+**Commit:** `1e3b540 stage(7-setup): remote runner scripts and workflow docs`
+- `run_remote_example.sh` + `sync_remote_example.sh` wrappers for the RTX box at `joelwang-rtx@192.168.1.197`.
+- `.gitattributes` enforces LF on `*.sh`/`*.py` so rsync doesn't break remote execution.
+- Toolchain verified: Ubuntu 24.04, RTX 4060 Ti 16 GB, CUDA 13.2, Zig 0.16.0. Both `zig build test` and `zig build test-oracle` pass on remote.
+
+### Stage 7 — CUDA Backend 🔲 NOT STARTED — **playbook ready**
+**Read:** `docs/stage7_plan.md` — 14-PR roadmap with full PR cards (API surfaces, acceptance criteria, commit templates, gotchas). A fresh session should open that file and start at PR-α.
+See also AGENTS.md "Stage 7: Next steps" for the higher-level sub-stage description.
 
 ### Stage 8 — Debugging and N-block Refactor 🔲 NOT STARTED
 
@@ -152,10 +166,19 @@ zig build docs
 
 ### To start Stage 7 (CUDA Backend):
 
-Read `plan.md` Stage 7 section carefully, and `AGENTS.md` "Stage 7: Next steps"
-for the detailed sub-stage ordering (7.A through 7.I).
+**First action:** open `docs/stage7_plan.md`. It is a self-contained
+14-PR roadmap with full PR cards (API surfaces, acceptance criteria,
+commit templates, per-PR gotchas, remote-invocation commands, and the
+CUDA-13.2-specific symbol versioning notes discovered during
+7-setup). Execute the next `[ ]` PR.
 
-Key files to create (in order):
+Secondary reading: `plan.md` Stage 7 section and `AGENTS.md` "Stage 7:
+Next steps" for the higher-level sub-stage ordering. These are the
+original designs; the playbook supersedes where they differ (e.g.
+`libcublas.so.13` vs `.so.12`).
+
+Key files to create across the Stage 7 PRs (condensed, see playbook
+for full cards):
 1. `src/backend/cuda/bindings.zig` — dlopen/dlsym for libcuda, libcudart, libcublas
 2. `src/backend/cuda/context.zig` — CudaContext (device, context, stream, cuBLAS handle)
 3. `src/backend/cuda/mem.zig` — DeviceBuffer (cuMemAlloc/cuFree, HtoD, DtoH)
@@ -313,15 +336,17 @@ Full table in `docs/00_overview.md` or `plan.md` Section 2.
 
 When starting a new session, do these in order:
 
-1. `cd /home/joelwang-rtx/Desktop/ai_lab/zig-transformer-lab`
+1. `cd /home/joelwang-rtx/Desktop/ai_lab/zig-transformer-lab` (or your local path on Windows)
 2. Read `AGENTS.md` (agent contract, progress, gotchas, next steps)
 3. Read this file (`SESSION_GUIDE.md`) for current state
-4. Check `git log --oneline` for completed stages (expect 6 commits)
-5. Run `export PATH="/home/joelwang-rtx/.local/bin:$PATH" && zig build test` to verify baseline (215+ tests)
-6. For Stage 7 CUDA work: also verify `nvcc --version` and `nvidia-smi`
-7. Load `skills/modern-zig-0-16-tutor/SKILL.md` for any Zig API questions
-8. Load `skills/modern-zig-0-16-tutor/references/09-c-interop-0-16.md` and `references/17-zig-cuda-interop-notes.md` for CUDA interop
-9. Pick up at Stage 7 (CUDA Backend) — see AGENTS.md for sub-stages 7.A–7.I
+4. **If Stage 7:** read `docs/stage7_plan.md` in full before touching code. It contains every Stage 7 PR card.
+5. Check `git log --oneline -15` for completed stages (expect stages 1–6.5 + 7-setup done).
+6. Run `zig build test` to verify baseline (263 tests).
+7. Run `zig build test-oracle` to verify oracle fixtures (14 tests).
+8. For Stage 7 CUDA work: verify remote access with `bash ./run_remote_example.sh "echo ok && zig version && nvcc --version | tail -1"`.
+9. Load `skills/modern-zig-0-16-tutor/SKILL.md` for any Zig API questions.
+10. Load `skills/modern-zig-0-16-tutor/references/09-c-interop-0-16.md` and `references/17-zig-cuda-interop-notes.md` for CUDA interop.
+11. Pick up at the next `[ ]` PR in `docs/stage7_plan.md` Section 4.
 
 ---
 

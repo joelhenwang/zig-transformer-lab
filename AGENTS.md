@@ -12,6 +12,12 @@ Stage 7 CUDA is **blocked** until Stage 6.5 ships. Rationale and full plan are
 in `zig_transformer_lab_implementation_assessment_and_plan.md` (researcher
 review) plus the accepted plan in session notes.
 
+> **Stage 7 playbook:** `docs/stage7_plan.md` is the executable
+> 14-PR roadmap. A fresh session should read this file, then the
+> playbook, then start the next `[ ]` PR. The playbook contains
+> full PR cards with API surfaces, acceptance criteria, commit
+> templates, and per-PR gotchas.
+
 Stage 6.5 consists of seven PRs, executed in order:
 
 | PR  | Scope                                                  | Status      |
