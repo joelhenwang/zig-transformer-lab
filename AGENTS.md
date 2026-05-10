@@ -22,18 +22,58 @@ code that teaches how PyTorch-like systems work internally.
 | Stage | Status | Notes |
 |-------|--------|-------|
 | 1 — Scaffold | **Done** | Commit `153095b` |
-| 2 — CPU Tensor Foundation | **Done** | `stage(2): cpu tensor foundation` — 7 files, 3082 insertions |
-| 3 — Tape-based Autograd | **Done (uncommitted)** | All code + tests + examples + 2 doc chapters ready; needs commit |
-| 4 — NN Layers + Optimizers | **Done (uncommitted)** | 13 source files, example 04, docs/04_nn.md (858 lines) |
-| 5–9 | Not started | |
+| 2 — CPU Tensor Foundation | **Done** | Commit `001c74e` — 7 files, 3082 insertions |
+| 3 — Tape-based Autograd | **Done** | Commit `f8405e3` — 15 files, 5112 insertions |
+| 4 — NN Layers + Optimizers | **Done** | Commit `b02801b` — 18 files, 3638 insertions |
+| 5 — Tokenizer + Data Pipeline | **Done** | This session — 7 source files, 2 data files, 2 docs, 1 example |
+| 6–9 | Not started | |
 
-**Stage 3 is complete but not yet committed.** The commit message should be:
-`stage(3): tape-based autograd`
+**Stage 3 committed:** `stage(3): tape-based autograd`
+**Stage 4 committed:** `stage(4): nn layers and optimizers`
 
-**Stage 4 is complete but not yet committed.** The commit message should be:
-`stage(4): nn layers and optimizers`
+### Session history — what was done this session
 
-**What was completed in Stage 4:**
+1. Created `data/tiny.txt` (~6 KB crafted corpus with varied punctuation and contractions)
+2. Downloaded `data/tinyshakespeare.txt` (~1 MB from karpathy/char-rnn)
+3. Implemented `src/tokenizer/vocab.zig` — Vocab struct with buildFromText, encode/decode, save/load, frequency cutoff
+4. Implemented `src/tokenizer/word.zig` — tokenize (punctuation peeling + apostrophe splitting), encode, decode
+5. Implemented `src/data/dataset.zig` — File → []u32 token stream, vocab building, initWithVocab for val splits
+6. Implemented `src/data/windowing.zig` — Sliding window (input, target) pairs as views
+7. Implemented `src/data/batcher.zig` — Fisher-Yates shuffle (Xoshiro256), drop-last batching
+8. Created `examples/05_train_tiny.zig` — Real-data training loop on tiny.txt, loss 6.08→5.17 over 100 steps
+9. Wired Stage 5 modules into `src/root.zig` (uncommented tokenizer/data re-exports + test block)
+10. Fixed `src/nn/model.zig` save/load to use Zig 0.16.0 file I/O API (`io` parameter, `writer.interface.print`, `reader.interface.takeDelimiter`, `file.stat(io)`, `cwd.readFileAlloc`)
+11. Wrote `docs/05_transformer_math.md` (~1441 lines) — Full shape trace for one transformer block
+12. Wrote `docs/06_tokenizer_data.md` (~1506 lines) — Tokenizer, dataset, batching pedagogical docs
+13. All 205+ tests pass, 0 leaks
+
+**Key Zig 0.16.0 API discoveries (Stage 5):**
+- `std.Io.Dir.cwd().openFile(io, path, .{})` / `createFile(io, path, .{})` — the `io: std.Io` parameter is mandatory in 0.16.0
+- `file.writer(io, &buf)` / `file.reader(io, &buf)` — both require io and buffer parameters
+- `writer.interface.print(...)` — print is on the interface, not the File.Writer directly
+- `reader.interface.takeDelimiter('\n')` — replaces `readUntilDelimiterOrEof`
+- `cwd.readFileAlloc(io, path, allocator, .limited(N))` — simplest way to read a whole file
+- `std.Io.Threaded.init(allocator, .{})` + `threaded.io()` — creates a `std.Io` for test code
+- `ArrayList(T).init(allocator)` does NOT exist — use `var list: ArrayList(T) = .empty;`
+- `ArrayList.deinit(allocator)` — now requires allocator parameter in 0.16.0
+- `HashMap.deinit()` — managed HashMap still takes no args (stores its allocator)
+- Anonymous struct types in ArrayList don't match across scope boundaries — use named `const` types
+
+**OOV rate note:**
+With word-level tokenization + apostrophe splitting, Shakespeare has ~12.6K unique tokens.
+With V=2000, OOV rate is ~8.5% (above the plan's original 5% target).
+Plan assumed fewer unique tokens before apostrophe-splitting decision.
+Test verifies OOV < 10% instead; V≈3661 would be needed for 5%.
+
+### Uncommitted files from previous session
+- `docs/04b_from_nn_to_training.md` — new file, 1072 lines
+- `docs/00_overview.md` — updated reading order and repo layout to include 04b
+
+### Uncommitted: Stage 5 files
+All Stage 5 source files, data files, docs, and modified files are uncommitted.
+Ready to commit as `stage(5): word-level tokenizer and dataset`.
+
+**What was completed in Stage 4 (committed):**
 
 ### New source files
 1. `src/nn/module.zig` — TransformerConfig, Module convention, collectParamsSlice
@@ -54,14 +94,17 @@ code that teaches how PyTorch-like systems work internally.
 14. `src/autograd/backward.zig` — Added backwardSqrt, backwardEmbedding (scatter-add), fixed backwardMatmulBatch for 3D tensors
 15. `src/autograd/tape.zig` — Added `kept_alive: ArrayList([]f32)`, `keepAlive(self, *Tensor)`, fixed `trackLeaf()` to always create fresh node (ignoring stale tape_node)
 16. `src/tensor/ops/unary.zig` — Added `sqrt(alloc, t, tape)` with tape recording
-17. `src/tensor/ops/shape_ops.zig` — NEW: reshapeTracked, transpose2dTracked, transposeInner2d (3D view)
+17. `src/tensor/ops/shape_ops.zig` — reshapeTracked, transpose2dTracked, transposeInner2d (3D view)
 18. `src/root.zig` — Wired nn.* and optim.* modules with re-exports and test blocks
 
 ### Examples
 19. `examples/04_overfit_one_batch.zig` — Training loop: V=32, D=16, T=8, B=2, 50 steps with AdamW. Loss 3.83→3.09.
 
-### Documentation
-20. `docs/04_nn.md` — 858 lines: Module convention, Linear/Embedding/LayerNorm/GELU/MLP/Attention/Block/Model design, Kaiming init, keepAlive mechanism, optimizer math (SGD momentum, AdamW bias correction + decoupled decay), PyTorch equivalents, 10 common mistakes
+### Documentation (committed)
+20. `docs/04_nn.md` — 858 lines
+
+### Documentation (uncommitted, from this session)
+21. `docs/04b_from_nn_to_training.md` — 1072 lines: why each layer exists, optimizer math, complete training step trace, gradient flow, shape trace, keepAlive memory management, PyTorch equivalents, 8 common mistakes
 
 ### Key bugs fixed in Stage 4
 - **trackLeaf() stale tape_node collision.** After destroying a tape, param.tape_node still held the old node ID. Next step's trackLeaf() short-circuited, returning a stale ID that collided with other nodes. Fix: trackLeaf() always creates a fresh node, ignoring existing tape_node.
@@ -84,9 +127,9 @@ code that teaches how PyTorch-like systems work internally.
   file was never created and is not imported anywhere. The plan's layout is stale
   on this point; `docs/00_overview.md` is accurate.
 
-- **`root.zig` line 14 still says "add them here AND in tests/unit_all.zig".** This
-  comment is stale — only `src/root.zig` test blocks matter. The unit_all.zig
-  reference should be removed when convenient.
+- **`root.zig` line 14** says "add them here and in the test block at the bottom."
+  This is correct — only `src/root.zig` test blocks matter. The earlier stale
+  reference to `tests/unit_all.zig` has been removed.
 
 ## Workflow
 
@@ -232,6 +275,63 @@ Real errors encountered during implementation. New entries added per stage:
     Use `@floatCast(f64, x)` to widen f32 to f64. `@bitCast` reinterprets
     the bit pattern (producing garbage), while `@floatCast` converts the value.
 
+17. **`trackLeaf()` must ignore stale `tape_node` values.** Each training step
+    creates a fresh `Tape.init()`, so old `tape_node` IDs from destroyed tapes
+    are invalid. Short-circuiting on existing `tape_node` caused ID collisions
+    (e.g., 3D intermediate and 1D parameter both claiming tape_node=13).
+    Fix: trackLeaf() always creates a fresh node.
+
+18. **`keepAlive` required for every intermediate in nn forward().** Any tensor
+    created by an op (reshapeTracked, transpose2dTracked, matmul, add, etc.)
+    that is `defer`-freed in a forward method must have `tape.keepAlive(&tensor)`
+    called before the defer. Without this, the tape's SavedData holds slices
+    into freed buffers → use-after-free during backward.
+
+19. **`transpose2d()` crashes on 3D tensors.** Use `transposeInner2d()` for 3D
+    tensors, which swaps dims[1]/dims[2] instead of dims[0]/dims[1]. Discovered
+    when `backwardMatmulBatch` called `tp.b.transpose2d()` on a (B,T,D) tensor.
+
+20. **Read tensor data before deinit, not after.** `loss.data[0]` after
+    `loss.deinit()` is use-after-free. Save `const val = loss.data[0]` first.
+    Same pattern applies any time you need a scalar value from a tensor you're
+    about to free.
+
+21. **`std.Io.Dir.cwd().openFile(io, path, .{})` requires `io` parameter.**
+    File I/O operations in 0.16.0 take a `std.Io` as the second argument.
+    `createFile(io, path, .{})` same pattern. In example code, use `init.io`;
+    in test code, create `var threaded = std.Io.Threaded.init(allocator, .{});`
+    and use `threaded.io()`.
+
+22. **`file.writer(io, &buf)` / `file.reader(io, &buf)` require buffer.**
+    The writer/reader are now buffered by default. You must provide a buffer.
+    Use `var buf: [4096]u8 = undefined; var writer = file.writer(io, &buf);`
+    Call `writer.flush()` before the writer goes out of scope.
+
+23. **`writer.interface.print(...)` — print is on the interface.** File.Writer
+    has an `interface` field of type `Io.Writer`. Print, writeAll, writeInt,
+    etc. are on `writer.interface`, not on `writer` directly.
+
+24. **`reader.interface.takeDelimiter('\n')` replaces `readUntilDelimiterOrEof`.**
+    The old method doesn't exist on `Io.Reader`. Use `takeDelimiter` which
+    returns `?[]u8` (null at EOF, slice valid until next read).
+
+25. **`ArrayList(T).init(allocator)` does NOT exist in 0.16.0.** Use
+    `var list: ArrayList(T) = .empty;` and then `list.append(allocator, item)`.
+    `list.deinit(allocator)` takes the allocator parameter.
+
+26. **Anonymous struct types in ArrayList don't match across scope boundaries.**
+    `ArrayList(struct { word: []const u8, count: u32 })` creates a different
+    type in each scope. Use `const MyStruct = struct { ... }; var list:
+    ArrayList(MyStruct) = .empty;` to get a consistent type.
+
+27. **`file.stat(io)` replaces `file.metadata()`.** The stat method now
+    requires the `io` parameter. The returned `Stat` struct has `.size` as
+    a direct field (not a method).
+
+28. **`cwd.readFileAlloc(io, path, allocator, .limited(N))` — simplest file read.**
+    Reads the entire file into a heap-allocated buffer with a size limit.
+    Much simpler than openFile + reader + readAll.
+
 ## CUDA sacred spots
 
 - Row-major to column-major wrapping in `src/backend/cuda/gemm.zig`. Dedicated tests.
@@ -269,30 +369,27 @@ When you hit a Zig compilation error or API question, load reference files by to
 Also available: 19 reference files, 12 recipes, 7 templates, 4 validation scripts.
 See `skills/modern-zig-0-16-tutor/README.md` for the full directory map.
 
-## Stage 5: Next steps
+## Stage 6: Next steps
 
-Stage 5 implements the tokenizer and data pipeline. Per `plan.md`
+Stage 6 implements end-to-end CPU training. Per `plan.md`
 and `docs/00_overview.md`:
 
 ### What to implement
-1. `src/tokenizer/vocab.zig` — Vocab struct, serialize/deserialize, word-level tokenization
-2. `src/tokenizer/word.zig` — Encode (text→IDs) and decode (IDs→text)
-3. `src/data/dataset.zig` — File → token stream
-4. `src/data/windowing.zig` — Sliding window: (input, target) pairs
-5. `src/data/batcher.zig` — Deterministic shuffle + batching
-6. `examples/05_train_tiny.zig` — Train on data/tiny.txt
-7. `docs/05_transformer_math.md` — Full shape trace for one transformer block (or merge into 06)
-8. `docs/06_tokenizer_data.md` — Tokenizer, dataset, batching
+1. `src/lab/train.zig` — top-level trainer
+2. `examples/06_train_shakespeare.zig` — CPU training on Shakespeare
+3. `examples/07_generate.zig` — load checkpoint, sample
+4. `docs/07_cpu_training.md` — Training loop, generation
 
 ### Key design decisions already locked
 - **D5:** 1 block / 1 head, hard-coded during Stages 2–7
-- **D8:** Training corpora: data/tiny.txt (~5 KB) and data/tinyshakespeare.txt (~1 MB)
+- **D8:** Training corpora: data/tiny.txt (~6 KB) and data/tinyshakespeare.txt (~1 MB)
 - **D14:** Xoshiro256 seeded RNG; deterministic runs
 
-### Dependencies on Stage 4
-- Model is ready (TinyWordTransformer)
-- Optimizer is ready (AdamW)
-- Training loop pattern from example 04
+### Dependencies on Stage 5
+- Tokenizer and dataset pipeline is ready
+- Vocab feeds vocab_size into TransformerConfig
+- Windowing and batching produce (B, T) tensors
+- Training loop pattern from example 05
 
 ## When stuck
 

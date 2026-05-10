@@ -51,12 +51,13 @@ Recommended order:
 5. **03_autograd.md** — tape-based reverse-mode autograd, matmul backward, fused CE
 6. **03b_from_autograd_to_training.md** — bridges Stage 3 autograd to ML/DL, backward trace through transformer, residual gradient flow, optimizer preview
 7. **04_nn.md** — Module protocol, parameter iteration, initialization strategies
-7. **05_transformer_math.md** — full shape trace for one transformer block
-8. **06_tokenizer_data.md** — word-level tokenizer, windowing, batching
-9. **07_cpu_training.md** — end-to-end CPU training loop, generation
-10. **08_backends_cuda.md** — cuBLAS, PTX loading, kernel walk-throughs
-11. **09_debugging.md** — NaN hunting, compute-sanitizer, shape-assert workflow
-12. **10_pytorch_parallels.md** — mapping every concept back to PyTorch
+8. **04b_from_nn_to_training.md** — bridges Stage 4 nn/optim to ML/DL, full training step trace, optimizer math
+9. **05_transformer_math.md** — full shape trace for one transformer block
+10. **06_tokenizer_data.md** — word-level tokenizer, windowing, batching
+11. **07_cpu_training.md** — end-to-end CPU training loop, generation
+12. **08_backends_cuda.md** — cuBLAS, PTX loading, kernel walk-throughs
+13. **09_debugging.md** — NaN hunting, compute-sanitizer, shape-assert workflow
+14. **10_pytorch_parallels.md** — mapping every concept back to PyTorch
 
 Each chapter ends with a "Common mistakes" section. Read it before you hit the bug.
 
@@ -131,6 +132,7 @@ zig-transformer-lab/
 |   |-- 03_autograd.md            #   Tape-based autograd
 |   |-- 03b_from_autograd_to_training.md #   Stage 3 autograd → ML/DL bridge, backward-pass trace
 |   |-- 04_nn.md                  #   Module protocol, layers
+|   |-- 04b_from_nn_to_training.md #   Stage 4 nn/optim → ML/DL bridge
 |   |-- 05_transformer_math.md   #   Full shape trace
 |   |-- 06_tokenizer_data.md     #   Tokenizer, dataset, batching
 |   |-- 07_cpu_training.md       #   Training loop, generation

@@ -177,40 +177,42 @@ pub const TinyWordTransformer = struct {
     ///   For each param: name_len(u32), name([]u8), rank(u8), dims([4]u32), data_len(u32), data([]f32)
     ///
     /// Worked example:
-    ///   try model.save("checkpoint.bin");
-    pub fn save(self: TinyWordTransformer, path: []const u8) !void {
+    ///   try model.save(io, "checkpoint.bin");
+    pub fn save(self: TinyWordTransformer, io: std.Io, path: []const u8) !void {
         const cwd = std.Io.Dir.cwd();
-        const file = try cwd.createFile(path, .{});
-        defer file.close();
-        const writer = file.writer();
+        const file = try cwd.createFile(io, path, .{});
+        defer file.close(io);
+        var buf: [4096]u8 = undefined;
+        var writer = file.writer(io, &buf);
 
         // Magic
-        try writer.writeAll("TWTL");
+        try writer.interface.writeAll("TWTL");
         // Version
-        try writer.writeInt(u32, 1, .little);
+        try writer.interface.writeInt(u32, 1, .little);
 
         // Collect parameters with names
         var param_list: std.ArrayList(struct { name: []const u8, tensor: *Tensor }) = .empty;
         defer param_list.deinit(self.allocator);
         try self.collectNamedParams(&param_list);
 
-        try writer.writeInt(u32, @intCast(param_list.items.len), .little);
+        try writer.interface.writeInt(u32, @intCast(param_list.items.len), .little);
 
         for (param_list.items) |entry| {
             const t = entry.tensor;
-            try writer.writeInt(u32, @intCast(entry.name.len), .little);
-            try writer.writeAll(entry.name);
-            try writer.writeInt(u8, @intCast(t.shape.ndim()), .little);
+            try writer.interface.writeInt(u32, @intCast(entry.name.len), .little);
+            try writer.interface.writeAll(entry.name);
+            try writer.interface.writeInt(u8, @intCast(t.shape.ndim()), .little);
             for (0..4) |i| {
                 const dim: u32 = if (i < t.shape.ndim()) @intCast(t.shape.dims[i]) else 0;
-                try writer.writeInt(u32, dim, .little);
+                try writer.interface.writeInt(u32, dim, .little);
             }
             const data_len: u32 = @intCast(t.data.len * 4);
-            try writer.writeInt(u32, data_len, .little);
+            try writer.interface.writeInt(u32, data_len, .little);
             // Write f32 data as little-endian bytes
             const bytes = std.mem.sliceAsBytes(t.data);
-            try writer.writeAll(bytes);
+            try writer.interface.writeAll(bytes);
         }
+        try writer.flush();
     }
 
     /// Load model checkpoint from a binary file.
@@ -218,23 +220,24 @@ pub const TinyWordTransformer = struct {
     /// Verifies magic and version. Overwrites existing parameter data.
     ///
     /// Worked example:
-    ///   try model.load("checkpoint.bin");
-    pub fn load(self: TinyWordTransformer, path: []const u8) !void {
+    ///   try model.load(io, "checkpoint.bin");
+    pub fn load(self: TinyWordTransformer, io: std.Io, path: []const u8) !void {
         const cwd = std.Io.Dir.cwd();
-        const file = try cwd.openFile(path, .{});
-        defer file.close();
-        const reader = file.reader();
+        const file = try cwd.openFile(io, path, .{});
+        defer file.close(io);
+        var read_buf: [4096]u8 = undefined;
+        var reader = file.reader(io, &read_buf);
 
         // Verify magic
         var magic: [4]u8 = undefined;
-        try reader.readNoEof(&magic);
+        try reader.interface.readNoEof(&magic);
         if (!std.mem.eql(u8, &magic, "TWTL")) return error.IoError;
 
         // Verify version
-        const version = try reader.readInt(u32, .little);
+        const version = try reader.interface.readInt(u32, .little);
         if (version != 1) return error.IoError;
 
-        const num_params = try reader.readInt(u32, .little);
+        const num_params = try reader.interface.readInt(u32, .little);
 
         // Collect parameters with names for matching
         var param_list: std.ArrayList(struct { name: []const u8, tensor: *Tensor }) = .empty;
@@ -242,26 +245,26 @@ pub const TinyWordTransformer = struct {
         try self.collectNamedParams(&param_list);
 
         for (0..num_params) |_| {
-            const name_len = try reader.readInt(u32, .little);
+            const name_len = try reader.interface.readInt(u32, .little);
             var name_buf: [256]u8 = undefined;
-            try reader.readNoEof(name_buf[0..name_len]);
+            try reader.interface.readNoEof(name_buf[0..name_len]);
             const name = name_buf[0..name_len];
 
-            _ = try reader.readInt(u8, .little); // rank (unused for validation)
+            _ = try reader.interface.readInt(u8, .little); // rank (unused for validation)
 
             // Read dims
             var dims: [4]u32 = undefined;
             for (0..4) |i| {
-                dims[i] = try reader.readInt(u32, .little);
+                dims[i] = try reader.interface.readInt(u32, .little);
             }
 
-            const data_len: usize = try reader.readInt(u32, .little);
+            const data_len: usize = try reader.interface.readInt(u32, .little);
 
             // Find matching parameter by name
             for (param_list.items) |entry| {
                 if (std.mem.eql(u8, name, entry.name)) {
                     const bytes = std.mem.sliceAsBytes(entry.tensor.data);
-                    try reader.readNoEof(bytes);
+                    try reader.interface.readNoEof(bytes);
                     break;
                 }
             } else {
@@ -270,7 +273,7 @@ pub const TinyWordTransformer = struct {
                 var remaining: usize = data_len;
                 while (remaining > 0) {
                     const to_read = @min(remaining, skip_buf.len);
-                    try reader.readNoEof(skip_buf[0..to_read]);
+                    try reader.interface.readNoEof(skip_buf[0..to_read]);
                     remaining -= to_read;
                 }
             }

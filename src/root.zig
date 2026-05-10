@@ -63,15 +63,15 @@ pub const optim = struct {
 };
 
 // Stage 5 additions:
-// pub const tokenizer = struct {
-//     pub const vocab = @import("tokenizer/vocab.zig");
-//     pub const word = @import("tokenizer/word.zig");
-// };
-// pub const data = struct {
-//     pub const dataset = @import("data/dataset.zig");
-//     pub const windowing = @import("data/windowing.zig");
-//     pub const batcher = @import("data/batcher.zig");
-// };
+pub const tokenizer = struct {
+    pub const vocab = @import("tokenizer/vocab.zig");
+    pub const word = @import("tokenizer/word.zig");
+};
+pub const data = struct {
+    pub const dataset = @import("data/dataset.zig");
+    pub const windowing = @import("data/windowing.zig");
+    pub const batcher = @import("data/batcher.zig");
+};
 
 // Stage 7 additions:
 // pub const backend = @import("backend/backend.zig");
@@ -110,4 +110,11 @@ test {
     _ = optim.optimizer;
     _ = optim.sgd;
     _ = optim.adamw;
+
+    // Stage 5:
+    _ = tokenizer.vocab;
+    _ = tokenizer.word;
+    _ = data.dataset;
+    _ = data.windowing;
+    _ = data.batcher;
 }
