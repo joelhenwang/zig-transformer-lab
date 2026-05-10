@@ -28,6 +28,10 @@ const std = @import("std");
 const LabError = @import("../../core/errors.zig").LabError;
 const Shape = @import("../shape.zig").Shape;
 const Strides = @import("../shape.zig").Strides;
+// PR-iota: device-aware zerosLike/onesLike route to CUDA when the
+// template tensor is on GPU (backward seed allocation, gradient
+// accumulators, etc.).
+const cuda_dispatch = @import("../../backend/cuda/dispatch.zig");
 const computeStrides = @import("../shape.zig").computeStrides;
 const totalElements = @import("../shape.zig").totalElements;
 const Tensor = @import("../tensor.zig").Tensor;
@@ -60,6 +64,28 @@ pub fn full(allocator: std.mem.Allocator, shape: Shape, value: f32) !Tensor {
     const t = try Tensor.init(allocator, shape);
     @memset(t.data, value);
     return t;
+}
+
+/// Allocate a zero-filled tensor on the same device as `template`.
+/// Used by autograd for gradient accumulators: the gradient of a
+/// CUDA tensor must live on the same context as the tensor itself.
+pub fn zerosLike(allocator: std.mem.Allocator, template: Tensor) !Tensor {
+    if (template.device == .cuda) {
+        const ctx = template.storage.cuda.ctx;
+        return try cuda_dispatch.zerosOn(ctx, template.shape);
+    }
+    return try zeros(allocator, template.shape);
+}
+
+/// Allocate a ones-filled tensor on the same device as `template`.
+/// The CUDA path writes 0x3f800000 (f32 1.0 bit pattern) via
+/// cuMemsetD32_v2 — no kernel launch required for this simple fill.
+pub fn onesLike(allocator: std.mem.Allocator, template: Tensor) !Tensor {
+    if (template.device == .cuda) {
+        const ctx = template.storage.cuda.ctx;
+        return try cuda_dispatch.onesOn(ctx, template.shape);
+    }
+    return try ones(allocator, template.shape);
 }
 
 /// Create a tensor with values drawn from a normal distribution.

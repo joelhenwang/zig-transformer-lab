@@ -55,6 +55,8 @@ const ops_reduce = @import("../tensor/ops/reduce.zig");
 const ops_unary = @import("../tensor/ops/unary.zig");
 const ops_softmax = @import("../tensor/ops/softmax.zig");
 const ops_create = @import("../tensor/ops/create.zig");
+// PR-iota: backward.broadcastTo routes to CUDA when grad is on GPU.
+const cuda_dispatch = @import("../backend/cuda/dispatch.zig");
 
 const max_parent_grads = 2;
 pub const BackwardResult = [max_parent_grads]?*Tensor;
@@ -774,6 +776,9 @@ fn backwardEmbedding(
 /// Memory ownership:
 ///   Returns a new owned tensor. Caller must deinit.
 pub fn broadcastTo(allocator: std.mem.Allocator, tensor: Tensor, target: Shape) LabError!Tensor {
+    if (tensor.device == .cuda) {
+        return try cuda_dispatch.broadcastTo(tensor, target);
+    }
     // Same shape → return an owned copy (not a view) because callers
     // may deinit the source tensor, which would invalidate a view.
     // CRITICAL: must check contiguity before @memcpy. If the tensor

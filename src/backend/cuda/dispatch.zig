@@ -505,3 +505,265 @@ pub fn divBroadcast(a: Tensor, b: Tensor) LabError!Tensor {
     try launchBroadcastBinary(p.ctx, "elw_broadcast_div", p.a_buf, p.b_buf, p.out_buf, p.layout);
     return wrapContiguousOutput(p.out_buf, p.out_shape, a.requires_grad or b.requires_grad);
 }
+
+// ---------------------------------------------------------------------------
+// Reductions + broadcast-copy (PR-iota)
+// ---------------------------------------------------------------------------
+
+/// Fill `buf` with `n` copies of the 32-bit pattern `bits`. Used to
+/// zero-init reduction accumulators (bits=0) and to initialise
+/// onesLike tensors (bits=0x3f800000 for 1.0f).
+fn fillBits(buf: DeviceBuffer, bits: u32, n: usize) LabError!void {
+    if (n == 0) return;
+    const L = bindings.loader.?;
+    try bindings.check(L.cuMemsetD32_v2(buf.ptr, bits, n));
+}
+
+/// Allocate a fresh CUDA Tensor of the given shape on `ctx`, initialised
+/// to zero via cuMemsetD32_v2.
+pub fn zerosOn(ctx: *const CudaContext, s: Shape) LabError!Tensor {
+    const n = totalElements(s);
+    var out_buf = try DeviceBuffer.alloc(ctx, n);
+    errdefer out_buf.deinit();
+    try fillBits(out_buf, 0, n);
+    return wrapContiguousOutput(out_buf, s, false);
+}
+
+/// Allocate a fresh CUDA Tensor of the given shape on `ctx`, initialised
+/// to 1.0. The bit pattern of f32 1.0 is 0x3f800000; cuMemsetD32_v2
+/// writes the same 4-byte pattern to every element, which is a valid
+/// (and fast) way to fill a float buffer with a constant.
+pub fn onesOn(ctx: *const CudaContext, s: Shape) LabError!Tensor {
+    const n = totalElements(s);
+    var out_buf = try DeviceBuffer.alloc(ctx, n);
+    errdefer out_buf.deinit();
+    const one_bits: u32 = @bitCast(@as(f32, 1.0));
+    try fillBits(out_buf, one_bits, n);
+    return wrapContiguousOutput(out_buf, s, false);
+}
+
+/// Whole-tensor sum to a 1-element Tensor. Uses atomicAdd; result is
+/// within a few ULPs of a deterministic tree sum, which is well
+/// inside oracle tolerances.
+///
+/// Only contiguous inputs are supported (which matches our backward
+/// call sites: gradients are freshly-contiguous).
+pub fn sumAll(x: Tensor) LabError!Tensor {
+    if (!shape_isContiguous(x.shape, x.strides)) return error.InvalidLayout;
+    const x_buf = try requireCudaBuffer(x);
+    const ctx = x_buf.ctx;
+    const mut_ctx: *CudaContext = @constCast(ctx);
+
+    const n = totalElements(x.shape);
+    // Output is a 1-element scalar tensor. Pre-zero via memset so
+    // atomicAdd accumulates into 0, not undefined memory.
+    var out_buf = try DeviceBuffer.alloc(ctx, 1);
+    errdefer out_buf.deinit();
+    try fillBits(out_buf, 0, 1);
+
+    const kfn = try module.getKernel(mut_ctx, "reduce", "reduce_sum_all");
+    const n_arg: c_uint = @intCast(n);
+    const args = [_]?*anyopaque{
+        @constCast(@as(*const anyopaque, @ptrCast(&x_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&out_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&n_arg))),
+    };
+    const grid_x: c_uint = @intCast((n + BLOCK_X - 1) / BLOCK_X);
+    try module.launch(
+        mut_ctx,
+        kfn,
+        .{ grid_x, 1, 1 },
+        .{ BLOCK_X, 1, 1 },
+        0,
+        &args,
+    );
+    return wrapContiguousOutput(out_buf, Shape.init1D(1), x.requires_grad);
+}
+
+/// Sum along a single axis of a contiguous input. Output shape
+/// matches input with `dims[axis] = 1`.
+pub fn sumAxis(x: Tensor, axis: u2) LabError!Tensor {
+    if (!shape_isContiguous(x.shape, x.strides)) return error.InvalidLayout;
+    const axis_u: usize = @intCast(axis);
+    if (axis_u >= x.shape.ndim()) return error.InvalidArgument;
+    const x_buf = try requireCudaBuffer(x);
+    const ctx = x_buf.ctx;
+    const mut_ctx: *CudaContext = @constCast(ctx);
+
+    const ndim = x.shape.ndim();
+    const axis_size = x.shape.dims[axis_u];
+    var inner_count: usize = 1;
+    {
+        var i = axis_u + 1;
+        while (i < ndim) : (i += 1) inner_count *= x.shape.dims[i];
+    }
+
+    var out_dims = x.shape.dims;
+    out_dims[axis_u] = 1;
+    const out_shape = Shape{ .dims = out_dims, .rank = x.shape.rank };
+    const out_n = totalElements(out_shape);
+
+    var out_buf = try DeviceBuffer.alloc(ctx, out_n);
+    errdefer out_buf.deinit();
+
+    const kfn = try module.getKernel(mut_ctx, "reduce", "reduce_sum_axis");
+    const out_n_arg: c_uint = @intCast(out_n);
+    const axis_size_arg: c_uint = @intCast(axis_size);
+    const inner_arg: c_uint = @intCast(inner_count);
+    const args = [_]?*anyopaque{
+        @constCast(@as(*const anyopaque, @ptrCast(&x_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&out_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&out_n_arg))),
+        @constCast(@as(*const anyopaque, @ptrCast(&axis_size_arg))),
+        @constCast(@as(*const anyopaque, @ptrCast(&inner_arg))),
+    };
+    const grid_x: c_uint = @intCast((out_n + BLOCK_X - 1) / BLOCK_X);
+    try module.launch(
+        mut_ctx,
+        kfn,
+        .{ grid_x, 1, 1 },
+        .{ BLOCK_X, 1, 1 },
+        0,
+        &args,
+    );
+    return wrapContiguousOutput(out_buf, out_shape, x.requires_grad);
+}
+
+/// Rank-4 stride-aware broadcast copy: project input `x` onto
+/// output shape `target` using NumPy broadcasting rules. Handles
+/// scalar-to-tensor expansion, identity copy, and everything
+/// between.
+pub fn broadcastTo(x: Tensor, target: Shape) LabError!Tensor {
+    const x_buf = try requireCudaBuffer(x);
+    const ctx = x_buf.ctx;
+    const mut_ctx: *CudaContext = @constCast(ctx);
+
+    // Layout: 4D output dims (left-padded with 1s), effective strides
+    // for x that account for broadcast (size-1 or missing axis -> 0).
+    const out_ndim = target.ndim();
+    const pad = 4 - out_ndim;
+    var d: [4]c_uint = .{ 1, 1, 1, 1 };
+    var s: [4]c_int = .{ 0, 0, 0, 0 };
+    for (0..out_ndim) |i| {
+        d[i + pad] = @intCast(target.dims[i]);
+        s[i + pad] = effectiveStride(x, out_ndim, i);
+    }
+    const n = totalElements(target);
+
+    var out_buf = try DeviceBuffer.alloc(ctx, n);
+    errdefer out_buf.deinit();
+
+    const kfn = try module.getKernel(mut_ctx, "reduce", "bcast_copy");
+    const n_arg: c_uint = @intCast(n);
+    const args = [_]?*anyopaque{
+        @constCast(@as(*const anyopaque, @ptrCast(&x_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&out_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&n_arg))),
+        @constCast(@as(*const anyopaque, @ptrCast(&d[0]))),
+        @constCast(@as(*const anyopaque, @ptrCast(&d[1]))),
+        @constCast(@as(*const anyopaque, @ptrCast(&d[2]))),
+        @constCast(@as(*const anyopaque, @ptrCast(&d[3]))),
+        @constCast(@as(*const anyopaque, @ptrCast(&s[0]))),
+        @constCast(@as(*const anyopaque, @ptrCast(&s[1]))),
+        @constCast(@as(*const anyopaque, @ptrCast(&s[2]))),
+        @constCast(@as(*const anyopaque, @ptrCast(&s[3]))),
+    };
+    const grid_x: c_uint = @intCast((n + BLOCK_X - 1) / BLOCK_X);
+    try module.launch(
+        mut_ctx,
+        kfn,
+        .{ grid_x, 1, 1 },
+        .{ BLOCK_X, 1, 1 },
+        0,
+        &args,
+    );
+    return wrapContiguousOutput(out_buf, target, x.requires_grad);
+}
+
+/// Reduce `grad` to shape `target` by summing along axes where
+/// target was broadcast to grad's shape. Mirrors the CPU
+/// `ops_reduce.sumToShape` contract. Supports the three common
+/// cases used by backward:
+///   - grad.shape == target: identity DtoD copy via bcast_copy with
+///     all strides 0'd except for the real axes (effectively a
+///     contiguous gather).
+///   - grad has extra leading dims / size-1 target dims: sum each
+///     broadcast axis in rightmost-to-leftmost order.
+pub fn sumToShape(grad: Tensor, target: Shape) LabError!Tensor {
+    if (shape_equals(grad.shape, target)) {
+        // Identity case: use broadcastTo with matching shape (which
+        // produces a clean contiguous copy using the real strides).
+        return try broadcastTo(grad, target);
+    }
+
+    const grad_ndim = grad.shape.ndim();
+    const target_ndim = target.ndim();
+    const extra_dims = if (grad_ndim > target_ndim) grad_ndim - target_ndim else 0;
+
+    // Build a list of axes to sum, rightmost first so later axis
+    // indices stay valid as earlier axes collapse.
+    var axes_to_sum: [4]u2 = .{ 0, 0, 0, 0 };
+    var n_axes: usize = 0;
+    // Right-aligned size-1 target dims correspond to broadcast axes.
+    for (0..target_ndim) |ti| {
+        const grad_axis = extra_dims + ti;
+        const grad_dim = grad.shape.dims[grad_axis];
+        const target_dim = target.dims[ti];
+        if (target_dim == 1 and grad_dim > 1) {
+            axes_to_sum[n_axes] = @intCast(grad_axis);
+            n_axes += 1;
+        }
+    }
+    // Extra leading dims: always summed away.
+    for (0..extra_dims) |i| {
+        axes_to_sum[n_axes] = @intCast(i);
+        n_axes += 1;
+    }
+
+    // Sum rightmost axis first so our axis indices remain valid as
+    // we move. sumAxis keeps rank; we reshape at the end if the
+    // target has lower rank than grad.
+    var current = grad;
+    var owned = false;
+    var i: usize = n_axes;
+    while (i > 0) : (i -= 1) {
+        const axis = axes_to_sum[i - 1];
+        const summed = try sumAxis(current, axis);
+        if (owned) current.storage.deinit(undefined); // allocator unused on CUDA
+        current = summed;
+        owned = true;
+    }
+
+    // If target has lower rank than current, we need to reshape
+    // (squeeze the size-1 axes). For the add_broadcast_2d_1d case
+    // this means grad (2,3) -> sumAxis(0) -> (1,3) -> reshape to (3,).
+    if (!shape_equals(current.shape, target)) {
+        errdefer if (owned) current.storage.deinit(undefined);
+        const view = try reshapedView(current, target);
+        const reshaped = try broadcastTo(view, target);
+        if (owned) current.storage.deinit(undefined);
+        return reshaped;
+    }
+    return current;
+}
+
+/// View `x` with a new shape, preserving the contiguous element
+/// order. x must be contiguous and totalElements must match.
+fn reshapedView(x: Tensor, target: Shape) LabError!Tensor {
+    if (totalElements(x.shape) != totalElements(target)) return error.ShapeMismatch;
+    if (!shape_isContiguous(x.shape, x.strides)) return error.InvalidLayout;
+    var out = x;
+    out.shape = target;
+    out.strides = computeStrides(target);
+    out.storage = switch (x.storage) {
+        .cuda => |b| .{ .cuda = .{
+            .ctx = b.ctx,
+            .ptr = b.ptr,
+            .len = b.len,
+            .owned = false,
+        } },
+        .cpu => unreachable, // only called on CUDA tensors in sumToShape
+    };
+    out.owned = false;
+    return out;
+}

@@ -83,6 +83,10 @@ const backward_mod = @import("backward.zig");
 // source tensors have been freed. DeviceBuffer owns the CUdeviceptr
 // and routes deinit through cuMemFree_v2.
 const DeviceBuffer = @import("../backend/cuda/mem.zig").DeviceBuffer;
+// PR-ι: device-aware seed allocation for backward. onesLike routes
+// to a CUDA fill (cuMemsetD32_v2 with the 1.0 bit pattern) when the
+// loss tensor lives on GPU.
+const ops_create = @import("../tensor/ops/create.zig");
 
 // ---------------------------------------------------------------------------
 // Tape — the autograd engine
@@ -476,9 +480,8 @@ pub const Tape = struct {
         const loss_id = loss.tape_node orelse {
             // Loss has no tape node — it's a leaf with requires_grad
             // but no operations were recorded. Nothing to backprop.
-            // Create a gradient of 1.0 for it.
-            var grad = try Tensor.init(self.allocator, loss.shape);
-            grad.fill(1.0);
+            // Create a gradient of 1.0 for it on the same device.
+            const grad = try ops_create.onesLike(self.allocator, loss.*);
             const grad_ptr = try self.allocator.create(Tensor);
             grad_ptr.* = grad;
             try self.grad_map.put(loss.tape_node orelse 0, grad_ptr);
@@ -486,9 +489,11 @@ pub const Tape = struct {
             return;
         };
 
-        // Create the seed gradient for the loss node.
-        var seed = try Tensor.init(self.allocator, loss.shape);
-        seed.fill(1.0);
+        // Create the seed gradient for the loss node on the same
+        // device as the loss (PR-ι). Previously this was
+        // Tensor.init + fill(1.0), which silently allocated on CPU
+        // even when loss lived on CUDA.
+        const seed = try ops_create.onesLike(self.allocator, loss.*);
         const seed_ptr = try self.allocator.create(Tensor);
         seed_ptr.* = seed;
         try self.grad_map.put(loss_id, seed_ptr);

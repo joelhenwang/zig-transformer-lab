@@ -43,6 +43,7 @@ const Shape = lab.shape.Shape;
 const computeStrides = lab.shape.computeStrides;
 const oracle = lab.testing_utils.oracle;
 const ops_elementwise = lab.ops.elementwise;
+const ops_reduce = lab.ops.reduce;
 const Tape = lab.Tape;
 
 // -- Io plumbing (shared with oracle tests; see tests/integration_oracle.zig) -----
@@ -1150,4 +1151,199 @@ test "cuda dispatch mulBroadcast: (1,3) * (2,3) expands the size-1 axis" {
     // Expected: [2*1, 3*10, 5*100, 2*1000, 3*10000, 5*100000]
     const expected = [_]f32{ 2, 30, 500, 2000, 30000, 500000 };
     for (0..6) |i| try testing.expectEqual(expected[i], y_cpu.data[i]);
+}
+
+// ---------------------------------------------------------------------------
+// PR-iota: reductions (sumAll, sumAxis, broadcastTo, sumToShape)
+// ---------------------------------------------------------------------------
+
+test "cuda dispatch sumAll: contiguous input sums to scalar (oracle add_2d input_0)" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+
+    const alloc = testing.allocator;
+
+    // Reuse the add_2d input_0 fixture for a realistic sum check.
+    var x_cpu = try oracle.loadTensor(alloc, io, fixturePath("add_2d", "input_0.ztlt"));
+    defer x_cpu.deinit(alloc);
+
+    // CPU reference.
+    var cpu_sum: f32 = 0;
+    for (x_cpu.data) |v| cpu_sum += v;
+
+    var x_gpu = try x_cpu.toCuda(&ctx);
+    defer x_gpu.storage.deinit(alloc);
+
+    var s_gpu = try dispatch.sumAll(x_gpu);
+    defer s_gpu.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    var s_cpu = try s_gpu.toCpu(alloc);
+    defer s_cpu.deinit(alloc);
+    // atomicAdd ordering means we accept a small relative error.
+    try testing.expectApproxEqRel(cpu_sum, s_cpu.data[0], 1e-4);
+}
+
+test "cuda dispatch sumAxis: (2,3) axis=0 gives (1,3)" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+
+    const alloc = testing.allocator;
+    var x = try cudaFromSlice(&ctx, Shape.init2D(2, 3), &[_]f32{ 1, 2, 3, 4, 5, 6 });
+    defer x.storage.deinit(alloc);
+
+    var s = try dispatch.sumAxis(x, 0);
+    defer s.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    try testing.expectEqual(@as(usize, 2), s.shape.ndim());
+    try testing.expectEqual(@as(usize, 1), s.shape.dims[0]);
+    try testing.expectEqual(@as(usize, 3), s.shape.dims[1]);
+
+    var s_cpu = try s.toCpu(alloc);
+    defer s_cpu.deinit(alloc);
+    // columns: [1+4, 2+5, 3+6] = [5, 7, 9]
+    try testing.expectEqual(@as(f32, 5), s_cpu.data[0]);
+    try testing.expectEqual(@as(f32, 7), s_cpu.data[1]);
+    try testing.expectEqual(@as(f32, 9), s_cpu.data[2]);
+}
+
+test "cuda dispatch sumAxis: (2,3) axis=1 gives (2,1)" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+
+    const alloc = testing.allocator;
+    var x = try cudaFromSlice(&ctx, Shape.init2D(2, 3), &[_]f32{ 1, 2, 3, 4, 5, 6 });
+    defer x.storage.deinit(alloc);
+
+    var s = try dispatch.sumAxis(x, 1);
+    defer s.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    var s_cpu = try s.toCpu(alloc);
+    defer s_cpu.deinit(alloc);
+    // rows: [1+2+3, 4+5+6] = [6, 15]
+    try testing.expectEqual(@as(f32, 6), s_cpu.data[0]);
+    try testing.expectEqual(@as(f32, 15), s_cpu.data[1]);
+}
+
+test "cuda dispatch broadcastTo: scalar -> (2,3) produces an all-ones tensor" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+
+    const alloc = testing.allocator;
+    var scalar = try cudaFromSlice(&ctx, Shape.init1D(1), &[_]f32{7.5});
+    defer scalar.storage.deinit(alloc);
+
+    var out = try dispatch.broadcastTo(scalar, Shape.init2D(2, 3));
+    defer out.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    var out_cpu = try out.toCpu(alloc);
+    defer out_cpu.deinit(alloc);
+    for (0..6) |i| try testing.expectEqual(@as(f32, 7.5), out_cpu.data[i]);
+}
+
+test "cuda dispatch sumToShape: (2,3) -> (3,) collapses leading broadcasted dim" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+
+    const alloc = testing.allocator;
+    var grad = try cudaFromSlice(&ctx, Shape.init2D(2, 3), &[_]f32{ 1, 2, 3, 4, 5, 6 });
+    defer grad.storage.deinit(alloc);
+
+    var r = try dispatch.sumToShape(grad, Shape.init1D(3));
+    defer r.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    var r_cpu = try r.toCpu(alloc);
+    defer r_cpu.deinit(alloc);
+    try testing.expectEqual(@as(usize, 3), r_cpu.data.len);
+    // columns: [1+4, 2+5, 3+6] = [5, 7, 9]
+    try testing.expectEqual(@as(f32, 5), r_cpu.data[0]);
+    try testing.expectEqual(@as(f32, 7), r_cpu.data[1]);
+    try testing.expectEqual(@as(f32, 9), r_cpu.data[2]);
+}
+
+test "cuda oracle add_2d: forward + backward parity via ops_elementwise.add" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+
+    const alloc = testing.allocator;
+
+    var a_cpu = try oracle.loadTensor(alloc, io, fixturePath("add_2d", "input_0.ztlt"));
+    defer a_cpu.deinit(alloc);
+    var b_cpu = try oracle.loadTensor(alloc, io, fixturePath("add_2d", "input_1.ztlt"));
+    defer b_cpu.deinit(alloc);
+    var expect_y = try oracle.loadTensor(alloc, io, fixturePath("add_2d", "output.ztlt"));
+    defer expect_y.deinit(alloc);
+    var expect_da = try oracle.loadTensor(alloc, io, fixturePath("add_2d", "grad_input_0.ztlt"));
+    defer expect_da.deinit(alloc);
+    var expect_db = try oracle.loadTensor(alloc, io, fixturePath("add_2d", "grad_input_1.ztlt"));
+    defer expect_db.deinit(alloc);
+
+    // Transfer to CUDA and mark requires_grad.
+    var a_gpu = try a_cpu.toCuda(&ctx);
+    defer a_gpu.storage.deinit(alloc);
+    a_gpu.requires_grad = true;
+    var b_gpu = try b_cpu.toCuda(&ctx);
+    defer b_gpu.storage.deinit(alloc);
+    b_gpu.requires_grad = true;
+
+    var tape = Tape.init(alloc);
+    defer tape.deinit();
+    _ = try tape.trackLeaf(&a_gpu);
+    _ = try tape.trackLeaf(&b_gpu);
+
+    // Forward.
+    var y = try ops_elementwise.add(alloc, a_gpu, b_gpu, &tape);
+    defer y.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    // Forward parity vs oracle.
+    {
+        var y_cpu = try y.toCpu(alloc);
+        defer y_cpu.deinit(alloc);
+        try oracle.expectClose(y_cpu, expect_y, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
+    }
+
+    // Loss = sumAll(y). Registers a reduction node on the tape.
+    var loss = try ops_reduce.sumAll(alloc, y, &tape);
+    defer loss.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    // Backward seeds grad[loss] = ones() on CUDA (via onesLike),
+    // walks back through the sum node -> broadcastTo -> grad_y =
+    // ones(y.shape), then through the add node -> sumToShape
+    // (identity for same-shape) -> grad_a = grad_b = ones(a.shape).
+    try tape.backward(&loss);
+    try ctx.synchronize();
+
+    // Read gradients back to host for parity.
+    var da_cpu = try a_gpu.grad.?.*.toCpu(alloc);
+    defer da_cpu.deinit(alloc);
+    var db_cpu = try b_gpu.grad.?.*.toCpu(alloc);
+    defer db_cpu.deinit(alloc);
+
+    try oracle.expectClose(da_cpu, expect_da, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
+    try oracle.expectClose(db_cpu, expect_db, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
 }

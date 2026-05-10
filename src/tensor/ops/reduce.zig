@@ -42,6 +42,8 @@ const Tape = @import("../../autograd/tape.zig").Tape;
 const Node = @import("../../autograd/node.zig").Node;
 const OpKind = @import("../../autograd/node.zig").OpKind;
 const ops_shape = @import("shape_ops.zig");
+// PR-iota: reductions route to CUDA when input lives on GPU.
+const cuda_dispatch = @import("../../backend/cuda/dispatch.zig");
 
 /// Sum all elements along the given axis.
 ///
@@ -53,6 +55,23 @@ const ops_shape = @import("shape_ops.zig");
 ///                     [15]]         shape (2,1)
 pub fn sum(allocator: std.mem.Allocator, tensor: Tensor, axis: u2, tape: ?*Tape) !Tensor {
     if (@as(usize, axis) >= tensor.shape.ndim()) return LabError.InvalidArgument;
+    if (tensor.device == .cuda) {
+        var out = try cuda_dispatch.sumAxis(tensor, axis);
+        if (tape) |t| {
+            if (tensor.requires_grad) {
+                const node_id = try t.record(Node{
+                    .id = undefined,
+                    .op = .sum,
+                    .parents = .{ tensor.tape_node, null },
+                    .n_parents = 1,
+                    .saved = .{ .reduce_info = .{ .shape = tensor.shape, .axis = axis } },
+                });
+                out.requires_grad = true;
+                out.tape_node = node_id;
+            }
+        }
+        return out;
+    }
 
     // Output shape is the same as input, but the reduced axis has dim=1
     var out_dims = tensor.shape.dims;
@@ -173,6 +192,23 @@ pub fn max(allocator: std.mem.Allocator, tensor: Tensor, axis: u2) !Tensor {
 /// If a tape is provided and the input requires_grad, records a .sum
 /// node so backward can broadcast the gradient back to the input shape.
 pub fn sumAll(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) !Tensor {
+    if (tensor.device == .cuda) {
+        var out = try cuda_dispatch.sumAll(tensor);
+        if (tape) |t| {
+            if (tensor.requires_grad) {
+                const node_id = try t.record(Node{
+                    .id = undefined,
+                    .op = .sum,
+                    .parents = .{ tensor.tape_node, null },
+                    .n_parents = 1,
+                    .saved = .{ .reduce_info = .{ .shape = tensor.shape, .axis = 0 } },
+                });
+                out.tape_node = node_id;
+                out.requires_grad = true;
+            }
+        }
+        return out;
+    }
     const out_shape = Shape.init1D(1);
     var out = try Tensor.init(allocator, out_shape);
     var acc: f32 = 0.0;
@@ -231,6 +267,9 @@ pub fn sumAll(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) !Tenso
 ///   Returns a new owned tensor. Caller must deinit.
 ///   Caller must deinit the result.
 pub fn sumToShape(allocator: std.mem.Allocator, grad: Tensor, target: Shape) LabError!Tensor {
+    if (grad.device == .cuda) {
+        return try cuda_dispatch.sumToShape(grad, target);
+    }
     // Same shape → return an owned copy (not a view) because callers
     // may deinit the source tensor, which would invalidate a view.
     // CRITICAL: must check contiguity before @memcpy. If grad is a
