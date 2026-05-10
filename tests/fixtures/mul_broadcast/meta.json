@@ -1,0 +1,22 @@
+{
+  "backward_tol": 1e-05,
+  "description": "(2,3) * (2,1) broadcast; exercises saved-tensor_pair copy",
+  "forward_tol": 1e-05,
+  "loss": "sumAll",
+  "name": "mul_broadcast",
+  "op": "mul",
+  "output_shape": [
+    2,
+    3
+  ],
+  "shapes": [
+    [
+      2,
+      3
+    ],
+    [
+      2,
+      1
+    ]
+  ]
+}

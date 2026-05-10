@@ -1,0 +1,52 @@
+{
+  "cases": [
+    {
+      "backward_tol": 1e-05,
+      "forward_tol": 1e-05,
+      "name": "add_2d",
+      "op": "add"
+    },
+    {
+      "backward_tol": 1e-05,
+      "forward_tol": 1e-05,
+      "name": "add_broadcast_2d_1d",
+      "op": "add"
+    },
+    {
+      "backward_tol": 1e-05,
+      "forward_tol": 1e-05,
+      "name": "mul_broadcast",
+      "op": "mul"
+    },
+    {
+      "backward_tol": 0.0001,
+      "forward_tol": 0.0001,
+      "name": "matmul_2d",
+      "op": "matmul"
+    },
+    {
+      "backward_tol": 0.0001,
+      "forward_tol": 5e-05,
+      "name": "softmax_3d_last_axis",
+      "op": "softmax"
+    },
+    {
+      "backward_tol": 0.0001,
+      "forward_tol": 0.0001,
+      "name": "cross_entropy_3d",
+      "op": "cross_entropy"
+    },
+    {
+      "backward_tol": 0.0001,
+      "forward_tol": 5e-05,
+      "name": "gelu_2d",
+      "op": "gelu_exact"
+    },
+    {
+      "backward_tol": 0.0002,
+      "forward_tol": 5e-05,
+      "name": "layernorm_3d",
+      "op": "layernorm"
+    }
+  ]
+}

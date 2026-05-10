@@ -78,6 +78,11 @@ pub const data = struct {
 // Stage 6 additions:
 pub const lab = @import("lab/train.zig");
 
+// Test-only utilities (PyTorch oracle parity, etc.):
+pub const testing_utils = struct {
+    pub const oracle = @import("testing/oracle.zig");
+};
+
 // Stage 7 additions:
 // pub const backend = @import("backend/backend.zig");
 
@@ -125,4 +130,7 @@ test {
 
     // Stage 6:
     _ = lab;
+
+    // Oracle + testing utilities (PR post-6.5):
+    _ = testing_utils.oracle;
 }

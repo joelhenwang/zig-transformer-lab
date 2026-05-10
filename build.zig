@@ -60,6 +60,34 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_cuda_tests.step);
     }
 
+    // --- Oracle parity tests ---
+    // Compares our CPU ops against PyTorch-generated fixtures under
+    // tests/fixtures/. The fixtures must be generated first with:
+    //
+    //   python tools/oracle.py generate
+    //
+    // The test step is separate (`zig build test-oracle`) rather than
+    // folded into the main test step so that a fresh clone without
+    // fixtures does not fail the default test run. Once fixtures are
+    // present, `zig build test-oracle` exercises them.
+    const oracle_test_step = b.step("test-oracle", "Run PyTorch oracle parity tests (requires tests/fixtures/)");
+    const oracle_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/integration_oracle.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zig_transformer_lab", .module = lib_mod },
+        },
+    });
+    const oracle_tests = b.addTest(.{
+        .root_module = oracle_test_mod,
+    });
+    const run_oracle_tests = b.addRunArtifact(oracle_tests);
+    // Run from the repo root so relative paths like "tests/fixtures/..."
+    // resolve correctly regardless of where the user invoked the build.
+    run_oracle_tests.setCwd(b.path("."));
+    oracle_test_step.dependOn(&run_oracle_tests.step);
+
     // --- Kernel compilation step ---
     // Compiles each .cu file under src/backend/cuda/kernels/ to zig-out/ptx/<name>.ptx
     // using nvcc. Only runs when -Dcuda=true. When no .cu files exist yet, this is

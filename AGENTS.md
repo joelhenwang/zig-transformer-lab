@@ -39,6 +39,30 @@ Exit criteria:
 
 Only after this gate passes may Stage 7 CUDA wrapper work begin.
 
+## PyTorch oracle (post-6.5, CPU safety net before Stage 7)
+
+A PyTorch reference-implementation harness ships alongside Stage 6.5
+as a CPU safety net. It is **not** a Stage 7 dependency — Stage 7 can
+start without it — but we chose to add it before CUDA so we have a
+known-correct CPU baseline to compare against.
+
+Components:
+
+- `tools/oracle.py` — generates `.ztlt` binary fixtures from PyTorch
+- `src/testing/oracle.zig` — Zig loader + `expectClose` comparator
+- `tests/integration_oracle.zig` — one test per case
+- `tests/fixtures/*` — checked-in binary fixtures (~7 KB total)
+- `docs/oracle.md` — workflow reference
+
+Build step: `zig build test-oracle` (separate from `zig build test`
+so a fresh clone without regenerated fixtures still has a green
+default suite).
+
+Current cases (8): `add_2d`, `add_broadcast_2d_1d`, `mul_broadcast`,
+`matmul_2d`, `softmax_3d_last_axis`, `cross_entropy_3d`, `gelu_2d`,
+`layernorm_3d`. All pass on Windows as of the commit that introduced
+them. See `docs/oracle.md` for how to add new cases.
+
 ## Hard rules
 
 - Do not violate Locked Decisions D1 through D14 or policies P1 through P4.

@@ -1,0 +1,22 @@
+{
+  "backward_tol": 1e-05,
+  "description": "(2,3) + (2,3) elementwise, no broadcast",
+  "forward_tol": 1e-05,
+  "loss": "sumAll",
+  "name": "add_2d",
+  "op": "add",
+  "output_shape": [
+    2,
+    3
+  ],
+  "shapes": [
+    [
+      2,
+      3
+    ],
+    [
+      2,
+      3
+    ]
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "backward_tol": 0.0001,
+  "description": "(4,5) @ (5,3) asymmetric \u2014 catches row/col-major bugs",
+  "forward_tol": 0.0001,
+  "loss": "sumAll",
+  "name": "matmul_2d",
+  "op": "matmul",
+  "output_shape": [
+    4,
+    3
+  ],
+  "shapes": [
+    [
+      4,
+      5
+    ],
+    [
+      5,
+      3
+    ]
+  ]
+}

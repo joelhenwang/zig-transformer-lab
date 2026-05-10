@@ -1,0 +1,21 @@
+{
+  "backward_tol": 0.0001,
+  "description": "softmax over last dim of (2,3,4); max-subtraction stability",
+  "forward_tol": 5e-05,
+  "loss": "sumAll",
+  "name": "softmax_3d_last_axis",
+  "op": "softmax",
+  "output_shape": [
+    2,
+    3,
+    4
+  ],
+  "shapes": [
+    [
+      2,
+      3,
+      4
+    ]
+  ],
+  "softmax_axis": -1
+}

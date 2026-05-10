@@ -1,0 +1,19 @@
+{
+  "backward_tol": 0.0001,
+  "description": "exact (erf-based) GELU on (3,4); our geluExact",
+  "forward_tol": 5e-05,
+  "loss": "sumAll",
+  "name": "gelu_2d",
+  "op": "gelu_exact",
+  "output_shape": [
+    3,
+    4
+  ],
+  "shapes": [
+    [
+      3,
+      4
+    ]
+  ],
+  "variant": "exact (erf-based)"
+}

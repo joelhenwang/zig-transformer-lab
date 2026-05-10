@@ -1,0 +1,27 @@
+{
+  "backward_tol": 0.0002,
+  "description": "LayerNorm over last dim of (2,3,4); learnable gamma, beta",
+  "eps": 1e-05,
+  "forward_tol": 5e-05,
+  "loss": "sumAll",
+  "name": "layernorm_3d",
+  "op": "layernorm",
+  "output_shape": [
+    2,
+    3,
+    4
+  ],
+  "shapes": [
+    [
+      2,
+      3,
+      4
+    ],
+    [
+      4
+    ],
+    [
+      4
+    ]
+  ]
+}
