@@ -179,7 +179,7 @@ append an entry in Section 10.
 |---|---|---|---|---|
 | 1 | α | Dynamic loader smoke test (no kernels) | — | `[x]` 07bd274 |
 | 2 | β | `CudaContext` lifecycle (device, context, stream, cuBLAS) | α | `[x]` 3c409a1 |
-| 3 | γ | `DeviceBuffer` alloc/free/copy | β | `[x]` TBD |
+| 3 | γ | `DeviceBuffer` alloc/free/copy | β | `[x]` be977ea (+6b918e6 fix) |
 | 4 | δ | Tensor `Storage.cuda` variant | γ | `[ ]` |
 | 5 | ε | `Tensor.toCuda` / `toCpu` + roundtrip | δ | `[ ]` |
 | 6 | ζ | PTX loader + vector-add smoke kernel | β | `[ ]` |
@@ -1662,7 +1662,7 @@ Appended to as PRs land. Format: `- [x] PR-X — <scope> (commit HASH, YYYY-MM-D
 ```
 - [x] PR-α — CUDA dynamic loader smoke test (07bd274, 2026-05-10) — 3/3 pass on RTX 4060 Ti, CUDA 13.2 (driver 13020)
 - [x] PR-β — CudaContext lifecycle (3c409a1, 2026-05-10) — 6/6 pass on RTX 4060 Ti, compute-sanitizer clean
-- [x] PR-γ — DeviceBuffer alloc/free/copy (TBD, 2026-05-10) — 12/12 pass on RTX 4060 Ti
+- [x] PR-γ — DeviceBuffer alloc/free/copy (be977ea + fix 6b918e6, 2026-05-10) — 12/12 pass on RTX 4060 Ti, compute-sanitizer clean (0 leaks, 0 errors)
 - [ ] PR-δ — Tensor Storage.cuda variant
 - [ ] PR-ε — Tensor.toCuda / toCpu
 - [ ] PR-ζ — PTX loader + vector-add smoke kernel
