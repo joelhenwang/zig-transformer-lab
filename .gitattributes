@@ -9,6 +9,12 @@
 *.sh    text eol=lf
 *.py    text eol=lf
 
+# CUDA C kernels are processed by nvcc on Linux; keep them LF so that
+# the #line and __FILE__ directives in error messages match the
+# source on disk. nvcc tolerates CRLF, but the consistency is nice.
+*.cu    text eol=lf
+*.cuh   text eol=lf
+
 # Binary fixtures for the PyTorch oracle. Marked binary so git does
 # not attempt text diffs or line-ending normalisation.
 *.ztlt  binary

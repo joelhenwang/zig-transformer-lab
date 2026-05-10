@@ -33,12 +33,30 @@ const lab = @import("zig_transformer_lab");
 const bindings = lab.backend.cuda.bindings;
 const context = lab.backend.cuda.context;
 const mem = lab.backend.cuda.mem;
+const module = lab.backend.cuda.module;
 const CudaContext = context.CudaContext;
 const DeviceBuffer = mem.DeviceBuffer;
 const Tensor = lab.Tensor;
 const Storage = lab.Storage;
 const Shape = lab.shape.Shape;
 const computeStrides = lab.shape.computeStrides;
+
+// -- Io plumbing (shared with oracle tests; see tests/integration_oracle.zig) -----
+//
+// PR-zeta and later need file I/O to read zig-out/ptx/<stem>.ptx at
+// runtime. The file-reading API in Zig 0.16 takes a `std.Io`
+// parameter; we construct a single `std.Io.Threaded` instance per
+// test process and reuse it across tests.
+
+fn testIo() !std.Io {
+    const T = struct {
+        var instance: ?std.Io.Threaded = null;
+    };
+    if (T.instance == null) {
+        T.instance = std.Io.Threaded.init(testing.allocator, .{});
+    }
+    return T.instance.?.io();
+}
 
 // ---------------------------------------------------------------------------
 // PR-alpha: dynamic loader smoke tests
@@ -515,4 +533,185 @@ test "cuda Tensor.toCuda preserves requires_grad and param_id" {
     // grad and tape_node are reset on transfer (see toCuda doc comment).
     try testing.expect(gpu.grad == null);
     try testing.expect(gpu.tape_node == null);
+}
+
+// ---------------------------------------------------------------------------
+// PR-zeta: PTX loader + vector_add smoke kernel
+// ---------------------------------------------------------------------------
+
+test "cuda PTX loader: loadPtxFromFile caches modules by stem" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+
+    // First call reads from disk + cuModuleLoadData; second call must
+    // hit the cache (identical handle, no extra allocation in the map).
+    const m1 = try module.loadPtxFromFile(&ctx, io, "vector_add");
+    try testing.expectEqual(@as(usize, 1), ctx.ptx_modules.count());
+    const m2 = try module.loadPtxFromFile(&ctx, io, "vector_add");
+    try testing.expectEqual(m1, m2);
+    try testing.expectEqual(@as(usize, 1), ctx.ptx_modules.count());
+}
+
+test "cuda PTX loader: getKernel resolves extern C symbol" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+
+    _ = try module.loadPtxFromFile(&ctx, io, "vector_add");
+    const kfn = try module.getKernel(&ctx, "vector_add", "vector_add");
+    try testing.expect(kfn != null);
+}
+
+test "cuda PTX loader: getKernel on a missing kernel name returns CudaError" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+
+    _ = try module.loadPtxFromFile(&ctx, io, "vector_add");
+    try testing.expectError(
+        error.CudaError,
+        module.getKernel(&ctx, "vector_add", "nonexistent_kernel_xyz"),
+    );
+}
+
+test "cuda vector_add kernel: 1024 f32 elementwise add matches CPU reference" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+
+    _ = try module.loadPtxFromFile(&ctx, io, "vector_add");
+    const kfn = try module.getKernel(&ctx, "vector_add", "vector_add");
+
+    const N: usize = 1024;
+    const a_host = try testing.allocator.alloc(f32, N);
+    defer testing.allocator.free(a_host);
+    const b_host = try testing.allocator.alloc(f32, N);
+    defer testing.allocator.free(b_host);
+
+    // Seeded deterministic inputs. Mix of positive, negative, and
+    // zero values to exercise sign handling; avoid values near the
+    // f32 precision edge so the CPU reference is bit-identical to
+    // the GPU result (FADD on sm_89 is IEEE-compliant without
+    // --use_fast_math).
+    var rng = std.Random.DefaultPrng.init(0xC0FFEE);
+    const r = rng.random();
+    for (0..N) |i| {
+        a_host[i] = (r.float(f32) - 0.5) * 100.0;
+        b_host[i] = (r.float(f32) - 0.5) * 100.0;
+    }
+
+    var buf_a = try DeviceBuffer.fromHost(&ctx, a_host);
+    defer buf_a.deinit();
+    var buf_b = try DeviceBuffer.fromHost(&ctx, b_host);
+    defer buf_b.deinit();
+    var buf_c = try DeviceBuffer.alloc(&ctx, N);
+    defer buf_c.deinit();
+
+    // Kernel argument packing: cuLaunchKernel wants an array of
+    // pointers, one per argument. Each pointer must outlive the call.
+    // We pack locals here and pass addresses into the params array.
+    //
+    // The CUdeviceptr values must be passed BY POINTER even though
+    // they are already integer handles, because cuLaunchKernel reads
+    // each parameter's *bytes* by dereferencing the pointer in the
+    // kernelParams array.
+    const n_arg: c_uint = @intCast(N);
+    const args = [_]?*anyopaque{
+        @constCast(@as(*const anyopaque, @ptrCast(&buf_a.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&buf_b.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&buf_c.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&n_arg))),
+    };
+
+    // 1D launch: block size 256, grid size ceil(N / 256). Matches the
+    // standard pattern documented in the module.zig header.
+    const block_x: c_uint = 256;
+    const grid_x: c_uint = @intCast((N + 255) / 256);
+    try module.launch(
+        &ctx,
+        kfn,
+        .{ grid_x, 1, 1 },
+        .{ block_x, 1, 1 },
+        0,
+        &args,
+    );
+    // Sync so any async kernel error surfaces here, at the launch site.
+    try ctx.synchronize();
+
+    // Copy result back and compare element-wise with CPU reference.
+    const c_host = try testing.allocator.alloc(f32, N);
+    defer testing.allocator.free(c_host);
+    try buf_c.copyToHost(c_host);
+
+    for (0..N) |i| {
+        const expected = a_host[i] + b_host[i];
+        try testing.expectEqual(expected, c_host[i]);
+    }
+}
+
+test "cuda vector_add kernel: bounds check prevents OOB for N not divisible by block size" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+
+    _ = try module.loadPtxFromFile(&ctx, io, "vector_add");
+    const kfn = try module.getKernel(&ctx, "vector_add", "vector_add");
+
+    // N = 1000 gives grid_x = ceil(1000/256) = 4 blocks of 256 threads
+    // each, covering 1024 threads — 24 of which have i >= N and must
+    // early-return without touching c[i]. This test is the PR-zeta
+    // gotcha backstop: a kernel without the bounds check would
+    // corrupt 24 bytes past c's end, which compute-sanitizer would
+    // catch but the test would otherwise miss.
+    const N: usize = 1000;
+    const a_host = try testing.allocator.alloc(f32, N);
+    defer testing.allocator.free(a_host);
+    const b_host = try testing.allocator.alloc(f32, N);
+    defer testing.allocator.free(b_host);
+    for (0..N) |i| {
+        a_host[i] = @floatFromInt(i);
+        b_host[i] = @floatFromInt(i * 2);
+    }
+
+    var buf_a = try DeviceBuffer.fromHost(&ctx, a_host);
+    defer buf_a.deinit();
+    var buf_b = try DeviceBuffer.fromHost(&ctx, b_host);
+    defer buf_b.deinit();
+    var buf_c = try DeviceBuffer.alloc(&ctx, N);
+    defer buf_c.deinit();
+
+    const n_arg: c_uint = @intCast(N);
+    const args = [_]?*anyopaque{
+        @constCast(@as(*const anyopaque, @ptrCast(&buf_a.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&buf_b.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&buf_c.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&n_arg))),
+    };
+
+    const block_x: c_uint = 256;
+    const grid_x: c_uint = @intCast((N + 255) / 256);
+    try module.launch(
+        &ctx,
+        kfn,
+        .{ grid_x, 1, 1 },
+        .{ block_x, 1, 1 },
+        0,
+        &args,
+    );
+    try ctx.synchronize();
+
+    const c_host = try testing.allocator.alloc(f32, N);
+    defer testing.allocator.free(c_host);
+    try buf_c.copyToHost(c_host);
+
+    for (0..N) |i| {
+        const expected = @as(f32, @floatFromInt(i)) + @as(f32, @floatFromInt(i * 2));
+        try testing.expectEqual(expected, c_host[i]);
+    }
 }

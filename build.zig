@@ -40,9 +40,25 @@ pub fn build(b: *std.Build) void {
     const run_unit_tests = b.addRunArtifact(unit_tests);
     test_step.dependOn(&run_unit_tests.step);
 
+    // --- Kernel compilation step ---
+    // Compiles each .cu file under src/backend/cuda/kernels/ to zig-out/ptx/<name>.ptx
+    // using nvcc. Only runs when -Dcuda=true AND the build target is Linux
+    // (nvcc is not installed on our Windows dev host; CUDA work happens
+    // on the remote RTX box per docs/stage7_plan.md). PR-zeta onward,
+    // the CUDA test step depends on this so that `zig build test -Dcuda=true`
+    // produces PTX automatically — the PTX loader in
+    // src/backend/cuda/module.zig reads zig-out/ptx/<stem>.ptx at
+    // runtime and would error.IoError without these files present.
+    //
+    // Declared BEFORE the CUDA test block so that block can attach a
+    // dependency on `kernel_step`.
+    const kernel_step = b.step("kernels", "Compile CUDA .cu kernels to PTX (only when -Dcuda=true)");
+    const kernels_enabled = cuda and target.result.os.tag == .linux;
+    if (kernels_enabled) {
+        buildKernels(b, kernel_step, cuda_arch, cuda_home);
+    }
+
     // CUDA integration tests: only compiled and run when -Dcuda=true.
-    // NOTE: Stage 7 not started. tests/integration_cuda.zig does not exist yet;
-    // enabling this flag today will fail at configure time with a missing file error.
     if (cuda) {
         const cuda_test_mod = b.createModule(.{
             .root_source_file = b.path("tests/integration_cuda.zig"),
@@ -57,6 +73,18 @@ pub fn build(b: *std.Build) void {
         });
         linkCudaRuntime(b, cuda_tests, target, cuda_home);
         const run_cuda_tests = b.addRunArtifact(cuda_tests);
+        // Run from the repo root so the PTX loader's relative path
+        // "zig-out/ptx/<stem>.ptx" resolves regardless of where the
+        // user invoked `zig build`.
+        run_cuda_tests.setCwd(b.path("."));
+        // PR-zeta: tests depend on kernels. This makes the test
+        // command self-sufficient: `zig build test -Dcuda=true`
+        // compiles .cu -> .ptx first, then runs the integration tests
+        // that load those .ptx files. Only wired on Linux — Windows
+        // doesn't have nvcc and the CUDA tests SkipZigTest there.
+        if (kernels_enabled) {
+            run_cuda_tests.step.dependOn(kernel_step);
+        }
         test_step.dependOn(&run_cuda_tests.step);
     }
 
@@ -87,15 +115,6 @@ pub fn build(b: *std.Build) void {
     // resolve correctly regardless of where the user invoked the build.
     run_oracle_tests.setCwd(b.path("."));
     oracle_test_step.dependOn(&run_oracle_tests.step);
-
-    // --- Kernel compilation step ---
-    // Compiles each .cu file under src/backend/cuda/kernels/ to zig-out/ptx/<name>.ptx
-    // using nvcc. Only runs when -Dcuda=true. When no .cu files exist yet, this is
-    // effectively a no-op because the kernel list is empty.
-    const kernel_step = b.step("kernels", "Compile CUDA .cu kernels to PTX (only when -Dcuda=true)");
-    if (cuda) {
-        buildKernels(b, kernel_step, cuda_arch, cuda_home);
-    }
 
     // --- Example runner ---
     // Usage: zig build run-example -Dexample=01_tensor_playground
@@ -176,7 +195,9 @@ fn linkCudaRuntime(
 /// As new kernels are added in Stage 7, add their names here.
 /// Each entry is the filename stem (without .cu extension).
 const kernel_names = [_][]const u8{
-    // Stage 7 will add:
+    // Stage 7 additions (PR-zeta onward):
+    "vector_add",
+    // Future PRs will add:
     // "elementwise",
     // "softmax",
     // "layernorm",
@@ -190,24 +211,28 @@ const kernel_names = [_][]const u8{
 /// Creates nvcc compile commands for each kernel in kernel_names,
 /// producing zig-out/ptx/<name>.ptx for each one.
 ///
+/// Linux-only (gated by the caller). Uses `mkdir -p` to ensure the
+/// output directory exists before nvcc runs; nvcc does not create
+/// parent directories on its own and would fail with "cannot write
+/// output" otherwise.
+///
 /// NOTE: `--use_fast_math` is intentionally NOT passed. Stage 7 correctness
 /// mode compares CUDA results against CPU element-wise within tight
 /// tolerances; fast math would relax those. A future performance mode may
 /// opt in via a separate `-Dcuda_fast_math=true` option.
 fn buildKernels(b: *std.Build, kernel_step: *std.Build.Step, cuda_arch: []const u8, cuda_home: []const u8) void {
+    if (kernel_names.len == 0) return;
+
     const nvcc_path = if (cuda_home.len > 0)
         b.fmt("{s}/bin/nvcc", .{cuda_home})
     else
         "nvcc";
 
-    // Ensure the PTX output directory exists. Cross-platform, no shell required.
-    // Failure is non-fatal: nvcc will surface the error when it tries to write
-    // its output file. We only try to create it if there are kernels to build.
-    if (kernel_names.len > 0) {
-        std.fs.cwd().makePath("zig-out/ptx") catch |err| {
-            std.debug.print("warning: could not create zig-out/ptx: {s}\n", .{@errorName(err)});
-        };
-    }
+    // Ensure the PTX output directory exists before any nvcc
+    // invocation. `mkdir -p` is idempotent and every nvcc command
+    // below depends on this step so it runs exactly once.
+    const mkdir_cmd = b.addSystemCommand(&.{ "mkdir", "-p", "zig-out/ptx" });
+    mkdir_cmd.setName("mkdir -p zig-out/ptx");
 
     for (kernel_names) |name| {
         const cu_src = b.fmt("src/backend/cuda/kernels/{s}.cu", .{name});
@@ -226,6 +251,7 @@ fn buildKernels(b: *std.Build, kernel_step: *std.Build.Step, cuda_arch: []const 
             cu_src,
         });
         cmd.setName(b.fmt("nvcc compile {s}.cu", .{name}));
+        cmd.step.dependOn(&mkdir_cmd.step);
         kernel_step.dependOn(&cmd.step);
     }
 }
