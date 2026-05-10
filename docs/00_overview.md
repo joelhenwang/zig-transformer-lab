@@ -48,17 +48,22 @@ Recommended order:
 2. **01_zig_primer.md** — Zig 0.16.0 concepts used throughout the library
 3. **02_tensors.md** — row-major layout, strides, broadcasting, softmax stability
 4. **02b_from_tensors_to_training.md** — bridges Stage 2 ops to ML/DL concepts, forward-pass trace, PyTorch equivalents
-5. **03_autograd.md** — tape-based reverse-mode autograd, matmul backward, fused CE
-6. **03b_from_autograd_to_training.md** — bridges Stage 3 autograd to ML/DL, backward trace through transformer, residual gradient flow, optimizer preview
-7. **04_nn.md** — Module protocol, parameter iteration, initialization strategies
-8. **04b_from_nn_to_training.md** — bridges Stage 4 nn/optim to ML/DL, full training step trace, optimizer math
-9. **05_transformer_math.md** — full shape trace for one transformer block
-10. **06_tokenizer_data.md** — word-level tokenizer, windowing, batching
-11. **07_cpu_training.md** — end-to-end CPU training loop, generation
-11b. **07b_learning_guide_training.md** — bridges Stage 6 code to ML/DL concepts
-12. **08_backends_cuda.md** — cuBLAS, PTX loading, kernel walk-throughs
-13. **09_debugging.md** — NaN hunting, compute-sanitizer, shape-assert workflow
-14. **10_pytorch_parallels.md** — mapping every concept back to PyTorch
+5. **02c_tensor_invariants.md** — the five structural invariants every Tensor must satisfy (Stage 6.5 / PR-γ)
+6. **02d_storage_and_views.md** — storage/view split, the Storage union, why []f32 can't represent CUDA memory (Stage 6.5 / PR-δ)
+7. **03_autograd.md** — tape-based reverse-mode autograd, matmul backward, fused CE
+8. **03b_from_autograd_to_training.md** — bridges Stage 3 autograd to ML/DL, backward trace through transformer, residual gradient flow, optimizer preview
+9. **03c_saved_tensors.md** — how the tape owns its own backward data; why keepAlive died (Stage 6.5 / PR-ε, flagship chapter)
+10. **04_nn.md** — Module protocol, parameter iteration, initialization strategies
+11. **04b_from_nn_to_training.md** — bridges Stage 4 nn/optim to ML/DL, full training step trace, optimizer math
+12. **05_transformer_math.md** — full shape trace for one transformer block
+13. **06_tokenizer_data.md** — word-level tokenizer, windowing, batching
+14. **07_cpu_training.md** — end-to-end CPU training loop, generation
+15. **07b_learning_guide_training.md** — bridges Stage 6 code to ML/DL concepts
+16. **07c_optimizer_state.md** — ParamId-keyed optimizer state (Stage 6.5 / PR-ζ)
+17. **07d_checkpoint_format.md** — the ZTLC v2 binary format (Stage 6.5 / PR-η)
+18. **08_backends_cuda.md** — cuBLAS, PTX loading, kernel walk-throughs (Stage 7)
+19. **09_debugging.md** — NaN hunting, compute-sanitizer, shape-assert workflow
+20. **10_pytorch_parallels.md** — mapping every concept back to PyTorch
 
 Each chapter ends with a "Common mistakes" section. Read it before you hit the bug.
 

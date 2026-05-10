@@ -16,24 +16,26 @@ Stage 6.5 consists of seven PRs, executed in order:
 
 | PR  | Scope                                                  | Status      |
 |-----|--------------------------------------------------------|-------------|
-| α   | Honesty pass + Windows-portable build                  | In progress |
-| β   | Fix strided elementwise ops and `copyTo`               | Pending     |
-| γ   | Tensor invariants + `LabError` expansion               | Pending     |
-| δ   | Storage union + offset field (CPU-only backend seam)   | Pending     |
-| ε   | Operation-owned `SavedTensor`; remove `keepAlive`      | Pending     |
-| ζ   | Stable `ParamId`-based optimizer state                 | Pending     |
-| η   | Strict checkpoint validation                            | Pending     |
+| α   | Honesty pass + Windows-portable build                  | Done (f9c1d3b) |
+| β   | Fix strided elementwise ops and `copyTo`               | Done (f9c1d3b) |
+| γ   | Tensor invariants + `LabError` expansion               | Done (f9c1d3b) |
+| δ   | Storage union + offset field (CPU-only backend seam)   | Done (f9c1d3b) |
+| ε   | Operation-owned `SavedTensor`; remove `keepAlive`      | Done (f9c1d3b) |
+| ζ   | Stable `ParamId`-based optimizer state                 | Done (f9c1d3b) |
+| η   | Strict checkpoint validation                            | Done (f9c1d3b) |
+| docs | Teaching chapters 02c, 02d, 03c, 07c, 07d             | Written (uncommitted) |
 
 Exit criteria:
 
-- README, AGENTS, docs agree that CUDA is not yet implemented.
-- Tensor invariants implemented and tested; zero dimensions rejected.
-- Storage/offset model exists; CUDA memory is never represented as `[]f32`.
-- Non-contiguous view behavior is correct or explicitly rejected per op.
-- Autograd saved data is operation-owned; no manual `keepAlive` in `src/nn/`.
-- Optimizer state keyed by stable `ParamId`, not by data pointer.
-- Checkpoint loading validates metadata strictly (magic, version, shape, dtype).
-- `zig build test` passes on Windows and Linux; exact output recorded.
+- README, AGENTS, docs agree that CUDA is not yet implemented. ✓
+- Tensor invariants implemented and tested; zero dimensions rejected. ✓
+- Storage/offset model exists; CUDA memory is never represented as `[]f32`. ✓
+- Non-contiguous view behavior is correct or explicitly rejected per op. ✓
+- Autograd saved data is operation-owned; no manual `keepAlive` in `src/nn/`. ✓
+- Optimizer state keyed by stable `ParamId`, not by data pointer. ✓
+- Checkpoint loading validates metadata strictly (magic, version, shape, dtype). ✓
+- `zig build test` passes on Windows and Linux; exact output recorded. ✓ (259 tests on Windows)
+- Teaching docs for each architectural PR exist under `docs/`. In progress.
 
 Only after this gate passes may Stage 7 CUDA wrapper work begin.
 
