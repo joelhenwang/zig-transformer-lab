@@ -127,8 +127,44 @@ pub fn sum(allocator: std.mem.Allocator, tensor: Tensor, axis: u2, tape: ?*Tape)
 }
 
 /// Mean along the given axis = sum / axis_size.
+///
+/// Device routing (Milestone 2):
+///   CUDA mean is composed as `sum(axis) / axis_size` via two kernel
+///   launches (reduce_sum_axis + mulScalar). A fused `reduce_mean_axis`
+///   kernel would save one launch but duplicate the row-reduction
+///   logic; defer that optimization to Stage 9 unless profiling
+///   shows the extra launch matters at our model scale.
 pub fn mean(allocator: std.mem.Allocator, tensor: Tensor, axis: u2, tape: ?*Tape) !Tensor {
     if (@as(usize, axis) >= tensor.shape.ndim()) return LabError.InvalidArgument;
+
+    if (tensor.device == .cuda) {
+        // sum(axis) first (does not record on the tape — we record
+        // `.mean` below ourselves).
+        var s = try cuda_dispatch.sumAxis(tensor, axis);
+        errdefer s.storage.deinit(allocator);
+        const axis_size = @as(f32, @floatFromInt(tensor.shape.dims[axis]));
+        const inv_n = 1.0 / axis_size;
+        var out = try cuda_dispatch.mulScalar(s, inv_n);
+        // `s` is an owning intermediate — free it now. mulScalar
+        // wrote a fresh contiguous output buffer.
+        s.storage.deinit(allocator);
+
+        if (tape) |t| {
+            if (tensor.requires_grad) {
+                const node_id = try t.record(Node{
+                    .id = undefined,
+                    .op = .mean,
+                    .parents = .{ tensor.tape_node, null },
+                    .n_parents = 1,
+                    .saved = .{ .reduce_info = .{ .shape = tensor.shape, .axis = axis } },
+                });
+                out.requires_grad = true;
+                out.tape_node = node_id;
+            }
+        }
+        return out;
+    }
+
     var out = try sum(allocator, tensor, axis, null);
     const axis_size = @as(f32, @floatFromInt(tensor.shape.dims[axis]));
     for (out.data) |*v| {

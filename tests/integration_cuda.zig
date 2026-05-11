@@ -2174,3 +2174,97 @@ test "cuda dispatch log: positive input matches CPU" {
         try testing.expectApproxEqAbs(expected, y_cpu.data[i], 1e-5);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Milestone 2 (cont.): meanAxis composition + oracle gelu_2d parity
+// ---------------------------------------------------------------------------
+
+test "cuda ops_reduce.mean: (2,3,4) axis=1 matches CPU reference" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+
+    const alloc = testing.allocator;
+
+    // Deterministic 24-element input arranged as (2,3,4).
+    var x_host: [24]f32 = undefined;
+    for (0..24) |i| x_host[i] = @floatFromInt(i);
+
+    var x_cpu = try Tensor.init(alloc, Shape.init3D(2, 3, 4));
+    defer x_cpu.deinit(alloc);
+    @memcpy(x_cpu.data, &x_host);
+
+    var x_gpu = try x_cpu.toCuda(&ctx);
+    defer x_gpu.storage.deinit(alloc);
+
+    // CPU reference: same tape-free call.
+    var y_ref = try ops_reduce.mean(alloc, x_cpu, 1, null);
+    defer y_ref.deinit(alloc);
+
+    var y_gpu = try ops_reduce.mean(alloc, x_gpu, 1, null);
+    defer y_gpu.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    var y_back = try y_gpu.toCpu(alloc);
+    defer y_back.deinit(alloc);
+
+    try oracle.expectClose(y_back, y_ref, .{ .rel_tol = 1e-5, .abs_tol = 1e-6 });
+}
+
+test "cuda ops_unary.geluExact: oracle gelu_2d forward + backward parity" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "unary");
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+
+    const alloc = testing.allocator;
+
+    // Oracle fixture: a (3, 4) tensor, forward is exact erf-based GELU,
+    // loss = sumAll(y), grad w.r.t. a is stored in grad_input_0.ztlt.
+    var a_cpu = try oracle.loadTensor(alloc, io, fixturePath("gelu_2d", "input_0.ztlt"));
+    defer a_cpu.deinit(alloc);
+    var expect_y = try oracle.loadTensor(alloc, io, fixturePath("gelu_2d", "output.ztlt"));
+    defer expect_y.deinit(alloc);
+    var expect_da = try oracle.loadTensor(alloc, io, fixturePath("gelu_2d", "grad_input_0.ztlt"));
+    defer expect_da.deinit(alloc);
+
+    var a_gpu = try a_cpu.toCuda(&ctx);
+    defer a_gpu.storage.deinit(alloc);
+    a_gpu.requires_grad = true;
+    a_gpu.param_id = 77;
+
+    var tape = Tape.init(alloc);
+    defer tape.deinit();
+    _ = try tape.trackLeaf(&a_gpu);
+
+    var y = try ops_unary.geluExact(alloc, a_gpu, &tape);
+    defer y.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    {
+        var y_back = try y.toCpu(alloc);
+        defer y_back.deinit(alloc);
+        // GELU drift between CUDA erff and CPU A&S polynomial is a
+        // few ULP per element — rel=1e-4 / abs=1e-5 absorbs it.
+        try oracle.expectClose(y_back, expect_y, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
+    }
+
+    var loss = try ops_reduce.sumAll(alloc, y, &tape);
+    defer loss.storage.deinit(alloc);
+    try tape.backward(&loss);
+    try ctx.synchronize();
+
+    var da_back = try a_gpu.grad.?.*.toCpu(alloc);
+    defer da_back.deinit(alloc);
+    // Backward composes gelu'(x) = phi(x) + x*pdf(x); same tolerance
+    // as forward since the backward is a straight elementwise apply
+    // of a smooth function. For `sumAll` loss, grad_out is all ones,
+    // so drift here is purely from gelu' vs the CPU reference.
+    try oracle.expectClose(da_back, expect_da, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
+}
