@@ -130,6 +130,13 @@ pub const OpKind = enum {
 
     // 3D inner transpose: (B, M, K) → (B, K, M), swaps dims[1] and dims[2]
     transpose_inner2d,
+
+    // 4D axis-1/2 transpose: (B, T, H, D) → (B, H, T, D), swaps
+    // dims[1] and dims[2]. Added in Stage 8 M4 to support multi-head
+    // attention, where Q/K/V are reshaped to (B, T, H, d_head) and
+    // then permuted so head-axis can be folded into the batch
+    // dimension before batched matmul.
+    transpose_axes12_4d,
 };
 
 // ---------------------------------------------------------------------------
@@ -297,11 +304,13 @@ test "OpKind is exhaustive — all variants can be constructed" {
         .cross_entropy,
         .sqrt,
         .embedding,
+        .transpose_inner2d,
+        .transpose_axes12_4d,
     };
     // Just verify we can create and compare them
     try std.testing.expect(ops[0] == .add);
-    try std.testing.expect(ops[ops.len - 1] == .embedding);
-    try std.testing.expect(ops.len == 22);
+    try std.testing.expect(ops[ops.len - 1] == .transpose_axes12_4d);
+    try std.testing.expect(ops.len == 24);
 }
 
 test "Node construction — binary op" {

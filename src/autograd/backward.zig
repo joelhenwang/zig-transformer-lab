@@ -138,6 +138,9 @@ pub fn backward(
 
         // ----- 3D inner transpose -----
         .transpose_inner2d => try backwardTransposeInner2d(allocator, node, grad_output, &result),
+
+        // ----- 4D axis-1/2 transpose -----
+        .transpose_axes12_4d => try backwardTransposeAxes12_4d(allocator, node, grad_output, &result),
     }
 
     return result;
@@ -389,6 +392,27 @@ fn backwardTransposeInner2d(
             // Transpose the gradient's inner dims back.
             const grad_t = try ops_shape.transposeInner2d(grad_output.*);
             // Make contiguous copy matching the original input's shape.
+            const da = try ops_shape.reshapeTracked(allocator, grad_t, a.shape, null);
+            result[0] = try heapAlloc(allocator, da);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+/// transpose_axes12_4d(a: (B, T, H, D)) → (B, H, T, D)
+/// dL/da = transpose_axes12_4d(dL/dc)
+/// Same permutation applied twice returns the identity, so the
+/// backward is just another call to the same view-producing op.
+fn backwardTransposeAxes12_4d(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .tensor_ref => |a| {
+            const grad_t = try ops_shape.transposeAxes12_4d(grad_output.*);
+            // Materialise contiguous to match the original input's shape.
             const da = try ops_shape.reshapeTracked(allocator, grad_t, a.shape, null);
             result[0] = try heapAlloc(allocator, da);
         },

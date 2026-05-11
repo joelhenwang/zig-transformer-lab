@@ -347,7 +347,134 @@ pub fn transposeInner2dTracked(allocator: std.mem.Allocator, tensor: Tensor, tap
     return out;
 }
 
-// ---------------------------------------------------------------------------
+/// Swap axes 1 and 2 of a rank-4 tensor, returning a non-owning
+/// view. Used by multi-head attention to permute
+/// `(B, T, n_head, d_head)` to `(B, n_head, T, d_head)` (and the
+/// inverse permutation after the attention compute, since this
+/// operation is its own inverse).
+///
+/// Shape: (B, T, H, D) → (B, H, T, D)   [rank-4 only]
+///
+/// Worked example:
+///   // q shape (2, 4, 3, 8) → transposeAxes12_4d → view (2, 3, 4, 8)
+///   const qv = try transposeAxes12_4d(q);
+///   // qv.data.ptr == q.data.ptr (shared buffer)
+///
+/// Memory: returns a VIEW (owned=false). Caller must NOT deinit the
+/// returned tensor's data — only the original tensor owns it.
+pub fn transposeAxes12_4d(tensor: Tensor) LabError!Tensor {
+    if (tensor.shape.ndim() != 4) return error.InvalidArgument;
+
+    const d0 = tensor.shape.dims[0];
+    const d1 = tensor.shape.dims[1];
+    const d2 = tensor.shape.dims[2];
+    const d3 = tensor.shape.dims[3];
+
+    const new_shape = Shape.init4D(d0, d2, d1, d3);
+    return Tensor{
+        .data = tensor.data,
+        .shape = new_shape,
+        .strides = .{
+            .values = .{
+                tensor.strides.values[0], // B axis unchanged
+                tensor.strides.values[2], // new axis-1 reads old axis-2
+                tensor.strides.values[1], // new axis-2 reads old axis-1
+                tensor.strides.values[3], // d_head axis unchanged
+            },
+            .rank = new_shape.rank,
+        },
+        .dtype = tensor.dtype,
+        .device = tensor.device,
+        .owned = false,
+        .storage = tensor_mod.nonOwningStorage(tensor.storage),
+        .offset = tensor.offset,
+        .requires_grad = tensor.requires_grad,
+        .grad = tensor.grad,
+        .tape_node = tensor.tape_node,
+    };
+}
+
+/// Tracked variant of `transposeAxes12_4d`. Materialises a contiguous
+/// copy so the downstream matmul + reshape pipeline does not need to
+/// deal with non-unit strides, and records a `.transpose_axes12_4d`
+/// tape node so backward can apply the inverse permutation to the
+/// gradient.
+///
+/// The backward is trivially the same permutation again: applying
+/// the axis-1/2 swap twice returns the identity.
+///
+/// Shape: (B, T, H, D) → (B, H, T, D)   [rank-4 only]
+///
+/// Memory: caller owns the returned tensor; must call deinit(allocator).
+pub fn transposeAxes12_4dTracked(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!Tensor {
+    if (tensor.shape.ndim() != 4) return error.InvalidArgument;
+
+    const d0 = tensor.shape.dims[0];
+    const d1 = tensor.shape.dims[1];
+    const d2 = tensor.shape.dims[2];
+    const d3 = tensor.shape.dims[3];
+
+    // CUDA branch: take the non-contig view, then materialise
+    // contiguous via broadcastTo of the view's shape.
+    if (tensor.device == .cuda) {
+        const view = try transposeAxes12_4d(tensor);
+        var out = try cuda_dispatch.broadcastTo(view, view.shape);
+
+        if (tape) |t| {
+            if (tensor.requires_grad) {
+                const node_id = try t.record(Node{
+                    .id = undefined,
+                    .op = .transpose_axes12_4d,
+                    .parents = .{ tensor.tape_node, null },
+                    .n_parents = 1,
+                    .saved = .{ .tensor_ref = tensor },
+                });
+                out.requires_grad = true;
+                out.tape_node = node_id;
+            }
+        }
+        return out;
+    }
+
+    // CPU branch: element-by-element copy via strided reads. Writes
+    // a contiguous (d0, d2, d1, d3) output.
+    const new_shape = Shape.init4D(d0, d2, d1, d3);
+    var out = try Tensor.init(allocator, new_shape);
+    errdefer out.deinit(allocator);
+
+    for (0..d0) |ib| {
+        for (0..d1) |it| {
+            for (0..d2) |ih| {
+                for (0..d3) |id| {
+                    const in_offset = ib * tensor.strides.values[0] +
+                        it * tensor.strides.values[1] +
+                        ih * tensor.strides.values[2] +
+                        id * tensor.strides.values[3];
+                    // Output contiguous strides: (d2*d1*d3, d1*d3, d3, 1)
+                    const out_offset = ib * (d2 * d1 * d3) +
+                        ih * (d1 * d3) +
+                        it * d3 +
+                        id;
+                    out.data[out_offset] = tensor.data[in_offset];
+                }
+            }
+        }
+    }
+    if (tape) |t| {
+        if (tensor.requires_grad) {
+            const node_id = try t.record(Node{
+                .id = undefined,
+                .op = .transpose_axes12_4d,
+                .parents = .{ tensor.tape_node, null },
+                .n_parents = 1,
+                .saved = .{ .tensor_ref = tensor },
+            });
+            out.requires_grad = true;
+            out.tape_node = node_id;
+        }
+    }
+    return out;
+}// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

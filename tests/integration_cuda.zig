@@ -2671,7 +2671,7 @@ test "cuda CausalSelfAttention.forward: CPU vs CUDA parity" {
 
     const D: usize = 8;
     const T: usize = 4;
-    var attn_cpu = try CausalSelfAttention.init(alloc, D, T, true, &rng);
+    var attn_cpu = try CausalSelfAttention.init(alloc, D, 1, T, true, &rng);
     defer attn_cpu.deinit();
 
     var x_cpu = try lab.ops.create.randn(alloc, Shape.init3D(2, T, D), &rng, 0.0, 1.0);
@@ -2717,6 +2717,7 @@ test "cuda CausalSelfAttention.forward: CPU vs CUDA parity" {
         .w_o = w_o_gpu,
         .allocator = alloc,
         .d_model = D,
+        .n_head = 1,
         .causal_mask = mask_cpu_clone,
     };
 
@@ -2832,6 +2833,7 @@ test "cuda TransformerBlock.forward: CPU vs CUDA parity" {
             .w_o = o_gpu,
             .allocator = alloc,
             .d_model = cfg.d_model,
+            .n_head = cfg.n_head,
             .causal_mask = mask_cpu_clone,
         },
         .ln2 = LayerNorm{

@@ -67,7 +67,7 @@ pub const TransformerBlock = struct {
     ) LabError!TransformerBlock {
         var ln1 = try LayerNorm.init(allocator, cfg.d_model, cfg.ln_eps, rng);
         errdefer ln1.deinit();
-        var attn = try CausalSelfAttention.init(allocator, cfg.d_model, cfg.max_seq_len, cfg.bias, rng);
+        var attn = try CausalSelfAttention.init(allocator, cfg.d_model, cfg.n_head, cfg.max_seq_len, cfg.bias, rng);
         errdefer attn.deinit();
         var ln2 = try LayerNorm.init(allocator, cfg.d_model, cfg.ln_eps, rng);
         errdefer ln2.deinit();
