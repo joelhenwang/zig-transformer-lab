@@ -59,6 +59,12 @@ const Windowing = @import("../data/windowing.zig").Windowing;
 const Batcher = @import("../data/batcher.zig").Batcher;
 const crossEntropy = @import("../tensor/ops/loss.zig").crossEntropy;
 const ops_shape = @import("../tensor/ops/shape_ops.zig");
+// CUDA imports (used only when cfg.use_cuda = true). On non-Linux
+// platforms the CudaContext.init call fails at runtime with
+// LabError.CudaError; this import itself compiles on every platform
+// because bindings.zig is a pure dlopen shim.
+const CudaContext = @import("../backend/cuda/context.zig").CudaContext;
+const cuda_module = @import("../backend/cuda/module.zig");
 
 /// Callback for generating sample text. Receives step number.
 /// The caller can decode and print a few tokens.
@@ -168,6 +174,12 @@ pub const Trainer = struct {
     cfg: TrainConfig,
     data_rng: Rng,
     vocab_size: usize,
+    /// CUDA context, present iff `cfg.use_cuda == true`. Heap-allocated
+    /// so that the pointer stored on CUDA `DeviceBuffer` values (each
+    /// has a `ctx: *const CudaContext` field) remains valid after the
+    /// Trainer struct is returned by value from `init` and moved to
+    /// its final memory location in the caller.
+    ctx: ?*CudaContext,
 
     /// Initialize all training components: dataset, model, optimizer.
     ///
@@ -216,6 +228,43 @@ pub const Trainer = struct {
         var model = try TinyWordTransformer.init(allocator, model_cfg, &model_rng);
         errdefer model.deinit();
 
+        // --- CUDA setup (only if requested) ---
+        // We heap-allocate the context because the DeviceBuffer values
+        // stored on every model parameter after `moveToCuda` keep a
+        // `ctx: *const CudaContext` pointer. A stack-local ctx would
+        // dangle as soon as `init` returns.
+        var ctx_ptr: ?*CudaContext = null;
+        if (cfg.use_cuda) {
+            const ctx = try allocator.create(CudaContext);
+            errdefer allocator.destroy(ctx);
+            ctx.* = try CudaContext.init(allocator);
+            errdefer ctx.deinit();
+
+            // Load every PTX module the training step needs. Same
+            // list as examples/09_cuda_benchmark.zig. Missing a module
+            // here causes a CudaError on the first kernel launch.
+            const ptx_modules = [_][:0]const u8{
+                "elementwise",
+                "reduce",
+                "softmax",
+                "unary",
+                "embedding",
+                "ce_loss",
+                "adamw",
+            };
+            for (ptx_modules) |name| {
+                _ = try cuda_module.loadPtxFromFile(ctx, io, name);
+            }
+
+            // Move every parameter onto the device. After this point
+            // `model.forward(ids_cuda, tape)` is the only valid
+            // forward-call shape; the CPU overload will error on the
+            // first op dispatch.
+            try model.moveToCuda(ctx);
+
+            ctx_ptr = ctx;
+        }
+
         return Trainer{
             .allocator = allocator,
             .io = io,
@@ -226,6 +275,7 @@ pub const Trainer = struct {
             .cfg = cfg,
             .data_rng = data_rng,
             .vocab_size = V,
+            .ctx = ctx_ptr,
         };
     }
 
@@ -278,19 +328,36 @@ pub const Trainer = struct {
             };
             defer batch.deinit();
 
-            // --- Create input tensor (B, T) ---
-            var ids = try Tensor.init(allocator, Shape.init2D(B, T));
-            defer ids.deinit(allocator);
+            // --- Create input tensor (B, T) on host, then move to
+            //     device if CUDA training is enabled. The HtoD copy
+            //     is cheap (B*T * 4 bytes = 256 bytes at B=4, T=16)
+            //     relative to the kernel costs that dominate. ---
+            var ids_host = try Tensor.init(allocator, Shape.init2D(B, T));
+            defer ids_host.deinit(allocator);
             for (0..B * T) |i| {
-                ids.data[i] = @floatFromInt(batch.input[i]);
+                ids_host.data[i] = @floatFromInt(batch.input[i]);
             }
 
-            // --- Create target tensor (B*T,) ---
-            var targets = try Tensor.init(allocator, Shape.init1D(B * T));
-            defer targets.deinit(allocator);
+            // --- Create target tensor (B*T,) on host ---
+            var targets_host = try Tensor.init(allocator, Shape.init1D(B * T));
+            defer targets_host.deinit(allocator);
             for (0..B * T) |i| {
-                targets.data[i] = @floatFromInt(batch.target[i]);
+                targets_host.data[i] = @floatFromInt(batch.target[i]);
             }
+
+            // Owned CUDA copies when on-device; otherwise the host
+            // tensors are passed directly. The `active_*` aliases keep
+            // the rest of the loop device-agnostic.
+            var ids_cuda: ?Tensor = null;
+            var targets_cuda: ?Tensor = null;
+            defer if (ids_cuda) |*t| t.storage.deinit(allocator);
+            defer if (targets_cuda) |*t| t.storage.deinit(allocator);
+            if (self.ctx) |ctx| {
+                ids_cuda = try ids_host.toCuda(ctx);
+                targets_cuda = try targets_host.toCuda(ctx);
+            }
+            const ids = if (ids_cuda) |t| t else ids_host;
+            const targets = if (targets_cuda) |t| t else targets_host;
 
             // --- Fresh tape for this step ---
             var tape = Tape.init(allocator);
@@ -317,8 +384,18 @@ pub const Trainer = struct {
             // --- Compute loss ---
             var loss = try crossEntropy(allocator, logits, targets, &tape);
 
-            // Save loss value before freeing
-            const loss_val = loss.data[0];
+            // Save loss value before freeing. On CUDA we must DtoH-copy
+            // the scalar first; the `toCpu` call implicitly synchronises
+            // the default stream so pending forward kernels complete
+            // before the read.
+            const loss_val: f32 = blk: {
+                if (loss.device == .cuda) {
+                    var loss_cpu = try loss.toCpu(allocator);
+                    defer loss_cpu.deinit(allocator);
+                    break :blk loss_cpu.data[0];
+                }
+                break :blk loss.data[0];
+            };
 
             // --- Sample callback ---
             if (sample_fn) |sample| {
@@ -342,14 +419,33 @@ pub const Trainer = struct {
             //   1. Compute total_norm = sqrt(sum of squared L2 norms)
             //   2. clip_coeff = max_norm / total_norm
             //   3. If clip_coeff < 1, scale all gradients by clip_coeff
+            //
+            // On CUDA the grad buffers live in device memory, so the
+            // norm scan must DtoH-copy each grad into a scratch host
+            // buffer. If clipping fires, we scale on host and HtoD it
+            // back. For the 2/2/64 config this is ~40k f32s per step
+            // = 160 KB of HtoD/DtoH — well below the kernel-dispatch
+            // cost floor. A pure-GPU clip (reduce.sumSq -> mulScalar)
+            // is a clean Stage 9 optimisation.
             const max_norm = self.cfg.grad_clip_norm;
             var total_norm_sq: f64 = 0;
             if (max_norm > 0) {
                 for (params.items) |param| {
                     if (param.grad) |g| {
-                        for (g.data) |val| {
-                            const v: f64 = @floatCast(val);
-                            total_norm_sq += v * v;
+                        if (g.device == .cuda) {
+                            const n_elems = g.storage.len();
+                            const host_buf = try allocator.alloc(f32, n_elems);
+                            defer allocator.free(host_buf);
+                            try g.storage.cuda.copyToHost(host_buf);
+                            for (host_buf) |val| {
+                                const v: f64 = @floatCast(val);
+                                total_norm_sq += v * v;
+                            }
+                        } else {
+                            for (g.data) |val| {
+                                const v: f64 = @floatCast(val);
+                                total_norm_sq += v * v;
+                            }
                         }
                     }
                 }
@@ -360,8 +456,17 @@ pub const Trainer = struct {
                     if (clip_coeff < 1.0) {
                         for (params.items) |param| {
                             if (param.grad) |g| {
-                                for (g.data) |*val| {
-                                    val.* *= clip_coeff;
+                                if (g.device == .cuda) {
+                                    const n_elems = g.storage.len();
+                                    const host_buf = try allocator.alloc(f32, n_elems);
+                                    defer allocator.free(host_buf);
+                                    try g.storage.cuda.copyToHost(host_buf);
+                                    for (host_buf) |*v| v.* *= clip_coeff;
+                                    try g.storage.cuda.copyFromHost(host_buf);
+                                } else {
+                                    for (g.data) |*v| {
+                                        v.* *= clip_coeff;
+                                    }
                                 }
                             }
                         }
@@ -407,10 +512,21 @@ pub const Trainer = struct {
     }
 
     /// Free all training components.
+    ///
+    /// Deinit order matters on CUDA:
+    ///   1. `model.deinit` releases every parameter's `DeviceBuffer`
+    ///      via `cuMemFree_v2`. That call requires a live `ctx`.
+    ///   2. `ctx.deinit` tears down the CUDA context itself.
+    /// Reversing these would free device memory against a destroyed
+    /// context which silently corrupts the driver state.
     pub fn deinit(self: *Trainer) void {
         self.model.deinit();
         self.batcher.deinit();
         self.dataset.deinit();
+        if (self.ctx) |ctx| {
+            ctx.deinit();
+            self.allocator.destroy(ctx);
+        }
     }
 };
 
