@@ -196,6 +196,23 @@ pub const Tape = struct {
     ///
     /// After deinit, the tape is in an undefined state.
     pub fn deinit(self: *Tape) void {
+        // Before freeing the gradient tensors, null out every leaf's
+        // `grad` pointer — otherwise the parameter tensors outlive
+        // the tape with dangling pointers into freed gradients. The
+        // next training step's forward path reads `.grad` (via
+        // Tensor.transpose2d's view construction inheriting the
+        // parent's grad pointer, then checkInvariants dereferencing
+        // it) and crashes on freed memory.
+        //
+        // AdamW.zeroGrad could zero the grads, but that still leaves
+        // them allocated (a large-ish overhead per param per step).
+        // Clearing the leaf's pointer is a clean O(n_leaves) pass
+        // that matches the "tape owns gradient tensors" contract.
+        var leaf_iter = self.leaf_map.iterator();
+        while (leaf_iter.next()) |entry| {
+            entry.value_ptr.*.grad = null;
+        }
+
         // Free all gradient tensors we created during backward.
         var iter = self.grad_map.iterator();
         while (iter.next()) |entry| {
