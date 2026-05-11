@@ -459,6 +459,115 @@ def case_mean_axis_3d(dir: Path) -> dict:
     }
 
 
+def case_multihead_attention_3d(dir: Path) -> dict:
+    """
+    Multi-head causal self-attention on a (B, T, D) input.
+
+    Parity target for Stage 8 Milestone 4's multi-head
+    `CausalSelfAttention`. The reference composition here matches
+    the Zig pipeline exactly: Linear projections (with bias), reshape
+    + permute into (B*H, T, d_head), scaled dot-product with causal
+    mask, softmax, matmul with V, un-permute, output Linear.
+
+    We deliberately do NOT call
+    `torch.nn.functional.scaled_dot_product_attention` (which may
+    dispatch to flash-attention kernels that differ numerically).
+    Using explicit matmul + softmax makes the fixture reproducible
+    across PyTorch versions and matches our reference implementation.
+
+    Config: B=2, T=3, D=8, H=2 -> d_head=4. bias=True on all four
+    linears.
+    """
+    B, T, D, H = 2, 3, 8, 2
+    assert D % H == 0
+    d_head = D // H
+
+    x = make_randn((B, T, D), seed=1500, requires_grad=True)
+    w_q = make_randn((D, D), seed=1501, requires_grad=True)
+    b_q = make_randn((D,), seed=1502, requires_grad=True)
+    w_k = make_randn((D, D), seed=1503, requires_grad=True)
+    b_k = make_randn((D,), seed=1504, requires_grad=True)
+    w_v = make_randn((D, D), seed=1505, requires_grad=True)
+    b_v = make_randn((D,), seed=1506, requires_grad=True)
+    w_o = make_randn((D, D), seed=1507, requires_grad=True)
+    b_o = make_randn((D,), seed=1508, requires_grad=True)
+
+    # Q, K, V projections: y = x @ W^T + b (matches our Linear).
+    q = torch.nn.functional.linear(x, w_q, b_q)  # (B, T, D)
+    k = torch.nn.functional.linear(x, w_k, b_k)
+    v = torch.nn.functional.linear(x, w_v, b_v)
+
+    # Reshape + permute into heads: (B, T, D) -> (B, T, H, d_head)
+    # -> (B, H, T, d_head) -> (B*H, T, d_head).
+    def split_heads(t):
+        t = t.reshape(B, T, H, d_head)
+        t = t.permute(0, 2, 1, 3).contiguous()  # (B, H, T, d_head)
+        return t.reshape(B * H, T, d_head)
+
+    q_flat = split_heads(q)
+    k_flat = split_heads(k)
+    v_flat = split_heads(v)
+
+    # scores = Q_flat @ K_flat^T / sqrt(d_head).
+    scores = torch.bmm(q_flat, k_flat.transpose(-2, -1)) / (d_head ** 0.5)
+
+    # Causal mask: (1, T, T), -1e9 in upper triangle.
+    mask = torch.zeros(1, T, T)
+    for i in range(T):
+        for j in range(T):
+            if j > i:
+                mask[0, i, j] = -1e9
+    scores = scores + mask  # broadcast over B*H
+
+    weights = torch.softmax(scores, dim=-1)  # (B*H, T, T)
+    attn_out_flat = torch.bmm(weights, v_flat)  # (B*H, T, d_head)
+
+    # Un-permute: (B*H, T, d_head) -> (B, H, T, d_head) ->
+    # (B, T, H, d_head) -> (B, T, D).
+    attn_out = (
+        attn_out_flat.reshape(B, H, T, d_head)
+        .permute(0, 2, 1, 3)
+        .contiguous()
+        .reshape(B, T, D)
+    )
+
+    y = torch.nn.functional.linear(attn_out, w_o, b_o)  # (B, T, D)
+    y.sum().backward()
+
+    write_tensor(dir / "input_0.ztlt", x.detach())
+    write_tensor(dir / "input_1.ztlt", w_q.detach())
+    write_tensor(dir / "input_2.ztlt", b_q.detach())
+    write_tensor(dir / "input_3.ztlt", w_k.detach())
+    write_tensor(dir / "input_4.ztlt", b_k.detach())
+    write_tensor(dir / "input_5.ztlt", w_v.detach())
+    write_tensor(dir / "input_6.ztlt", b_v.detach())
+    write_tensor(dir / "input_7.ztlt", w_o.detach())
+    write_tensor(dir / "input_8.ztlt", b_o.detach())
+    write_tensor(dir / "output.ztlt", y.detach())
+    write_tensor(dir / "grad_input_0.ztlt", x.grad)
+    write_tensor(dir / "grad_input_1.ztlt", w_q.grad)
+    write_tensor(dir / "grad_input_2.ztlt", b_q.grad)
+    write_tensor(dir / "grad_input_3.ztlt", w_k.grad)
+    write_tensor(dir / "grad_input_4.ztlt", b_k.grad)
+    write_tensor(dir / "grad_input_5.ztlt", w_v.grad)
+    write_tensor(dir / "grad_input_6.ztlt", b_v.grad)
+    write_tensor(dir / "grad_input_7.ztlt", w_o.grad)
+    write_tensor(dir / "grad_input_8.ztlt", b_o.grad)
+    return {
+        "shapes": [
+            list(x.shape),
+            list(w_q.shape), list(b_q.shape),
+            list(w_k.shape), list(b_k.shape),
+            list(w_v.shape), list(b_v.shape),
+            list(w_o.shape), list(b_o.shape),
+        ],
+        "output_shape": list(y.shape),
+        "loss": "sumAll",
+        "B": B, "T": T, "D": D, "H": H, "d_head": d_head,
+        "bias": True,
+    }
+
+
 def case_full_model_forward(dir: Path) -> dict:
     """
     The headline end-to-end case: full TinyWordTransformer forward
@@ -705,6 +814,14 @@ CASES: list[CaseSpec] = [
         backward_tol=1e-5,
         description="mean over last axis of (2,3,4) with keepdim=True",
         build=case_mean_axis_3d,
+    ),
+    CaseSpec(
+        name="multihead_attention_3d",
+        op="attention",
+        forward_tol=1e-4,
+        backward_tol=5e-4,
+        description="multi-head causal self-attention (B=2, T=3, D=8, H=2); exercises reshape + permute + batched matmul + softmax + output projection",
+        build=case_multihead_attention_3d,
     ),
     CaseSpec(
         name="full_model_forward",

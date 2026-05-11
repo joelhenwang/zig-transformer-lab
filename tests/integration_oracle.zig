@@ -611,16 +611,32 @@ test "oracle full_model_forward: end-to-end TinyWordTransformer logits parity" {
     var params = std.ArrayList(NamedParam).empty;
     defer params.deinit(alloc);
     try model.collectNamedParams(&params);
+    defer model.freeBlockNames(&params);
 
     // For every named param, load its fixture and memcpy into the
     // model tensor's data. @memcpy on same-size slices is safe; the
     // load itself checks the file's shape against our tensor's
     // shape via the ZTLT header size.
+    //
+    // Stage 8 M3 renamed `block.*` -> `blocks[0].*`. The existing
+    // `full_model_forward` fixture was generated under the old
+    // names, so we rewrite our new names back to the fixture's
+    // on-disk naming at load time.
     for (params.items) |entry| {
+        // Rewrite `blocks[0].foo` back to `block.foo` so the fixture
+        // filenames match. For n_layer=1 models this is safe; for
+        // n_layer > 1 (not this test) the rewrite would collapse
+        // distinct blocks into one — but this case is single-block.
+        var fixture_name_buf: [300]u8 = undefined;
+        const fixture_name: []const u8 = if (std.mem.startsWith(u8, entry.name, "blocks[0]."))
+            try std.fmt.bufPrint(&fixture_name_buf, "block.{s}", .{entry.name["blocks[0].".len..]})
+        else
+            entry.name;
+
         const path = try std.fmt.allocPrint(
             alloc,
             "tests/fixtures/full_model_forward/param__{s}.ztlt",
-            .{entry.name},
+            .{fixture_name},
         );
         defer alloc.free(path);
 
@@ -653,4 +669,120 @@ test "oracle full_model_forward: end-to-end TinyWordTransformer logits parity" {
     // rounding compounds. 5e-4 absolute is still well under the
     // signal level for any reasonable logit.
     try oracle.expectClose(logits, expect_logits, .{ .rel_tol = 1e-3, .abs_tol = 5e-4 });
+}
+
+
+// -- Case: multihead_attention_3d -------------------------------------------
+//
+// Stage 8 Milestone 5. Parity target for the multi-head
+// `CausalSelfAttention` introduced in Milestone 4. The fixture uses
+// B=2, T=3, D=8, H=2 (d_head=4) with bias=true on all four Linears.
+//
+// Test flow: load the 9 input tensors (x + 4 * (W, b)), stuff them
+// into a CausalSelfAttention built with matching config, run forward,
+// run backward via sumAll loss, compare forward output and all 9
+// gradients.
+
+test "oracle multihead_attention_3d: forward and backward parity" {
+    const alloc = std.testing.allocator;
+    const io = try testIo();
+
+    const CausalSelfAttention = ztl.nn.attention.CausalSelfAttention;
+    const Rng = ztl.rng.Rng;
+
+    var x = try oracle.loadTensor(alloc, io, fixturePath("multihead_attention_3d", "input_0.ztlt"));
+    defer x.deinit(alloc);
+    var w_q = try oracle.loadTensor(alloc, io, fixturePath("multihead_attention_3d", "input_1.ztlt"));
+    defer w_q.deinit(alloc);
+    var b_q = try oracle.loadTensor(alloc, io, fixturePath("multihead_attention_3d", "input_2.ztlt"));
+    defer b_q.deinit(alloc);
+    var w_k = try oracle.loadTensor(alloc, io, fixturePath("multihead_attention_3d", "input_3.ztlt"));
+    defer w_k.deinit(alloc);
+    var b_k = try oracle.loadTensor(alloc, io, fixturePath("multihead_attention_3d", "input_4.ztlt"));
+    defer b_k.deinit(alloc);
+    var w_v = try oracle.loadTensor(alloc, io, fixturePath("multihead_attention_3d", "input_5.ztlt"));
+    defer w_v.deinit(alloc);
+    var b_v = try oracle.loadTensor(alloc, io, fixturePath("multihead_attention_3d", "input_6.ztlt"));
+    defer b_v.deinit(alloc);
+    var w_o = try oracle.loadTensor(alloc, io, fixturePath("multihead_attention_3d", "input_7.ztlt"));
+    defer w_o.deinit(alloc);
+    var b_o = try oracle.loadTensor(alloc, io, fixturePath("multihead_attention_3d", "input_8.ztlt"));
+    defer b_o.deinit(alloc);
+
+    var expect_y = try oracle.loadTensor(alloc, io, fixturePath("multihead_attention_3d", "output.ztlt"));
+    defer expect_y.deinit(alloc);
+    var expect_dx = try oracle.loadTensor(alloc, io, fixturePath("multihead_attention_3d", "grad_input_0.ztlt"));
+    defer expect_dx.deinit(alloc);
+    var expect_dwq = try oracle.loadTensor(alloc, io, fixturePath("multihead_attention_3d", "grad_input_1.ztlt"));
+    defer expect_dwq.deinit(alloc);
+    var expect_dbq = try oracle.loadTensor(alloc, io, fixturePath("multihead_attention_3d", "grad_input_2.ztlt"));
+    defer expect_dbq.deinit(alloc);
+    var expect_dwk = try oracle.loadTensor(alloc, io, fixturePath("multihead_attention_3d", "grad_input_3.ztlt"));
+    defer expect_dwk.deinit(alloc);
+    var expect_dbk = try oracle.loadTensor(alloc, io, fixturePath("multihead_attention_3d", "grad_input_4.ztlt"));
+    defer expect_dbk.deinit(alloc);
+    var expect_dwv = try oracle.loadTensor(alloc, io, fixturePath("multihead_attention_3d", "grad_input_5.ztlt"));
+    defer expect_dwv.deinit(alloc);
+    var expect_dbv = try oracle.loadTensor(alloc, io, fixturePath("multihead_attention_3d", "grad_input_6.ztlt"));
+    defer expect_dbv.deinit(alloc);
+    var expect_dwo = try oracle.loadTensor(alloc, io, fixturePath("multihead_attention_3d", "grad_input_7.ztlt"));
+    defer expect_dwo.deinit(alloc);
+    var expect_dbo = try oracle.loadTensor(alloc, io, fixturePath("multihead_attention_3d", "grad_input_8.ztlt"));
+    defer expect_dbo.deinit(alloc);
+
+    const D = x.shape.dims[2];
+    const T = x.shape.dims[1];
+    const H: usize = 2;
+    var rng = Rng.init(0);
+    var attn = try CausalSelfAttention.init(alloc, D, H, T, true, &rng);
+    defer attn.deinit();
+
+    @memcpy(attn.w_q.weight.data, w_q.data);
+    @memcpy(attn.w_q.bias.?.data, b_q.data);
+    @memcpy(attn.w_k.weight.data, w_k.data);
+    @memcpy(attn.w_k.bias.?.data, b_k.data);
+    @memcpy(attn.w_v.weight.data, w_v.data);
+    @memcpy(attn.w_v.bias.?.data, b_v.data);
+    @memcpy(attn.w_o.weight.data, w_o.data);
+    @memcpy(attn.w_o.bias.?.data, b_o.data);
+
+    x.requires_grad = true;
+    attn.w_q.weight.requires_grad = true;
+    attn.w_q.bias.?.requires_grad = true;
+    attn.w_k.weight.requires_grad = true;
+    attn.w_k.bias.?.requires_grad = true;
+    attn.w_v.weight.requires_grad = true;
+    attn.w_v.bias.?.requires_grad = true;
+    attn.w_o.weight.requires_grad = true;
+    attn.w_o.bias.?.requires_grad = true;
+
+    var tape = Tape.init(alloc);
+    defer tape.deinit();
+    _ = try tape.trackLeaf(&x);
+    _ = try tape.trackLeaf(&attn.w_q.weight);
+    _ = try tape.trackLeaf(&attn.w_q.bias.?);
+    _ = try tape.trackLeaf(&attn.w_k.weight);
+    _ = try tape.trackLeaf(&attn.w_k.bias.?);
+    _ = try tape.trackLeaf(&attn.w_v.weight);
+    _ = try tape.trackLeaf(&attn.w_v.bias.?);
+    _ = try tape.trackLeaf(&attn.w_o.weight);
+    _ = try tape.trackLeaf(&attn.w_o.bias.?);
+
+    var y = try attn.forward(x, &tape);
+    defer y.deinit(alloc);
+
+    try oracle.expectClose(y, expect_y, .{ .rel_tol = 1e-4, .abs_tol = 1e-4 });
+
+    try backwardThroughSum(&tape, &y);
+
+    const bwd_tol = oracle.CloseOptions{ .rel_tol = 1e-3, .abs_tol = 5e-4 };
+    try oracle.expectClose(x.grad.?.*, expect_dx, bwd_tol);
+    try oracle.expectClose(attn.w_q.weight.grad.?.*, expect_dwq, bwd_tol);
+    try oracle.expectClose(attn.w_q.bias.?.grad.?.*, expect_dbq, bwd_tol);
+    try oracle.expectClose(attn.w_k.weight.grad.?.*, expect_dwk, bwd_tol);
+    try oracle.expectClose(attn.w_k.bias.?.grad.?.*, expect_dbk, bwd_tol);
+    try oracle.expectClose(attn.w_v.weight.grad.?.*, expect_dwv, bwd_tol);
+    try oracle.expectClose(attn.w_v.bias.?.grad.?.*, expect_dbv, bwd_tol);
+    try oracle.expectClose(attn.w_o.weight.grad.?.*, expect_dwo, bwd_tol);
+    try oracle.expectClose(attn.w_o.bias.?.grad.?.*, expect_dbo, bwd_tol);
 }
