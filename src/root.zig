@@ -81,6 +81,15 @@ pub const data = struct {
 // Stage 6 additions:
 pub const lab = @import("lab/train.zig");
 
+// Stage 8 additions: opt-in debug utilities for shape assertions,
+// NaN/Inf detection, device-aware comparisons, and tensor dumps.
+// Consumers do `debug.assertShape(t, expected)` etc.; the helpers
+// are intentionally NOT used inside `src/` production code — they
+// are for example scripts, ad-hoc debugging, and new-op bring-up.
+pub const debug = struct {
+    pub const shape = @import("debug/shape.zig");
+};
+
 // Test-only utilities (PyTorch oracle parity, etc.):
 pub const testing_utils = struct {
     pub const oracle = @import("testing/oracle.zig");
@@ -149,6 +158,9 @@ test {
 
     // Stage 6:
     _ = lab;
+
+    // Stage 8: debug utilities.
+    _ = debug.shape;
 
     // Oracle + testing utilities (PR post-6.5):
     _ = testing_utils.oracle;
