@@ -2897,3 +2897,90 @@ test "cuda TransformerBlock.forward: CPU vs CUDA parity" {
     // ~20 composed kernels. Target the playbook forward tolerance.
     try oracle.expectClose(y_back, y_cpu, .{ .rel_tol = 1e-3, .abs_tol = 5e-4 });
 }
+
+// Session 3: TinyWordTransformer end-to-end forward parity.
+
+const TinyWordTransformer = lab.nn.model.TinyWordTransformer;
+
+test "cuda TinyWordTransformer.moveToCuda + forward: CPU vs CUDA parity" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+    _ = try module.loadPtxFromFile(&ctx, io, "softmax");
+    _ = try module.loadPtxFromFile(&ctx, io, "unary");
+    _ = try module.loadPtxFromFile(&ctx, io, "embedding");
+
+    const alloc = testing.allocator;
+    var rng = lab.rng.Rng.init(44);
+
+    const TransformerConfig = lab.nn.module.TransformerConfig;
+    const cfg = TransformerConfig{
+        .vocab_size = 32,
+        .d_model = 8,
+        .d_ff = 32,
+        .max_seq_len = 8,
+    };
+
+    // Two sibling CPU models with identical weights (second will be
+    // moved to CUDA). We can't just use the same RNG twice because
+    // the state advances between the two inits; so we init both,
+    // then copy parameter tensor contents from the first to the
+    // second.
+    var model_cpu = try TinyWordTransformer.init(alloc, cfg, &rng);
+    defer model_cpu.deinit();
+    var model_gpu = try TinyWordTransformer.init(alloc, cfg, &rng);
+    defer model_gpu.deinit();
+
+    {
+        var p_cpu: std.ArrayList(*Tensor) = .empty;
+        defer p_cpu.deinit(alloc);
+        try p_cpu.ensureTotalCapacity(alloc, 32);
+        model_cpu.parameters(&p_cpu);
+
+        var p_gpu: std.ArrayList(*Tensor) = .empty;
+        defer p_gpu.deinit(alloc);
+        try p_gpu.ensureTotalCapacity(alloc, 32);
+        model_gpu.parameters(&p_gpu);
+
+        try testing.expectEqual(p_cpu.items.len, p_gpu.items.len);
+        for (0..p_cpu.items.len) |i| {
+            try testing.expectEqual(p_cpu.items[i].data.len, p_gpu.items[i].data.len);
+            @memcpy(p_gpu.items[i].data, p_cpu.items[i].data);
+        }
+    }
+
+    // Move every parameter to CUDA. The forward path auto-routes.
+    try model_gpu.moveToCuda(&ctx);
+
+    // Deterministic input IDs: (B=2, T=5) with in-range values.
+    var ids_cpu = try Tensor.init(alloc, Shape.init2D(2, 5));
+    defer ids_cpu.deinit(alloc);
+    const id_vals = [_]f32{ 0, 3, 7, 2, 5, 1, 6, 4, 8, 0 };
+    @memcpy(ids_cpu.data, &id_vals);
+
+    var ids_gpu = try ids_cpu.toCuda(&ctx);
+    defer ids_gpu.storage.deinit(alloc);
+
+    var logits_cpu = try model_cpu.forward(ids_cpu, null);
+    defer logits_cpu.deinit(alloc);
+    var logits_gpu = try model_gpu.forward(ids_gpu, null);
+    defer logits_gpu.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    try testing.expectEqual(@as(usize, 3), logits_gpu.shape.ndim());
+    try testing.expectEqual(@as(usize, 2), logits_gpu.shape.dims[0]);
+    try testing.expectEqual(@as(usize, 5), logits_gpu.shape.dims[1]);
+    try testing.expectEqual(@as(usize, cfg.vocab_size), logits_gpu.shape.dims[2]);
+
+    var logits_back = try logits_gpu.toCpu(alloc);
+    defer logits_back.deinit(alloc);
+
+    const abs_diff = try oracle.maxAbsDiff(logits_back, logits_cpu);
+    const rel_err = try oracle.maxRelErr(logits_back, logits_cpu, 1e-8);
+    std.debug.print("  full-model fwd: abs_diff={d:.6} rel_err={d:.6}\n", .{ abs_diff, rel_err });
+    // Playbook tolerance: fwd rel=1e-3, abs=5e-4.
+    try oracle.expectClose(logits_back, logits_cpu, .{ .rel_tol = 1e-3, .abs_tol = 5e-4 });
+}

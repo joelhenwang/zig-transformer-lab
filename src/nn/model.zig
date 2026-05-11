@@ -48,6 +48,10 @@ const Linear = @import("linear.zig").Linear;
 const TransformerBlock = @import("block.zig").TransformerBlock;
 const ops_elementwise = @import("../tensor/ops/elementwise.zig");
 const ops_create = @import("../tensor/ops/create.zig");
+// Session 3: moveToCuda lives on the model and needs a CudaContext.
+// Threading the import through here keeps the transfer signature
+// symmetric with Tensor.toCuda.
+const CudaContext = @import("../backend/cuda/context.zig").CudaContext;
 
 /// Named struct type for parameter entries in save/load.
 /// Required because anonymous structs create different types per scope
@@ -115,12 +119,28 @@ pub const TinyWordTransformer = struct {
         var tok = try self.tok_embed.forward(ids, tape);
         defer tok.deinit(self.allocator);
 
-        // Position IDs: [0, 1, ..., T-1], shape (1, T) or (T,)
-        var pos_ids = try Tensor.init(self.allocator, Shape.init2D(1, T));
-        defer pos_ids.deinit(self.allocator);
+        // Position IDs: [0, 1, ..., T-1], shape (1, T). Built on CPU.
+        var pos_ids_cpu = try Tensor.init(self.allocator, Shape.init2D(1, T));
+        defer pos_ids_cpu.deinit(self.allocator);
         for (0..T) |t| {
-            pos_ids.data[t] = @floatFromInt(t);
+            pos_ids_cpu.data[t] = @floatFromInt(t);
         }
+
+        // Session 3: when the model lives on CUDA, upload pos_ids
+        // to the same context so pos_embed.forward finds it on the
+        // correct device. This is a trivial one-off (~T floats).
+        var pos_ids_cuda: ?Tensor = null;
+        defer {
+            if (pos_ids_cuda) |*pc| pc.storage.deinit(self.allocator);
+        }
+        const pos_ids: Tensor = if (self.pos_embed.weight.device == .cuda) blk: {
+            const ctx = switch (self.pos_embed.weight.storage) {
+                .cuda => |b| b.ctx,
+                .cpu => unreachable,
+            };
+            pos_ids_cuda = try pos_ids_cpu.toCuda(ctx);
+            break :blk pos_ids_cuda.?;
+        } else pos_ids_cpu;
 
         // Position embeddings: (1, T) → (1, T, D)
         var pos = try self.pos_embed.forward(pos_ids, tape);
@@ -155,6 +175,68 @@ pub const TinyWordTransformer = struct {
         self.block.parameters(list);
         self.ln_f.parameters(list);
         self.lm_head.parameters(list);
+    }
+
+    /// Move every learnable parameter to the given CUDA context.
+    ///
+    /// In-place transfer: each parameter tensor's storage is replaced
+    /// with a fresh `DeviceBuffer` via `Tensor.toCuda`; the old CPU
+    /// buffer is freed. Shape, strides, `param_id`, and
+    /// `requires_grad` are preserved. `grad` and `tape_node` are
+    /// reset to `null` (consistent with `Tensor.toCuda`) — callers
+    /// must re-track the moved parameters on a fresh tape.
+    ///
+    /// Idempotent-ish: calling `moveToCuda` on a model whose params
+    /// already live on CUDA returns `error.DeviceMismatch` from
+    /// `Tensor.toCuda`. Use `moveToCpu` first if you need to switch
+    /// back.
+    ///
+    /// Worked example:
+    ///   var model = try TinyWordTransformer.init(alloc, cfg, &rng);
+    ///   var ctx = try CudaContext.init(alloc);
+    ///   defer ctx.deinit();
+    ///   try model.moveToCuda(&ctx);
+    ///   // every weight now lives on GPU; forward(ids_gpu, ...) works.
+    pub fn moveToCuda(self: *TinyWordTransformer, ctx: *const CudaContext) !void {
+        const alloc = self.allocator;
+        var list: std.ArrayList(*Tensor) = .empty;
+        defer list.deinit(alloc);
+        // Room for every parameter the model holds. 16 is the tight
+        // bound for our 1-block config (2 LNs * 2 + 4 attn linears *
+        // 2 + 2 mlp linears * 2 + 2 embeddings + 1 lm_head weight).
+        try list.ensureTotalCapacity(alloc, 32);
+        self.parameters(&list);
+
+        for (list.items) |p| {
+            if (p.device == .cuda) continue; // already moved — idempotent
+            const new_tensor = try p.toCuda(ctx);
+            // Free the old CPU buffer before overwriting the Tensor
+            // struct fields. `p.*.deinit` takes an allocator and
+            // handles both owned and non-owning cases.
+            p.*.deinit(alloc);
+            p.* = new_tensor;
+        }
+    }
+
+    /// Move every learnable parameter back to host memory. Inverse
+    /// of `moveToCuda`. The allocator is the one the model was
+    /// created with; it owns the fresh `[]f32` buffers.
+    pub fn moveToCpu(self: *TinyWordTransformer) !void {
+        const alloc = self.allocator;
+        var list: std.ArrayList(*Tensor) = .empty;
+        defer list.deinit(alloc);
+        try list.ensureTotalCapacity(alloc, 32);
+        self.parameters(&list);
+
+        for (list.items) |p| {
+            if (p.device == .cpu) continue;
+            const new_tensor = try p.toCpu(alloc);
+            // CUDA deinit releases the DeviceBuffer via cuMemFree_v2.
+            // The top-level `owned` alias is false on CUDA; the
+            // storage union's `.cuda.owned` flag is what matters.
+            p.*.deinit(alloc);
+            p.* = new_tensor;
+        }
     }
 
     /// Count total parameters (for display / debugging).
