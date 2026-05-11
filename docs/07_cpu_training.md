@@ -461,7 +461,259 @@ This means we need one tape per step and must deinit it explicitly.
 
 ---
 
-## 7.10 Summary
+## 7.10 The Training Loop as a Data Pipeline
+
+So far we've talked about the training step in terms of math and
+function calls. Now zoom into the memory lifecycle. Every step
+creates a small graph of owning and non-owning tensors; understanding
+who frees what, and when, is the only way to chase a real leak.
+
+Here is a full per-step allocation walk for `Trainer.train` on CPU
+with `B=4, T=16, V=2000, D=32` (the Stage 6 Shakespeare config).
+Numbers are f32 byte counts.
+
+```
+Step 42 enters the loop. At this point the owning tensors are:
+  - Every model parameter (permanent, lifetime = Trainer)
+  - Every entry in adam.state (permanent, one per param)
+  - The Dataset's token buffer (permanent, ~1 MB for Shakespeare)
+  - The Batcher's two small shuffled index arrays (permanent)
+
+Line: batch = batcher.next()           alloc:   0 bytes (borrowed view)
+Line: ids = Tensor.init(...)           alloc: 256 bytes ((4,16) f32)
+Line: targets = Tensor.init(...)       alloc: 256 bytes ((64,) f32)
+Line: tape = Tape.init(alloc)          alloc: ~1 KB (tape arrays)
+Line: forward(ids, &tape)              alloc: ~250 KB across:
+        - intermediate tensors (every op creates one)
+        - every tracked reshape/transpose materialises
+        - logits_3d output: 512 KB = 4 * 16 * 2000 * 4
+
+Line: reshapeTracked(logits_3d, ...)   alloc: 0 bytes (view)
+Line: crossEntropy(logits, targets)    alloc: 4 bytes (loss scalar)
+
+Line: loss_val = loss.data[0]          alloc: 0 (scalar read)
+Line: tape.backward(&loss)             alloc: ~250 KB for gradients:
+        - one grad tensor per param (accumulated into param.grad)
+        - intermediate gradient tensors inside the tape
+
+Line: loss.deinit(alloc)               frees:     4 bytes
+Line: logits_3d.deinit(alloc)          frees: 512 KB
+(grad clip: no new allocations — scans existing param.grad)
+
+Line: opt.step(params)                 alloc: 0 bytes
+                                       writes: param.data (in place)
+Line: opt.zeroGrad(params)             writes: param.grad.data = 0
+
+Line: defer tape.deinit()              frees: everything tape owned
+                                       (~500 KB of intermediate
+                                        tensors + gradients)
+Line: defer ids.deinit(alloc)          frees: 256 bytes
+Line: defer targets.deinit(alloc)      frees: 256 bytes
+```
+
+Peak per-step memory: about **1 MB** of transient allocation beyond
+the permanent model + optimiser state. That's the scratch working
+set for the forward + backward chain.
+
+### Why the tape owns so much
+
+The tape holds intermediate forward tensors that backward needs to
+recompute gradients. A naive implementation would reference the
+same buffers the forward op saw; ours takes snapshots (see
+`docs/03c_saved_tensors.md` for the full discussion). The cost of
+snapshots is memory; the benefit is that the forward code is free
+to deinit its owned tensors without corrupting the backward pass.
+
+### What leaks look like
+
+If you forget `tape.deinit()`, the per-step transient grows
+unbounded and DebugAllocator reports a leak at test exit. We have
+been there — commit `1cc82ce` documents a version of this bug on
+the CUDA path (grad tensors on the optional branch weren't being
+freed).
+
+If you forget `ids.deinit(alloc)` or `targets.deinit(alloc)`, the
+input buffers leak at 512 bytes per step. On a 500-step run that's
+still only 256 KB, which is often below what a casual eyeball scan
+of `/proc/self/status` catches. DebugAllocator catches it
+immediately.
+
+---
+
+## 7.11 Three Silent Bugs We Fixed
+
+Every subsystem in this library has its horror story. The Stage 6
+pipeline integration surfaced three that are worth retelling
+because the lesson from each transfers directly to bugs you will
+write in your own code.
+
+### 7.11.1 `@intFromFloat` truncation on target indices
+
+**Symptom.** Loss decreased normally for the first hundred steps
+but the gradient shape on the tok_embed seemed wrong — checkpoints
+from different steps converged to implausibly similar weights for
+some token IDs.
+
+**Cause.** `backwardCrossEntropy` converted the target tensor's
+f32 value to a class index by `@intFromFloat(target.data[b])`.
+`@intFromFloat` in Zig truncates **towards zero**, not towards
+nearest. A target originally stored as `u32 = 3` round-trips to
+f32 as exactly `3.0` — fine. But with any rounding drift, a
+target that *was* class 3 could be stored as `2.9999...` and
+truncate back to 2. Every step with that batch flowed gradient to
+the wrong class row of the embedding.
+
+**Fix.** `@intFromFloat(@round(target.data[b]))`. The forward path
+already uses `@round`; the backward had fallen behind.
+`src/autograd/backward.zig:666`.
+
+**Lesson.** Every `@intFromFloat` on a float-representing-integer
+must be guarded with `@round` (or `@trunc`, or a full rounding
+policy — pick one and stick to it). A silent off-by-one in
+gradient routing is hell to debug.
+
+### 7.11.2 Untracked reshape in the training loop
+
+**Symptom.** Training appeared to work on the initial Shakespeare
+config (D=32, T=16). Moving to a bigger config with a different
+`B*T` pattern made some gradients go NaN within ten steps.
+
+**Cause.** The loop computed `logits_3d.reshape(Shape.init2D(B*T,
+V))` — a view with the same `tape_node` as the parent. The CE
+backward registered a gradient of shape `(B*T, V)` under that
+tape_node. The matmul backward upstream expected `(B, T, V)`.
+Because both layouts were row-major contiguous, the memory
+happened to match and no crash fired. But the gradient's
+interpretation was now inconsistent with the producer.
+
+**Fix.** `ops_shape.reshapeTracked(allocator, logits_3d,
+Shape.init2D(B*T, V), &tape)` — explicit reshape node with a
+proper backward that reinterprets the gradient back to rank-3.
+`src/lab/train.zig:347`.
+
+**Lesson.** Any reshape that sits between an op with a gradient
+and another op with a gradient must be **tape-tracked**. The
+untracked variant is for inference or throwaway inspection.
+A good heuristic: if a reshape is inside a forward method that's
+wrapped by a `*Tracked` naming convention, the inner reshape must
+also be tracked.
+
+### 7.11.3 `beta2 = 0.95` as a default
+
+**Symptom.** At `lr = 3e-3` training would diverge after 200 steps
+even with gradient clipping at norm 1.0. Dropping to `lr = 1e-3`
+stabilised, but the loss plateaued higher than expected.
+
+**Cause.** Our initial `AdamW` defaulted `beta2` to `0.95`
+(probably copied from an aggressive half-remembered blog post).
+At `beta2 = 0.95` the second-moment estimate adapts about 50×
+faster than the standard `0.999`. When gradient direction
+oscillates (common early in training), the effective learning
+rate per-parameter oscillates correspondingly, which is what
+causes the "diverges at 3e-3" behaviour.
+
+**Fix.** Default `beta2 = 0.999` in `AdamWOpts`. With that default,
+`lr = 1e-3` becomes stable on tiny.txt and `lr = 3e-3` is
+survivable (but still diverges sometimes — we don't recommend it).
+`src/optim/adamw.zig`.
+
+**Lesson.** Copied defaults are an invisible source of bugs. The
+hyperparameter landscape is wide and most defaults in public
+writing aren't actually the authors' production configuration.
+Always trace a default back to a published paper or a widely-used
+reference implementation before committing to it.
+
+---
+
+## 7.12 Common Mistakes
+
+- **Forgetting `tape.deinit()` between steps.** The tape accumulates
+  forever. Use `defer tape.deinit()` immediately after `Tape.init`.
+- **Reading `loss.data[0]` after `loss.deinit()`.** Save the value
+  first: `const v = loss.data[0]; loss.deinit(alloc);`.
+- **Untracked `reshape()` in a training loop.** See §7.11.2. Always
+  `reshapeTracked`.
+- **Passing `(B, T)` input where `(B*T,)` target is expected.** The
+  CE op takes 2D `(B*T, V)` logits and 1D `(B*T,)` targets. A stray
+  `targets.reshape(Shape.init2D(B, T))` turns every index into
+  garbage.
+- **Creating `AdamW` in `Trainer.init` and copying into the struct.**
+  The AdamW state HashMap has self-referential internal pointers;
+  struct-move invalidates them. Create locally in `train()`.
+- **Forgetting `grad_clip_norm` for new experiments.** Safe default
+  is 5.0; raising `lr` without clipping eventually hits a spike that
+  explodes training.
+- **Mutating `param.grad.data` directly after backward.** The optimizer
+  reads `param.grad.data`; the tape owns the backing buffer. Safe
+  operations: scale in place (what `grad_clip` does) or zero out.
+  Unsafe: reallocate, resize, swap pointers.
+
+---
+
+## 7.13 Exercises
+
+**Exercise 1.** On a Shakespeare-sized dataset (V=2000, T=16, B=4),
+what is the peak per-step memory usage beyond permanent
+model/optimiser state? Where in `src/lab/train.zig` does it occur?
+
+<details><summary>Solution</summary>
+
+Peak is during `model.forward` after the final `lm_head` linear
+has produced `logits_3d` but before we've reshaped and consumed it.
+The logits tensor is `(4, 16, 2000)` f32 = 512 KB. Add the
+intermediate tensors from earlier ops (roughly another 200-400 KB
+depending on how aggressively the tape snapshots), plus the tape
+structure itself (~1 KB), and the transient working set is
+≈ 1 MB. The hot spot is the line
+`var logits_3d = try self.model.forward(ids, &tape);` —
+everything before that is batch prep, everything after is consume
++ free.
+
+</details>
+
+**Exercise 2.** What changes if you forget `@round` in
+`backwardCrossEntropy` but target IDs are always exact integers
+stored via direct `@floatFromInt` casts from `u32`?
+
+<details><summary>Solution</summary>
+
+Nothing, practically. `@floatFromInt(u32)` for values up to 2²⁴
+produces exact f32 representations. `@intFromFloat` on an exact
+integer-valued f32 is the same truncation as `@round`. The bug
+only bites when rounding error creeps in somewhere upstream — for
+example if a future pipeline stage inserts label smoothing or
+mixup, which produce non-integer targets. The fix is defensive:
+it costs nothing and prevents a future-you disaster.
+
+</details>
+
+**Exercise 3.** Suppose you increase `lr` from `1e-3` to `1e-2` on
+tiny.txt. Gradient clipping is on (`grad_clip_norm=5.0`).
+Training diverges at step 150. Which of these is the *first*
+thing you'd check, and why?
+
+(a) Is `grad_clip_norm` actually applied?
+(b) Is `beta2` set to 0.999?
+(c) Is the data pipeline emitting the right targets?
+(d) Are the model weights initialised correctly?
+
+<details><summary>Solution</summary>
+
+**(a)**. The clip is the "last defence" and the cheapest thing to
+verify. Print `total_norm_sq` each step and confirm it's being
+recomputed correctly (not summed across old state). A bug where
+`grad_clip_norm` is quietly not taking effect — for example if the
+`max_norm > 0` guard regressed to `max_norm > 1.0` — is much more
+common than people expect. The other three take longer to rule out
+and should follow only after (a) is confirmed green.
+
+</details>
+
+---
+
+
+
+## 7.14 Summary
 
 Stage 6 completes the CPU training pipeline. The key lessons:
 
