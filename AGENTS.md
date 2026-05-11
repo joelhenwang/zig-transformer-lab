@@ -6,44 +6,42 @@ Build a pedagogical Zig 0.16.0 library that trains a tiny 1-block 1-head word-le
 transformer on CPU, then on CUDA, with extensive documentation and heavily commented
 code that teaches how PyTorch-like systems work internally.
 
-## Current engineering gate — Stage 6.5 (CPU hardening)
+## Current engineering gate — Stage 8 (debugging discipline + N-block refactor)
 
-Stage 7 CUDA is **blocked** until Stage 6.5 ships. Rationale and full plan are
-in `zig_transformer_lab_implementation_assessment_and_plan.md` (researcher
-review) plus the accepted plan in session notes.
+Stages 1–7 have all shipped (tag `stage-7-complete`). The current gate is
+Stage 8, whose scope is defined in `docs/stage8_plan.md`:
 
-> **Stage 7 playbook:** `docs/stage7_plan.md` is the executable
-> 14-PR roadmap. A fresh session should read this file, then the
-> playbook, then start the next `[ ]` PR. The playbook contains
-> full PR cards with API surfaces, acceptance criteria, commit
-> templates, and per-PR gotchas.
+1. `src/debug/` utilities — `assertShape`, `assertFinite`, device-aware
+   `compare`, `dump` for Python-side inspection.
+2. `TransformerConfig` extension — `n_layer: u8 = 1`, `n_head: u8 = 1`,
+   `dropout: f32 = 0.0`, with defaults preserving all Stage 1–7 behavior
+   exactly.
+3. `TinyWordTransformer` multi-block — `blocks: []TransformerBlock`,
+   forward loops, `parameters` iterates, `save`/`load` handle variable
+   param counts.
+4. Multi-head attention — `(B, T, D) → (B, T, n_head, d_head)` reshape +
+   batched matmul via flattened `B' = B · n_head`.
+5. Multi-head oracle fixture (`multihead_attention_3d`) + parity tests.
+6. ZTLC v3 checkpoint format — backward-compatible with v2 (v2 reads as
+   `n_layer=1, n_head=1, dropout=0`).
+7. `docs/09_debugging.md` — shape-assert driven dev, NaN/Inf detection,
+   gradient checking, CPU/GPU compare, `compute-sanitizer` walkthrough,
+   Nsight Compute pass, common CUDA bug catalog.
+8. Acceptance sweep — 2-block, 2-head, D=64 Shakespeare run under
+   `compute-sanitizer`; wall-clock < 2× the 1/1/32 time.
 
-Stage 6.5 consists of seven PRs, executed in order:
+> **Stage 8 playbook:** `docs/stage8_plan.md`. A fresh session should
+> read that file end-to-end before touching code. Companion reference:
+> `docs/stage7_plan.md` + `docs/stage7_endgame_plan.md` for the style
+> of milestone/commit cadence.
 
-| PR  | Scope                                                  | Status      |
-|-----|--------------------------------------------------------|-------------|
-| α   | Honesty pass + Windows-portable build                  | Done (f9c1d3b) |
-| β   | Fix strided elementwise ops and `copyTo`               | Done (f9c1d3b) |
-| γ   | Tensor invariants + `LabError` expansion               | Done (f9c1d3b) |
-| δ   | Storage union + offset field (CPU-only backend seam)   | Done (f9c1d3b) |
-| ε   | Operation-owned `SavedTensor`; remove `keepAlive`      | Done (f9c1d3b) |
-| ζ   | Stable `ParamId`-based optimizer state                 | Done (f9c1d3b) |
-| η   | Strict checkpoint validation                            | Done (f9c1d3b) |
-| docs | Teaching chapters 02c, 02d, 03c, 07c, 07d             | Written (uncommitted) |
-
-Exit criteria:
-
-- README, AGENTS, docs agree that CUDA is not yet implemented. ✓
-- Tensor invariants implemented and tested; zero dimensions rejected. ✓
-- Storage/offset model exists; CUDA memory is never represented as `[]f32`. ✓
-- Non-contiguous view behavior is correct or explicitly rejected per op. ✓
-- Autograd saved data is operation-owned; no manual `keepAlive` in `src/nn/`. ✓
-- Optimizer state keyed by stable `ParamId`, not by data pointer. ✓
-- Checkpoint loading validates metadata strictly (magic, version, shape, dtype). ✓
-- `zig build test` passes on Windows and Linux; exact output recorded. ✓ (263 tests on both platforms)
-- Teaching docs for each architectural PR exist under `docs/`. In progress.
-
-Only after this gate passes may Stage 7 CUDA wrapper work begin.
+Historical context: Stage 6.5 (CPU hardening) passed in commit
+`f9c1d3b` on 2026-05. Stage 7 (CUDA backend) landed in commits
+`07bd274`..`584160b` over 2026-05-10..11, with 267 CPU + 73 CUDA tests
+passing on RTX 4060 Ti and a measured 30.59× speedup at the
+Shakespeare config. Both gates are documented in their respective
+plans (`docs/stage6.5_plan.md` — not committed; see session notes for
+details; and `docs/stage7_plan.md` + `docs/stage7_endgame_plan.md`).
 
 ## PyTorch oracle (post-6.5, CPU safety net before Stage 7)
 
@@ -603,123 +601,6 @@ When you hit a Zig compilation error or API question, load reference files by to
 
 Also available: 19 reference files, 12 recipes, 7 templates, 4 validation scripts.
 See `skills/modern-zig-0-16-tutor/README.md` for the full directory map.
-
-## Stage 7: Next steps
-
-Stage 7 implements the CUDA backend. Per `plan.md`
-and `docs/00_overview.md`:
-
-### What to implement
-1. `src/backend/backend.zig` — vtable
-2. `src/backend/cpu_naive/dispatch.zig` — wraps Stage 2 ops
-3. `src/backend/cuda/{bindings,context,mem,module,gemm,dispatch}.zig`
-4. `src/backend/cuda/kernels/*.cu` — offline .ptx kernels
-5. `docs/08_backends_cuda.md`
-
-### Key design decisions already locked
-- **D9:** cuBLAS for GEMM, custom kernels for elementwise/softmax/etc
-- **D10:** .ptx loaded via cuModuleLoadData (no NVRTC)
-- **D11:** dlopen for CUDA libraries at runtime
-
-### Recommended implementation order (sub-stages)
-
-Implement Stage 7 in this order to maintain a compilable/testable codebase
-at every step:
-
-#### 7.A — Bindings (`src/backend/cuda/bindings.zig`)
-- Dynamically load `libcuda.so.1`, `libcudart.so`, `libcublas.so` via dlopen/dlsym
-- Resolve only the symbols we need (see plan.md §7.A for the full list)
-- All wrappers convert non-success codes into `error.CudaError`
-- Debug builds log numeric code + symbol name; store `cuGetErrorString` /
-  `cublasGetStatusString` message for `debug.lastCudaError()` retrieval
-- **Test:** dlopen succeeds on a CUDA-capable machine; symbol resolution
-  returns non-null function pointers
-
-#### 7.B — Context (`src/backend/cuda/context.zig`)
-- `CudaContext` struct: device, context, stream, cuBLAS handle, ptx_modules
-  HashMap, allocator
-- `init(alloc, device_id)`: cuInit → cuDeviceGet → cuCtxCreate_v2 →
-  cuStreamCreate → cublasCreate_v2 → cublasSetStream_v2 → load .ptx
-- `deinit()`: destroy in reverse order (cublas → stream → context)
-- **Test:** init/deinit cycle on GPU 0 without errors
-
-#### 7.C — Memory (`src/backend/cuda/mem.zig`)
-- `DeviceBuffer` RAII over `cuMemAlloc_v2` / `cuMemFree_v2`
-- `DeviceBuffer.from_host(ctx, slice_f32) !Self` — cuMemcpyHtoD_v2
-- `self.to_host(alloc) ![]f32` — cuMemcpyDtoH_v2
-- `self.deinit()` — cuMemFree_v2
-- `Tensor.to_cuda(ctx)` and `Tensor.to_cpu(alloc)` preserve shape/strides
-- **Test:** round-trip host→device→host preserves data exactly
-
-#### 7.D — Backend vtable + CPU naive dispatch
-- `src/backend/backend.zig`: Backend struct + VTable (matmul, add, softmax,
-  layernorm, gelu, embedding_fwd/bwd, causal_mask, ce_loss, adamw_step,
-  to_device, to_host)
-- `src/backend/cpu_naive/dispatch.zig`: wraps existing Stage 2 CPU ops into
-  vtable function signatures
-- **Test:** CPU backend produces same results as direct op calls
-
-#### 7.E — Row-major GEMM wrapper (`src/backend/cuda/gemm.zig`)
-- **This is the single most error-prone spot in the codebase.**
-- Presents row-major `C = alpha * A @ B + beta * C` API
-- Internally calls cuBLAS (column-major) with swapped operands
-- Batched matmul uses `cublasSgemmStridedBatched` for `(B,M,K)@(B,K,N)`
-- **Test:** multiply two known `(2,3)@(3,4)` matrices; compare vs CPU
-  within `1e-5`
-
-#### 7.F — PTX module loading (`src/backend/cuda/module.zig`)
-- Load .ptx files from `zig-out/ptx/` via `cuModuleLoadData`
-- Cache by file stem in `CudaContext.ptx_modules`
-- `getFunction(ctx, module_name, kernel_name) !CUfunction`
-- **build.zig:** `nvcc -arch=sm_89 -ptx` step for each `.cu` file; output
-  to `zig-out/ptx/`. Use static `kernel_names` list (no filesystem iteration)
-
-#### 7.G — CUDA kernels (`src/backend/cuda/kernels/*.cu`)
-Minimum set (each with forward + backward where applicable):
-- `elementwise.cu` — add, sub, mul, div, scalar ops, in-place residual add
-- `softmax.cu` — row-wise with max-subtract trick; block per row, shared
-  memory for max + sum
-- `layernorm.cu` — online mean/variance per row (Welford), gamma/beta affine
-- `gelu.cu` — exact forward and backward
-- `embedding.cu` — forward gather; backward `atomicAdd` scatter
-- `causal_mask.cu` — adds -infinity above diagonal into scores
-- `ce_loss.cu` — fused `log_softmax + NLL + grad` w.r.t. logits
-- `adamw.cu` — per-parameter step with bias correction
-
-Every kernel: starts with `if (idx >= n) return;` bounds check, never
-out-of-bounds reads/writes, has matching unit test with tiny fixed inputs
-and CPU reference.
-
-#### 7.H — CUDA dispatch (`src/backend/cuda/dispatch.zig`)
-- Implements `Backend.VTable` for CUDA path
-- Each dispatch function: packs params → `cuLaunchKernel` →
-  `cuStreamSynchronize` (for now; async later if needed)
-- Autograd calls `backend.vtable.matmul(...)` instead of `ops.matmul(...)`
-  directly; CPU and CUDA provide identical semantics
-
-#### 7.I — Cross-validation (`examples/08_cuda_vs_cpu.zig`)
-- Full-model forward on CPU and CUDA on identical random batch: max abs
-  diff < `5e-5`
-- One training step on both: gradient max abs diff < `1e-4`, parameter diff
-  after `optim.step` < `2e-4`
-
-### Stage 7 acceptance criteria
-- Every kernel has a unit test
-- `08_cuda_vs_cpu.zig` passes tolerances above
-- `06_train_shakespeare.zig -Dcuda=true` is at least 30x faster than CPU
-  and produces a similar loss trajectory (final loss within 10% of CPU run
-  at matched steps)
-- `docs/08_backends_cuda.md` committed alongside code
-
-### Stage 7 docs outline (`docs/08_backends_cuda.md`)
-- Why matmul dominates transformer compute (FLOP-count derivation)
-- Why cuBLAS
-- What cuBLAS hides (algorithm selection, tensor cores; not used here since
-  f32, but mentioned)
-- How PyTorch dispatches high-level ops to cuBLAS/cuDNN (ATen dispatcher)
-- Row-major/column-major derivation with diagrams
-- PTX loading lifecycle and why we precompile offline
-- Kernel-by-kernel walkthrough
 
 ## When stuck
 

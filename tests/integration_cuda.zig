@@ -2364,33 +2364,16 @@ test "cuda LayerNorm: oracle layernorm_3d forward + backward parity" {
     {
         var da_back = try a_gpu.grad.?.*.toCpu(alloc);
         defer da_back.deinit(alloc);
-        const abs_diff = try oracle.maxAbsDiff(da_back, expect_da);
-        const rel_err = try oracle.maxRelErr(da_back, expect_da, 1e-8);
-        std.debug.print("  LN da  abs_diff={d:.6} rel_err={d:.6}\n", .{ abs_diff, rel_err });
-        std.debug.print("  da[0..6] expect={d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4}\n", .{
-            expect_da.data[0], expect_da.data[1], expect_da.data[2],
-            expect_da.data[3], expect_da.data[4], expect_da.data[5],
-        });
-        std.debug.print("  da[0..6] got   ={d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4}\n", .{
-            da_back.data[0], da_back.data[1], da_back.data[2],
-            da_back.data[3], da_back.data[4], da_back.data[5],
-        });
         try oracle.expectClose(da_back, expect_da, .{ .rel_tol = 1e-3, .abs_tol = 1e-4 });
     }
     {
         var dgamma_back = try gamma_gpu.grad.?.*.toCpu(alloc);
         defer dgamma_back.deinit(alloc);
-        const abs_diff = try oracle.maxAbsDiff(dgamma_back, expect_dgamma);
-        const rel_err = try oracle.maxRelErr(dgamma_back, expect_dgamma, 1e-8);
-        std.debug.print("  LN dg  abs_diff={d:.6} rel_err={d:.6}\n", .{ abs_diff, rel_err });
         try oracle.expectClose(dgamma_back, expect_dgamma, .{ .rel_tol = 1e-3, .abs_tol = 1e-4 });
     }
     {
         var dbeta_back = try beta_gpu.grad.?.*.toCpu(alloc);
         defer dbeta_back.deinit(alloc);
-        const abs_diff = try oracle.maxAbsDiff(dbeta_back, expect_dbeta);
-        const rel_err = try oracle.maxRelErr(dbeta_back, expect_dbeta, 1e-8);
-        std.debug.print("  LN db  abs_diff={d:.6} rel_err={d:.6}\n", .{ abs_diff, rel_err });
         try oracle.expectClose(dbeta_back, expect_dbeta, .{ .rel_tol = 1e-3, .abs_tol = 1e-4 });
     }
 }
@@ -2490,11 +2473,6 @@ test "cuda isolated: mean backward matches CPU" {
 
     var da_back = try a_gpu.grad.?.*.toCpu(alloc);
     defer da_back.deinit(alloc);
-    std.debug.print("  mean-only: cpu da[0..4]={d:.4} {d:.4} {d:.4} {d:.4}  gpu da[0..4]={d:.4} {d:.4} {d:.4} {d:.4}\n", .{
-        a_cpu.grad.?.*.data[0], a_cpu.grad.?.*.data[1],
-        a_cpu.grad.?.*.data[2], a_cpu.grad.?.*.data[3],
-        da_back.data[0], da_back.data[1], da_back.data[2], da_back.data[3],
-    });
     try oracle.expectClose(da_back, a_cpu.grad.?.*, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
 }
 
@@ -2547,16 +2525,6 @@ test "cuda isolated: sub-mean backward matches CPU" {
 
     var da_back = try a_gpu.grad.?.*.toCpu(alloc);
     defer da_back.deinit(alloc);
-    const abs_diff = try oracle.maxAbsDiff(da_back, a_cpu.grad.?.*);
-    const rel_err = try oracle.maxRelErr(da_back, a_cpu.grad.?.*, 1e-8);
-    std.debug.print("  sub-mean: abs_diff={d:.6} rel_err={d:.6}\n", .{ abs_diff, rel_err });
-    std.debug.print("  cpu da[0..4]={d:.4} {d:.4} {d:.4} {d:.4}\n", .{
-        a_cpu.grad.?.*.data[0], a_cpu.grad.?.*.data[1],
-        a_cpu.grad.?.*.data[2], a_cpu.grad.?.*.data[3],
-    });
-    std.debug.print("  gpu da[0..4]={d:.4} {d:.4} {d:.4} {d:.4}\n", .{
-        da_back.data[0], da_back.data[1], da_back.data[2], da_back.data[3],
-    });
     try oracle.expectClose(da_back, a_cpu.grad.?.*, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
 }
 
@@ -2978,9 +2946,6 @@ test "cuda TinyWordTransformer.moveToCuda + forward: CPU vs CUDA parity" {
     var logits_back = try logits_gpu.toCpu(alloc);
     defer logits_back.deinit(alloc);
 
-    const abs_diff = try oracle.maxAbsDiff(logits_back, logits_cpu);
-    const rel_err = try oracle.maxRelErr(logits_back, logits_cpu, 1e-8);
-    std.debug.print("  full-model fwd: abs_diff={d:.6} rel_err={d:.6}\n", .{ abs_diff, rel_err });
     // Playbook tolerance: fwd rel=1e-3, abs=5e-4.
     try oracle.expectClose(logits_back, logits_cpu, .{ .rel_tol = 1e-3, .abs_tol = 5e-4 });
 }
@@ -3094,7 +3059,6 @@ test "cuda TinyWordTransformer backward (sumAll): CPU vs CUDA per-param parity" 
 
     var worst_abs: f32 = 0.0;
     var worst_rel: f32 = 0.0;
-    var worst_idx: usize = 0;
     for (0..p_cpu_list.items.len) |i| {
         const g_cpu = p_cpu_list.items[i].grad orelse {
             std.debug.print("  param {d}: CPU grad missing!\n", .{i});
@@ -3108,16 +3072,9 @@ test "cuda TinyWordTransformer backward (sumAll): CPU vs CUDA per-param parity" 
         defer g_gpu_host.deinit(alloc);
         const abs_i = try oracle.maxAbsDiff(g_gpu_host, g_cpu.*);
         const rel_i = try oracle.maxRelErr(g_gpu_host, g_cpu.*, 1e-8);
-        if (abs_i > worst_abs) {
-            worst_abs = abs_i;
-            worst_idx = i;
-        }
+        if (abs_i > worst_abs) worst_abs = abs_i;
         if (rel_i > worst_rel) worst_rel = rel_i;
     }
-    std.debug.print(
-        "  backward per-param: worst_abs={d:.6} (param {d}) worst_rel={d:.6}\n",
-        .{ worst_abs, worst_idx, worst_rel },
-    );
     // Playbook tolerance: backward rel=1e-3, abs=1e-3.
     // We use rel OR abs composition as usual — per-param with
     // near-zero grads would otherwise spike rel.
@@ -3240,10 +3197,6 @@ test "cuda TinyWordTransformer one training step: CPU vs CUDA post-step param pa
     {
         var loss_back = try loss_gpu.toCpu(alloc);
         defer loss_back.deinit(alloc);
-        std.debug.print(
-            "  step loss: cpu={d:.6} gpu={d:.6}\n",
-            .{ loss_cpu.data[0], loss_back.data[0] },
-        );
         try oracle.expectClose(loss_back, loss_cpu, .{ .rel_tol = 1e-4, .abs_tol = 1e-4 });
     }
 
@@ -3268,23 +3221,12 @@ test "cuda TinyWordTransformer one training step: CPU vs CUDA post-step param pa
     // Post-step param parity: each parameter's value (after the
     // AdamW update) must match to within playbook tolerance.
     var worst_abs: f32 = 0.0;
-    var worst_rel: f32 = 0.0;
-    var worst_idx: usize = 0;
     for (0..p_cpu_list.items.len) |i| {
         var p_gpu_host = try p_gpu_list.items[i].*.toCpu(alloc);
         defer p_gpu_host.deinit(alloc);
         const abs_i = try oracle.maxAbsDiff(p_gpu_host, p_cpu_list.items[i].*);
-        const rel_i = try oracle.maxRelErr(p_gpu_host, p_cpu_list.items[i].*, 1e-8);
-        if (abs_i > worst_abs) {
-            worst_abs = abs_i;
-            worst_idx = i;
-        }
-        if (rel_i > worst_rel) worst_rel = rel_i;
+        if (abs_i > worst_abs) worst_abs = abs_i;
     }
-    std.debug.print(
-        "  one-step post-param: worst_abs={d:.6} (param {d}) worst_rel={d:.6}\n",
-        .{ worst_abs, worst_idx, worst_rel },
-    );
     // Playbook: post-one-step abs < 2e-3.
     try testing.expect(worst_abs < 2e-3);
 }
