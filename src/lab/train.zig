@@ -112,6 +112,27 @@ pub const TrainConfig = struct {
     data_seed: u64 = 42,
     /// Lowercase text before tokenization.
     lowercase: bool = true,
+    /// Number of transformer blocks stacked in the model.
+    ///
+    /// Defaults to 1 to preserve Stage 1-7 behavior. Stage 8 M3
+    /// introduced N-block support in `TinyWordTransformer`; this
+    /// flag threads through to `TransformerConfig.n_layer`.
+    n_layer: u8 = 1,
+    /// Number of attention heads per block.
+    ///
+    /// Defaults to 1 to preserve Stage 1-7 behavior. Stage 8 M4
+    /// introduced multi-head attention; this flag threads through
+    /// to `TransformerConfig.n_head`. Must evenly divide `d_model`.
+    n_head: u8 = 1,
+    /// Whether to move the model onto CUDA and run forward+backward
+    /// on the GPU. Defaults to false (CPU-only, as in all Stage 1-7
+    /// examples). When true, `Trainer.init` creates a `CudaContext`,
+    /// loads the PTX modules, and calls `model.moveToCuda`.
+    ///
+    /// The Linux RTX build is required (`-Dcuda=true`); on other
+    /// platforms setting this flag returns `LabError.UnsupportedDevice`
+    /// from `Trainer.init`.
+    use_cuda: bool = false,
 };
 
 /// Result of a completed training run.
@@ -187,6 +208,8 @@ pub const Trainer = struct {
             .d_ff = cfg.d_ff,
             .ln_eps = cfg.ln_eps,
             .bias = cfg.bias,
+            .n_layer = cfg.n_layer,
+            .n_head = cfg.n_head,
         };
 
         var model_rng = Rng.init(cfg.model_seed);
