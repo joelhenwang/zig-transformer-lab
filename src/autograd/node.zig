@@ -192,10 +192,25 @@ pub const SavedData = union(enum) {
     reduce_info: struct { shape: Shape, axis: u2 },
 
     /// Cross-entropy info: logits tensor snapshot + target indices.
-    /// Used by: cross_entropy.
+    /// Used by: cross_entropy (CPU path only).
     /// logits is a snapshot (by value); targets is a borrowed data slice
     /// that must outlive the tape.
     ce_info: struct { logits: Tensor, targets: []const f32 },
+
+    /// Cross-entropy CUDA fast path: the fused forward kernel already
+    /// computes `grad_logits = (softmax(logits) - one_hot(targets)) / N`
+    /// inside one launch, so the backward pass has nothing to recompute.
+    /// We save `grad_logits` directly and `backwardCrossEntropy` returns
+    /// a DtoD clone of it.
+    ///
+    /// Rationale for a dedicated variant (not an optional field on
+    /// `ce_info`): `ce_info.targets` is a `[]const f32` slice borrowed
+    /// from `targets.data`, which is `&.{}` for CUDA tensors (PR-δ
+    /// invariant — CUDA tensors keep an empty compat alias). A shared
+    /// variant with two conditionally-valid fields reads like a
+    /// footgun; two disjoint variants keep the CPU and CUDA code paths
+    /// cleanly separate.
+    ce_cuda_grad: Tensor,
 
     /// Embedding info: weight tensor snapshot + index tensor data.
     /// Used by: embedding (stub for Stage 4).

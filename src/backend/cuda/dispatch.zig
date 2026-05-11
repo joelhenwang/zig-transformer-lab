@@ -976,6 +976,107 @@ pub fn embeddingBackward(ids: Tensor, grad_out: Tensor, V: usize) LabError!Tenso
 }
 
 // ---------------------------------------------------------------------------
+// Cross-entropy (Milestone 1 — completes PR-mu)
+// ---------------------------------------------------------------------------
+//
+// Fused forward + grad_logits for mean cross-entropy. One kernel
+// launch produces both the scalar loss and the (N, C) gradient w.r.t.
+// logits; backward.zig just DtoD-clones the saved grad.
+//
+// The kernel signature and math contract are documented in
+// src/backend/cuda/kernels/ce_loss.cu. Caller-side requirements:
+//   - logits  : (N, C) contiguous CUDA
+//   - targets : (N,)   contiguous CUDA, f32 (rounded per row)
+//   - Ordinary PTX module prerequisite: loadPtxFromFile(ctx, io, "ce_loss").
+
+const CE_BLOCK_X: c_uint = 256;
+
+/// One launch that writes the scalar mean loss AND the full
+/// (N, C) grad_logits buffer. Both are owning CUDA tensors; caller
+/// must `storage.deinit(alloc)` each when done (on the CUDA path the
+/// allocator is unused, passed for signature uniformity with CPU).
+///
+/// Layout:
+///   loss.shape        = (1,)
+///   grad_logits.shape = (N, C)   (matches logits.shape)
+pub fn crossEntropyFused(
+    logits: Tensor,
+    targets: Tensor,
+) LabError!struct { loss: Tensor, grad_logits: Tensor } {
+    try requireSameDevice(logits, targets);
+    if (logits.shape.ndim() != 2) return error.ShapeMismatch;
+    if (targets.shape.ndim() != 1) return error.ShapeMismatch;
+    if (!shape_isContiguous(logits.shape, logits.strides)) return error.InvalidLayout;
+    if (!shape_isContiguous(targets.shape, targets.strides)) return error.InvalidLayout;
+
+    const N = logits.shape.dims[0];
+    const C = logits.shape.dims[1];
+    if (targets.shape.dims[0] != N) return error.ShapeMismatch;
+
+    const lg_buf = try requireCudaBuffer(logits);
+    const tg_buf = try requireCudaBuffer(targets);
+    const ctx = lg_buf.ctx;
+    const mut_ctx: *CudaContext = @constCast(ctx);
+
+    // Pre-zero the 1-element loss buffer so the kernel's atomicAdd
+    // accumulates from 0 and not from uninitialised device memory.
+    // If this memset is skipped the loss is garbage + correct-delta.
+    var loss_buf = try DeviceBuffer.alloc(ctx, 1);
+    errdefer loss_buf.deinit();
+    try fillBits(loss_buf, 0, 1);
+
+    // grad_logits need not be pre-zeroed — the kernel writes every
+    // element exactly once in pass 3.
+    var grad_buf = try DeviceBuffer.alloc(ctx, N * C);
+    errdefer grad_buf.deinit();
+
+    const kfn = try module.getKernel(mut_ctx, "ce_loss", "ce_fused");
+    const N_arg: c_uint = @intCast(N);
+    const C_arg: c_uint = @intCast(C);
+    const args = [_]?*anyopaque{
+        @constCast(@as(*const anyopaque, @ptrCast(&lg_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&tg_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&loss_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&grad_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&N_arg))),
+        @constCast(@as(*const anyopaque, @ptrCast(&C_arg))),
+    };
+    // Grid: one block per row. Kernel's block_reduce_* routines
+    // require BLOCK_SIZE=256 (power of two). Softmax uses the same
+    // geometry — see softmax.cu for the derivation.
+    try module.launch(
+        mut_ctx,
+        kfn,
+        .{ @intCast(N), 1, 1 },
+        .{ CE_BLOCK_X, 1, 1 },
+        0,
+        &args,
+    );
+
+    const loss_tensor = wrapContiguousOutput(loss_buf, Shape.init1D(1), logits.requires_grad);
+    // grad_logits is an intermediate passed to the tape; its
+    // `requires_grad` doesn't matter (backward never traverses
+    // through it) but we set it false to avoid confusing debug
+    // inspection.
+    const grad_tensor = wrapContiguousOutput(grad_buf, logits.shape, false);
+    return .{ .loss = loss_tensor, .grad_logits = grad_tensor };
+}
+
+/// DtoD-clone a CUDA tensor into a fresh owning buffer with the same
+/// shape/strides. Used by `backwardCrossEntropy` to hand the tape's
+/// saved grad back as the parent gradient without leaking the
+/// tape-owned copy.
+pub fn cloneDevice(t: Tensor) LabError!Tensor {
+    if (!shape_isContiguous(t.shape, t.strides)) return error.InvalidLayout;
+    const src_buf = try requireCudaBuffer(t);
+    const ctx = src_buf.ctx;
+    var out_buf = try DeviceBuffer.alloc(ctx, src_buf.len);
+    errdefer out_buf.deinit();
+    try out_buf.copyFromDevice(src_buf);
+    return wrapContiguousOutput(out_buf, t.shape, t.requires_grad);
+}
+//
+// ---------------------------------------------------------------------------
 // AdamW step (PR-mu)
 // ---------------------------------------------------------------------------
 //

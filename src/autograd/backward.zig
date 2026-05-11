@@ -709,6 +709,23 @@ fn backwardCrossEntropy(
 
             result[0] = try heapAlloc(allocator, grad_logits);
         },
+        .ce_cuda_grad => |saved_grad| {
+            // CUDA fast path (Milestone 1). The fused forward kernel
+            // already baked the `1/B` mean factor and the
+            // `softmax - one_hot` subtraction into `saved_grad`, so
+            // backward just returns a DtoD clone.
+            //
+            // We intentionally do NOT read grad_output.data[0] here —
+            // CUDA tensors keep an empty CPU compat alias. The tape's
+            // `backward` seeds the loss gradient with 1.0 via
+            // ops_create.onesLike, and cross-entropy output is always
+            // the root of backward in our autograd design. If a future
+            // caller ever routes a non-unit gradient through CE, they
+            // would need to fuse the scale into the clone (one extra
+            // mulScalar launch). Not needed today.
+            const g_copy = try cuda_dispatch.cloneDevice(saved_grad);
+            result[0] = try heapAlloc(allocator, g_copy);
+        },
         else => return error.InvalidArgument,
     }
 }

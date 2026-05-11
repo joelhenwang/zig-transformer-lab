@@ -61,6 +61,8 @@ const logSoftmax = @import("softmax.zig").logSoftmax;
 const Tape = @import("../../autograd/tape.zig").Tape;
 const Node = @import("../../autograd/node.zig").Node;
 const OpKind = @import("../../autograd/node.zig").OpKind;
+// Milestone 1: CUDA fused CE path routes here.
+const cuda_dispatch = @import("../../backend/cuda/dispatch.zig");
 
 /// Mean cross-entropy loss between logits and integer targets.
 ///
@@ -76,8 +78,15 @@ const OpKind = @import("../../autograd/node.zig").OpKind;
 ///   // loss = -(-0.399) / 1 = 0.399
 ///
 /// Memory: caller owns the returned tensor; must call deinit(allocator).
+///
+/// Device routing (Milestone 1):
+///   When `logits` lives on CUDA we call `cuda_dispatch.crossEntropyFused`,
+///   which produces both the scalar loss and `grad_logits` in a single
+///   launch. The grad is saved in a dedicated `ce_cuda_grad` SavedData
+///   variant; the backward pass just DtoD-clones it, avoiding the
+///   recompute-softmax-on-the-host round-trip that the CPU path needs.
 pub fn crossEntropy(allocator: std.mem.Allocator, logits: Tensor, targets: Tensor, tape: ?*Tape) LabError!Tensor {
-    // --- Input validation ---
+    // --- Input validation (device-agnostic) ---
     // logits must be rank-2: (batch_size, num_classes)
     if (logits.shape.ndim() != 2) return LabError.InvalidArgument;
     // targets must be rank-1: (batch_size,)
@@ -90,7 +99,45 @@ pub fn crossEntropy(allocator: std.mem.Allocator, logits: Tensor, targets: Tenso
     // Batch sizes must match
     if (B != B_t) return LabError.ShapeMismatch;
 
-    // Validate target indices are in range [0, C).  This prevents
+    // --- CUDA fast path ---
+    // The fused kernel does not range-check targets (a DtoH just for
+    // validation would defeat the fusion). The training loop is the
+    // only production caller; it produces in-range indices by
+    // construction. A malformed index on CUDA reads at most one float
+    // from logits[target_idx] beyond the row; with standard memory
+    // layout this stays within the allocation for any `target_idx < 2**31`.
+    // For defence-in-depth we may add a host-side validation in a
+    // Stage 9 review.
+    if (logits.storage == .cuda) {
+        var fused = try cuda_dispatch.crossEntropyFused(logits, targets);
+        // On error after this point we must free BOTH allocations.
+        // `loss` is returned to the caller; `grad_logits` is either
+        // handed to the tape (which DtoD-copies) or freed locally.
+        errdefer fused.loss.storage.deinit(allocator);
+        var loss = fused.loss;
+
+        if (tape) |t| {
+            if (logits.requires_grad) {
+                const node_id = try t.record(Node{
+                    .id = undefined,
+                    .op = .cross_entropy,
+                    .parents = .{ logits.tape_node, null },
+                    .n_parents = 1,
+                    .saved = .{ .ce_cuda_grad = fused.grad_logits },
+                });
+                loss.requires_grad = true;
+                loss.tape_node = node_id;
+            }
+        }
+        // The tape's takeOwnershipOfSaved DtoD-clones grad_logits
+        // into kept_alive_cuda, so the original buffer is ours to
+        // free regardless of whether we recorded a node.
+        fused.grad_logits.storage.deinit(allocator);
+        return loss;
+    }
+
+    // --- CPU path ---
+    // Validate target indices are in range [0, C). This prevents
     // out-of-bounds reads into the log_probs tensor, which would
     // silently produce wrong results (or segfault in ReleaseSafe).
     for (0..B) |i| {
@@ -98,19 +145,16 @@ pub fn crossEntropy(allocator: std.mem.Allocator, logits: Tensor, targets: Tenso
         if (class_idx >= C) return LabError.InvalidArgument;
     }
 
-    // --- Compute log_softmax of logits ---
-    // This is the numerically stable way to get log-probabilities.
-    // See softmax.zig for why we don't compute log(softmax(x))
-    // directly.
+    // Compute log_softmax of logits. This is the numerically stable
+    // way to get log-probabilities. See softmax.zig for why we don't
+    // compute log(softmax(x)) directly.
     var log_probs = try logSoftmax(allocator, logits, null);
     defer log_probs.deinit(allocator);
 
-    // --- Gather and average ---
-    // For each sample i, look up log_probs[i, targets[i]] and
-    // accumulate the negative log-probability.
+    // Gather the log-prob of each target and accumulate.
     var loss_sum: f32 = 0;
     for (0..B) |i| {
-        // Round the f32 target to the nearest integer.  This handles
+        // Round the f32 target to the nearest integer. This handles
         // the case where class indices are stored as f32 with tiny
         // floating-point imprecision (e.g., 1.9999999 instead of 2).
         const class_idx = @as(usize, @intFromFloat(@round(targets.data[i])));
@@ -119,20 +163,17 @@ pub fn crossEntropy(allocator: std.mem.Allocator, logits: Tensor, targets: Tenso
         // so the offset for (i, class_idx) is i * C + class_idx.
         const log_p = log_probs.data[i * C + class_idx];
 
-        // Cross-entropy = -log(P(target)).  We negate because
-        // log_probs stores log-probabilities (which are negative
-        // or zero), and we want the loss (which is positive or zero).
+        // Cross-entropy = -log(P(target)). We negate because
+        // log_probs stores log-probabilities (negative or zero) and
+        // we want the loss (positive or zero).
         loss_sum += -log_p;
     }
 
-    // Mean over the batch.  Dividing by B gives the average loss
-    // per sample, which makes the loss scale-independent of batch
-    // size — important for consistent learning rates.
+    // Mean over the batch. Dividing by B gives the average loss per
+    // sample, which makes the loss scale-independent of batch size.
     const mean_loss = loss_sum / @as(f32, @floatFromInt(B));
 
     // --- Allocate scalar output ---
-    // We return a rank-1 tensor of size 1 as our "scalar" — our
-    // Shape system requires at least 1 dimension.
     var out = try Tensor.init(allocator, Shape.init1D(1));
     errdefer out.deinit(allocator);
     out.data[0] = mean_loss;

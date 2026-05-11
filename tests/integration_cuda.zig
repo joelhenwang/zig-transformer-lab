@@ -47,6 +47,7 @@ const ops_elementwise = lab.ops.elementwise;
 const ops_reduce = lab.ops.reduce;
 const ops_matmul = lab.ops.matmul;
 const ops_softmax = lab.ops.softmax;
+const ops_loss = lab.ops.loss;
 const Tape = lab.Tape;
 const Embedding = lab.nn.embedding.Embedding;
 
@@ -1888,4 +1889,124 @@ test "cuda dispatch adamwStep: one update matches CPU reference" {
     var p_back = try p_gpu.toCpu(alloc);
     defer p_back.deinit(alloc);
     for (0..N) |i| try testing.expectApproxEqAbs(p_ref[i], p_back.data[i], 1e-6);
+}
+
+// ---------------------------------------------------------------------------
+// Milestone 1: Cross-entropy fused forward + grad (completes PR-mu)
+// ---------------------------------------------------------------------------
+
+test "cuda dispatch crossEntropyFused: oracle cross_entropy_3d forward parity" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "ce_loss");
+
+    const alloc = testing.allocator;
+
+    // Oracle: logits (B=2, T=3, V=5), targets (B, T) f32, loss (1,).
+    // Our CE kernel operates on flat (N, V) with targets (N,), matching
+    // how the trainer reshapes the 3D tensors before loss. We do the
+    // same reshape host-side: mutate shape + strides before toCuda, so
+    // the CUDA copy sees a 2D contiguous view of the same bytes.
+    var logits_3d = try oracle.loadTensor(alloc, io, fixturePath("cross_entropy_3d", "input_0.ztlt"));
+    defer logits_3d.deinit(alloc);
+    var targets_2d = try oracle.loadTensor(alloc, io, fixturePath("cross_entropy_3d", "input_1.ztlt"));
+    defer targets_2d.deinit(alloc);
+    var expect_loss = try oracle.loadTensor(alloc, io, fixturePath("cross_entropy_3d", "output.ztlt"));
+    defer expect_loss.deinit(alloc);
+
+    const B = logits_3d.shape.dims[0];
+    const T = logits_3d.shape.dims[1];
+    const V = logits_3d.shape.dims[2];
+    logits_3d.shape = Shape.init2D(B * T, V);
+    logits_3d.strides = computeStrides(logits_3d.shape);
+    targets_2d.shape = Shape.init1D(B * T);
+    targets_2d.strides = computeStrides(targets_2d.shape);
+
+    var logits_gpu = try logits_3d.toCuda(&ctx);
+    defer logits_gpu.storage.deinit(alloc);
+    var targets_gpu = try targets_2d.toCuda(&ctx);
+    defer targets_gpu.storage.deinit(alloc);
+
+    var fused = try dispatch.crossEntropyFused(logits_gpu, targets_gpu);
+    defer fused.loss.storage.deinit(alloc);
+    defer fused.grad_logits.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    var loss_cpu = try fused.loss.toCpu(alloc);
+    defer loss_cpu.deinit(alloc);
+    // rel/abs both at 1e-4: CE involves max-subtract + sum-of-exps +
+    // log + atomicAdd across rows; drift from strict f32 evaluation
+    // order accumulates but stays well inside this tolerance on our
+    // (B*T=6) row count.
+    try oracle.expectClose(loss_cpu, expect_loss, .{ .rel_tol = 1e-4, .abs_tol = 1e-4 });
+}
+
+test "cuda ops_loss.crossEntropy via tape: oracle cross_entropy_3d forward+backward parity" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    // CE kernel for the fused forward; reduce/elementwise aren't
+    // needed on the backward path because we DtoD-clone the saved
+    // grad via cuMemcpyDtoD_v2 (no kernel launch).
+    _ = try module.loadPtxFromFile(&ctx, io, "ce_loss");
+
+    const alloc = testing.allocator;
+
+    var logits_3d = try oracle.loadTensor(alloc, io, fixturePath("cross_entropy_3d", "input_0.ztlt"));
+    defer logits_3d.deinit(alloc);
+    var targets_2d = try oracle.loadTensor(alloc, io, fixturePath("cross_entropy_3d", "input_1.ztlt"));
+    defer targets_2d.deinit(alloc);
+    var expect_loss = try oracle.loadTensor(alloc, io, fixturePath("cross_entropy_3d", "output.ztlt"));
+    defer expect_loss.deinit(alloc);
+    var expect_grad_3d = try oracle.loadTensor(alloc, io, fixturePath("cross_entropy_3d", "grad_input_0.ztlt"));
+    defer expect_grad_3d.deinit(alloc);
+
+    const B = logits_3d.shape.dims[0];
+    const T = logits_3d.shape.dims[1];
+    const V = logits_3d.shape.dims[2];
+    logits_3d.shape = Shape.init2D(B * T, V);
+    logits_3d.strides = computeStrides(logits_3d.shape);
+    targets_2d.shape = Shape.init1D(B * T);
+    targets_2d.strides = computeStrides(targets_2d.shape);
+
+    var logits_gpu = try logits_3d.toCuda(&ctx);
+    defer logits_gpu.storage.deinit(alloc);
+    logits_gpu.requires_grad = true;
+    logits_gpu.param_id = 42;
+
+    var targets_gpu = try targets_2d.toCuda(&ctx);
+    defer targets_gpu.storage.deinit(alloc);
+
+    var tape = Tape.init(alloc);
+    defer tape.deinit();
+    _ = try tape.trackLeaf(&logits_gpu);
+
+    var loss = try ops_loss.crossEntropy(alloc, logits_gpu, targets_gpu, &tape);
+    defer loss.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    // Forward parity.
+    {
+        var loss_cpu = try loss.toCpu(alloc);
+        defer loss_cpu.deinit(alloc);
+        try oracle.expectClose(loss_cpu, expect_loss, .{ .rel_tol = 1e-4, .abs_tol = 1e-4 });
+    }
+
+    // Backward. Tape seeds the scalar loss with 1.0 via onesLike,
+    // backwardCrossEntropy DtoD-clones the saved grad from
+    // `.ce_cuda_grad`.
+    try tape.backward(&loss);
+    try ctx.synchronize();
+
+    var grad_cpu_flat = try logits_gpu.grad.?.*.toCpu(alloc);
+    defer grad_cpu_flat.deinit(alloc);
+    // Expected grad is stored as (B, T, V); we produced a flat (B*T, V)
+    // buffer. Compare row-major: they must match bit-level since both
+    // are contiguous with the same element order.
+    expect_grad_3d.shape = Shape.init2D(B * T, V);
+    expect_grad_3d.strides = computeStrides(expect_grad_3d.shape);
+    try oracle.expectClose(grad_cpu_flat, expect_grad_3d, .{ .rel_tol = 1e-4, .abs_tol = 1e-4 });
 }

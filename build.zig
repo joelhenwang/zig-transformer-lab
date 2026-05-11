@@ -202,11 +202,11 @@ const kernel_names = [_][]const u8{
     "softmax",
     "embedding",
     "adamw",
+    "ce_loss",
     // Future PRs will add:
     // "layernorm",
     // "gelu",
     // "causal_mask",
-    // "ce_loss",
 };
 
 /// Creates nvcc compile commands for each kernel in kernel_names,

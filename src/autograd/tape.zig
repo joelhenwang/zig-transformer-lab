@@ -347,6 +347,13 @@ pub const Tape = struct {
                     .targets = try self.cloneSlice(info.targets),
                 },
             },
+            .ce_cuda_grad => |t| SavedData{
+                // The fused CUDA forward already computed the gradient.
+                // cloneTensorData DtoD-copies it into kept_alive_cuda
+                // so backward can read it after the caller's grad
+                // tensor has been freed.
+                .ce_cuda_grad = try self.cloneTensorData(t),
+            },
             .embedding_info => |info| SavedData{
                 .embedding_info = .{
                     .weight = try self.cloneTensorData(info.weight),
