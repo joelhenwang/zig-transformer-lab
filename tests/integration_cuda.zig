@@ -3123,3 +3123,168 @@ test "cuda TinyWordTransformer backward (sumAll): CPU vs CUDA per-param parity" 
     // near-zero grads would otherwise spike rel.
     try testing.expect(worst_abs < 1e-3 or worst_rel < 1e-3);
 }
+
+// Session 4 part b: One training step parity (M5).
+// forward + CE + backward + AdamW.step on both devices, then
+// compare post-step parameters.
+
+const AdamW = lab.optim.adamw.AdamW;
+
+test "cuda TinyWordTransformer one training step: CPU vs CUDA post-step param parity" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+    _ = try module.loadPtxFromFile(&ctx, io, "softmax");
+    _ = try module.loadPtxFromFile(&ctx, io, "unary");
+    _ = try module.loadPtxFromFile(&ctx, io, "embedding");
+    _ = try module.loadPtxFromFile(&ctx, io, "ce_loss");
+    _ = try module.loadPtxFromFile(&ctx, io, "adamw");
+
+    const alloc = testing.allocator;
+    var rng = lab.rng.Rng.init(99);
+
+    const TransformerConfig = lab.nn.module.TransformerConfig;
+    const cfg = TransformerConfig{
+        .vocab_size = 16,
+        .d_model = 8,
+        .d_ff = 32,
+        .max_seq_len = 4,
+    };
+
+    var model_cpu = try TinyWordTransformer.init(alloc, cfg, &rng);
+    defer model_cpu.deinit();
+    var model_gpu = try TinyWordTransformer.init(alloc, cfg, &rng);
+    defer model_gpu.deinit();
+
+    {
+        var p_cpu: std.ArrayList(*Tensor) = .empty;
+        defer p_cpu.deinit(alloc);
+        try p_cpu.ensureTotalCapacity(alloc, 32);
+        model_cpu.parameters(&p_cpu);
+
+        var p_gpu: std.ArrayList(*Tensor) = .empty;
+        defer p_gpu.deinit(alloc);
+        try p_gpu.ensureTotalCapacity(alloc, 32);
+        model_gpu.parameters(&p_gpu);
+
+        for (0..p_cpu.items.len) |i| {
+            @memcpy(p_gpu.items[i].data, p_cpu.items[i].data);
+            p_cpu.items[i].requires_grad = true;
+            p_gpu.items[i].requires_grad = true;
+        }
+    }
+
+    try model_gpu.moveToCuda(&ctx);
+
+    // Inputs and targets for cross-entropy.
+    var ids_cpu = try Tensor.init(alloc, Shape.init2D(2, 3));
+    defer ids_cpu.deinit(alloc);
+    const id_vals = [_]f32{ 0, 2, 5, 1, 7, 3 };
+    @memcpy(ids_cpu.data, &id_vals);
+    var ids_gpu = try ids_cpu.toCuda(&ctx);
+    defer ids_gpu.storage.deinit(alloc);
+
+    var targets_cpu = try Tensor.init(alloc, Shape.init1D(6));
+    defer targets_cpu.deinit(alloc);
+    const tgt_vals = [_]f32{ 5, 1, 0, 3, 2, 4 };
+    @memcpy(targets_cpu.data, &tgt_vals);
+    var targets_gpu = try targets_cpu.toCuda(&ctx);
+    defer targets_gpu.storage.deinit(alloc);
+
+    // Forward + backward on CPU.
+    var tape_cpu = Tape.init(alloc);
+    defer tape_cpu.deinit();
+    {
+        var p: std.ArrayList(*Tensor) = .empty;
+        defer p.deinit(alloc);
+        try p.ensureTotalCapacity(alloc, 32);
+        model_cpu.parameters(&p);
+        for (p.items) |x| _ = try tape_cpu.trackLeaf(x);
+    }
+    var logits_cpu = try model_cpu.forward(ids_cpu, &tape_cpu);
+    defer logits_cpu.deinit(alloc);
+    // Reshape logits to 2D for crossEntropy. Same-memory mutation of
+    // the shape/strides is safe here because the backing buffer is
+    // row-major contiguous.
+    const V = cfg.vocab_size;
+    const BT: usize = 2 * 3;
+    var logits_2d_cpu = try lab.ops.shape_ops.reshapeTracked(alloc, logits_cpu, Shape.init2D(BT, V), &tape_cpu);
+    defer logits_2d_cpu.deinit(alloc);
+    var loss_cpu = try lab.ops.loss.crossEntropy(alloc, logits_2d_cpu, targets_cpu, &tape_cpu);
+    defer loss_cpu.deinit(alloc);
+    try tape_cpu.backward(&loss_cpu);
+
+    // Forward + backward on CUDA.
+    var tape_gpu = Tape.init(alloc);
+    defer tape_gpu.deinit();
+    {
+        var p: std.ArrayList(*Tensor) = .empty;
+        defer p.deinit(alloc);
+        try p.ensureTotalCapacity(alloc, 32);
+        model_gpu.parameters(&p);
+        for (p.items) |x| _ = try tape_gpu.trackLeaf(x);
+    }
+    var logits_gpu = try model_gpu.forward(ids_gpu, &tape_gpu);
+    defer logits_gpu.storage.deinit(alloc);
+    var logits_2d_gpu = try lab.ops.shape_ops.reshapeTracked(alloc, logits_gpu, Shape.init2D(BT, V), &tape_gpu);
+    defer logits_2d_gpu.storage.deinit(alloc);
+    var loss_gpu = try lab.ops.loss.crossEntropy(alloc, logits_2d_gpu, targets_gpu, &tape_gpu);
+    defer loss_gpu.storage.deinit(alloc);
+    try tape_gpu.backward(&loss_gpu);
+    try ctx.synchronize();
+
+    // Loss parity check.
+    {
+        var loss_back = try loss_gpu.toCpu(alloc);
+        defer loss_back.deinit(alloc);
+        std.debug.print(
+            "  step loss: cpu={d:.6} gpu={d:.6}\n",
+            .{ loss_cpu.data[0], loss_back.data[0] },
+        );
+        try oracle.expectClose(loss_back, loss_cpu, .{ .rel_tol = 1e-4, .abs_tol = 1e-4 });
+    }
+
+    // AdamW step on both sides.
+    var p_cpu_list: std.ArrayList(*Tensor) = .empty;
+    defer p_cpu_list.deinit(alloc);
+    try p_cpu_list.ensureTotalCapacity(alloc, 32);
+    model_cpu.parameters(&p_cpu_list);
+    var p_gpu_list: std.ArrayList(*Tensor) = .empty;
+    defer p_gpu_list.deinit(alloc);
+    try p_gpu_list.ensureTotalCapacity(alloc, 32);
+    model_gpu.parameters(&p_gpu_list);
+
+    var opt_cpu = try AdamW.init(alloc, .{});
+    defer opt_cpu.deinit(alloc);
+    var opt_gpu = try AdamW.init(alloc, .{});
+    defer opt_gpu.deinit(alloc);
+    try AdamW.step(&opt_cpu, p_cpu_list.items);
+    try AdamW.step(&opt_gpu, p_gpu_list.items);
+    try ctx.synchronize();
+
+    // Post-step param parity: each parameter's value (after the
+    // AdamW update) must match to within playbook tolerance.
+    var worst_abs: f32 = 0.0;
+    var worst_rel: f32 = 0.0;
+    var worst_idx: usize = 0;
+    for (0..p_cpu_list.items.len) |i| {
+        var p_gpu_host = try p_gpu_list.items[i].*.toCpu(alloc);
+        defer p_gpu_host.deinit(alloc);
+        const abs_i = try oracle.maxAbsDiff(p_gpu_host, p_cpu_list.items[i].*);
+        const rel_i = try oracle.maxRelErr(p_gpu_host, p_cpu_list.items[i].*, 1e-8);
+        if (abs_i > worst_abs) {
+            worst_abs = abs_i;
+            worst_idx = i;
+        }
+        if (rel_i > worst_rel) worst_rel = rel_i;
+    }
+    std.debug.print(
+        "  one-step post-param: worst_abs={d:.6} (param {d}) worst_rel={d:.6}\n",
+        .{ worst_abs, worst_idx, worst_rel },
+    );
+    // Playbook: post-one-step abs < 2e-3.
+    try testing.expect(worst_abs < 2e-3);
+}
