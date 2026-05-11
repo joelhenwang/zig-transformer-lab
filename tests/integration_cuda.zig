@@ -2268,3 +2268,213 @@ test "cuda ops_unary.geluExact: oracle gelu_2d forward + backward parity" {
     // so drift here is purely from gelu' vs the CPU reference.
     try oracle.expectClose(da_back, expect_da, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
 }
+
+// ---------------------------------------------------------------------------
+// Session 2: LayerNorm oracle parity + Linear smoke tests
+// ---------------------------------------------------------------------------
+
+const LayerNorm = lab.nn.layernorm.LayerNorm;
+const Linear = lab.nn.linear.Linear;
+
+test "cuda LayerNorm: oracle layernorm_3d forward + backward parity" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    // LayerNorm forward composes mean -> sub -> mul -> addScalar ->
+    // sqrt -> div -> reshape -> mul -> reshape -> add. Every module
+    // below is pulled in at least once. Backward needs broadcastTo
+    // (reduce) and elementwise mulScalar/div.
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+    _ = try module.loadPtxFromFile(&ctx, io, "unary");
+
+    const alloc = testing.allocator;
+
+    // Oracle: input (2,3,4), gamma (4,), beta (4,), eps=1e-5.
+    var a_cpu = try oracle.loadTensor(alloc, io, fixturePath("layernorm_3d", "input_0.ztlt"));
+    defer a_cpu.deinit(alloc);
+    var gamma_cpu = try oracle.loadTensor(alloc, io, fixturePath("layernorm_3d", "input_1.ztlt"));
+    defer gamma_cpu.deinit(alloc);
+    var beta_cpu = try oracle.loadTensor(alloc, io, fixturePath("layernorm_3d", "input_2.ztlt"));
+    defer beta_cpu.deinit(alloc);
+    var expect_y = try oracle.loadTensor(alloc, io, fixturePath("layernorm_3d", "output.ztlt"));
+    defer expect_y.deinit(alloc);
+    var expect_da = try oracle.loadTensor(alloc, io, fixturePath("layernorm_3d", "grad_input_0.ztlt"));
+    defer expect_da.deinit(alloc);
+    var expect_dgamma = try oracle.loadTensor(alloc, io, fixturePath("layernorm_3d", "grad_input_1.ztlt"));
+    defer expect_dgamma.deinit(alloc);
+    var expect_dbeta = try oracle.loadTensor(alloc, io, fixturePath("layernorm_3d", "grad_input_2.ztlt"));
+    defer expect_dbeta.deinit(alloc);
+
+    const D = a_cpu.shape.dims[2];
+
+    // Build LayerNorm by hand with CUDA gamma/beta. (LayerNorm.init
+    // would create CPU ones/zeros; we want the oracle values.)
+    var gamma_gpu = try gamma_cpu.toCuda(&ctx);
+    defer gamma_gpu.storage.deinit(alloc);
+    gamma_gpu.requires_grad = true;
+    gamma_gpu.param_id = 101;
+
+    var beta_gpu = try beta_cpu.toCuda(&ctx);
+    defer beta_gpu.storage.deinit(alloc);
+    beta_gpu.requires_grad = true;
+    beta_gpu.param_id = 102;
+
+    var a_gpu = try a_cpu.toCuda(&ctx);
+    defer a_gpu.storage.deinit(alloc);
+    a_gpu.requires_grad = true;
+    a_gpu.param_id = 103;
+
+    var tape = Tape.init(alloc);
+    defer tape.deinit();
+    _ = try tape.trackLeaf(&a_gpu);
+    _ = try tape.trackLeaf(&gamma_gpu);
+    _ = try tape.trackLeaf(&beta_gpu);
+
+    const ln = LayerNorm{
+        .gamma = gamma_gpu,
+        .beta = beta_gpu,
+        .allocator = alloc,
+        .d_model = D,
+        .eps = 1e-5,
+    };
+
+    var y = try ln.forward(a_gpu, &tape);
+    defer y.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    // Forward parity. LayerNorm composes 8+ ops; each kernel drifts a
+    // few ULP from the CPU reference. The oracle tolerance rel=1e-4,
+    // abs=1e-4 is generous enough to absorb the compound drift on a
+    // (2,3,4) shape.
+    {
+        var y_back = try y.toCpu(alloc);
+        defer y_back.deinit(alloc);
+        try oracle.expectClose(y_back, expect_y, .{ .rel_tol = 1e-4, .abs_tol = 1e-4 });
+    }
+
+    // Backward via sumAll loss (same as oracle).
+    var loss = try ops_reduce.sumAll(alloc, y, &tape);
+    defer loss.storage.deinit(alloc);
+    try tape.backward(&loss);
+    try ctx.synchronize();
+
+    // Per-input grad parity.
+    {
+        var da_back = try a_gpu.grad.?.*.toCpu(alloc);
+        defer da_back.deinit(alloc);
+        try oracle.expectClose(da_back, expect_da, .{ .rel_tol = 1e-3, .abs_tol = 1e-4 });
+    }
+    {
+        var dgamma_back = try gamma_gpu.grad.?.*.toCpu(alloc);
+        defer dgamma_back.deinit(alloc);
+        try oracle.expectClose(dgamma_back, expect_dgamma, .{ .rel_tol = 1e-3, .abs_tol = 1e-4 });
+    }
+    {
+        var dbeta_back = try beta_gpu.grad.?.*.toCpu(alloc);
+        defer dbeta_back.deinit(alloc);
+        try oracle.expectClose(dbeta_back, expect_dbeta, .{ .rel_tol = 1e-3, .abs_tol = 1e-4 });
+    }
+}
+
+test "cuda Linear.forward: 2D input matches CPU reference" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+
+    const alloc = testing.allocator;
+    var rng = lab.rng.Rng.init(42);
+
+    // Build a Linear on CPU, then replicate its weights on CUDA.
+    var layer_cpu = try Linear.init(alloc, 4, 3, true, &rng);
+    defer layer_cpu.deinit();
+
+    // Input on both devices.
+    var x_cpu = try lab.ops.create.randn(alloc, Shape.init2D(2, 4), &rng, 0.0, 1.0);
+    defer x_cpu.deinit(alloc);
+    var x_gpu = try x_cpu.toCuda(&ctx);
+    defer x_gpu.storage.deinit(alloc);
+
+    // Clone weights to CUDA and wrap in a CUDA-weight Linear.
+    var w_gpu = try layer_cpu.weight.toCuda(&ctx);
+    defer w_gpu.storage.deinit(alloc);
+    w_gpu.param_id = layer_cpu.weight.param_id;
+    var b_gpu = try layer_cpu.bias.?.toCuda(&ctx);
+    defer b_gpu.storage.deinit(alloc);
+    b_gpu.param_id = layer_cpu.bias.?.param_id;
+    const layer_gpu = Linear{
+        .weight = w_gpu,
+        .bias = b_gpu,
+        .allocator = alloc,
+        .d_in = 4,
+        .d_out = 3,
+        .use_bias = true,
+    };
+
+    var y_cpu = try layer_cpu.forward(x_cpu, null);
+    defer y_cpu.deinit(alloc);
+    var y_gpu = try layer_gpu.forward(x_gpu, null);
+    defer y_gpu.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    var y_back = try y_gpu.toCpu(alloc);
+    defer y_back.deinit(alloc);
+    // Linear = matmul + bias-broadcast-add. cuBLAS matmul vs our CPU
+    // triple-loop matmul drifts up to ~5 ULP per accumulator slot on
+    // K=4. rel=1e-4 / abs=1e-5 is comfortable on this shape.
+    try oracle.expectClose(y_back, y_cpu, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
+}
+
+test "cuda Linear.forward: 3D input matches CPU reference" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+
+    const alloc = testing.allocator;
+    var rng = lab.rng.Rng.init(42);
+
+    var layer_cpu = try Linear.init(alloc, 4, 3, true, &rng);
+    defer layer_cpu.deinit();
+
+    var x_cpu = try lab.ops.create.randn(alloc, Shape.init3D(2, 3, 4), &rng, 0.0, 1.0);
+    defer x_cpu.deinit(alloc);
+    var x_gpu = try x_cpu.toCuda(&ctx);
+    defer x_gpu.storage.deinit(alloc);
+
+    var w_gpu = try layer_cpu.weight.toCuda(&ctx);
+    defer w_gpu.storage.deinit(alloc);
+    w_gpu.param_id = layer_cpu.weight.param_id;
+    var b_gpu = try layer_cpu.bias.?.toCuda(&ctx);
+    defer b_gpu.storage.deinit(alloc);
+    b_gpu.param_id = layer_cpu.bias.?.param_id;
+    const layer_gpu = Linear{
+        .weight = w_gpu,
+        .bias = b_gpu,
+        .allocator = alloc,
+        .d_in = 4,
+        .d_out = 3,
+        .use_bias = true,
+    };
+
+    var y_cpu = try layer_cpu.forward(x_cpu, null);
+    defer y_cpu.deinit(alloc);
+    var y_gpu = try layer_gpu.forward(x_gpu, null);
+    defer y_gpu.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    try testing.expectEqual(@as(usize, 3), y_gpu.shape.ndim());
+    try testing.expectEqual(@as(usize, 2), y_gpu.shape.dims[0]);
+    try testing.expectEqual(@as(usize, 3), y_gpu.shape.dims[1]);
+    try testing.expectEqual(@as(usize, 3), y_gpu.shape.dims[2]);
+
+    var y_back = try y_gpu.toCpu(alloc);
+    defer y_back.deinit(alloc);
+    try oracle.expectClose(y_back, y_cpu, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
+}

@@ -36,9 +36,17 @@ const Tensor = tensor_mod.Tensor;
 const Shape = @import("../shape.zig").Shape;
 const totalElements = @import("../shape.zig").totalElements;
 const shape_equals = @import("../shape.zig").equals;
+const computeStrides = @import("../shape.zig").computeStrides;
+const isContiguous = @import("../shape.zig").isContiguous;
 const Tape = @import("../../autograd/tape.zig").Tape;
 const Node = @import("../../autograd/node.zig").Node;
 const OpKind = @import("../../autograd/node.zig").OpKind;
+// Milestone 2 (Session 2): shape-manipulation CUDA materialisation.
+// We need CUDA-aware reshape/transpose because Linear, LayerNorm and
+// Attention compose these tracked ops, and the original host-side
+// element-copy loops read from `tensor.data` which is the empty
+// compat alias on CUDA.
+const cuda_dispatch = @import("../../backend/cuda/dispatch.zig");
 
 /// Reshape a tensor to a new shape, recording the operation on the tape.
 ///
@@ -57,6 +65,44 @@ const OpKind = @import("../../autograd/node.zig").OpKind;
 pub fn reshapeTracked(allocator: std.mem.Allocator, tensor: Tensor, new_shape: Shape, tape: ?*Tape) LabError!Tensor {
     if (totalElements(tensor.shape) != totalElements(new_shape)) {
         return error.ShapeMismatch;
+    }
+
+    // Milestone 2: CUDA branch. Produce a fresh contiguous CUDA
+    // buffer holding the materialised data, then relabel its shape
+    // to new_shape.
+    //   - Contiguous source: DtoD-clone (cuMemcpyDtoD_v2) then rewrap.
+    //   - Non-contig source: broadcastTo(source, source.shape)
+    //     rewrites the elements contiguously while walking via the
+    //     original strides — same effect as a stride-aware gather.
+    if (tensor.device == .cuda) {
+        var out = blk: {
+            if (isContiguous(tensor.shape, tensor.strides)) {
+                break :blk try cuda_dispatch.cloneDevice(tensor);
+            } else {
+                break :blk try cuda_dispatch.broadcastTo(tensor, tensor.shape);
+            }
+        };
+        // Now `out` is a contiguous CUDA tensor with tensor.shape.
+        // Swap its shape/strides to the caller's new_shape. Element
+        // count matches (checked above) so the underlying buffer is
+        // the right size regardless of rank.
+        out.shape = new_shape;
+        out.strides = computeStrides(new_shape);
+
+        if (tape) |t| {
+            if (tensor.requires_grad) {
+                const node_id = try t.record(Node{
+                    .id = undefined,
+                    .op = .reshape,
+                    .parents = .{ tensor.tape_node, null },
+                    .n_parents = 1,
+                    .saved = .{ .tensor_ref = tensor },
+                });
+                out.requires_grad = true;
+                out.tape_node = node_id;
+            }
+        }
+        return out;
     }
 
     // Always produce an owned contiguous copy. Even if the shapes match,
@@ -120,6 +166,32 @@ pub fn transpose2dTracked(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*
 
     const M = tensor.shape.dims[0];
     const N = tensor.shape.dims[1];
+
+    // Milestone 2: CUDA branch. Take a view of the input with swapped
+    // strides (tensor.transpose2d() returns a non-owning view with
+    // (N,M) shape and strided reads), then use broadcastTo to
+    // materialise a contiguous (N,M) buffer. This pushes the actual
+    // transpose work into the existing stride-aware reduce kernel.
+    if (tensor.device == .cuda) {
+        const view = try tensor.transpose2d(); // non-contig (N,M) CUDA view
+        var out = try cuda_dispatch.broadcastTo(view, view.shape);
+
+        if (tape) |t| {
+            if (tensor.requires_grad) {
+                const node_id = try t.record(Node{
+                    .id = undefined,
+                    .op = .transpose2d,
+                    .parents = .{ tensor.tape_node, null },
+                    .n_parents = 1,
+                    .saved = .{ .tensor_ref = tensor },
+                });
+                out.requires_grad = true;
+                out.tape_node = node_id;
+            }
+        }
+        return out;
+    }
+
     var out = try Tensor.init(allocator, Shape.init2D(N, M));
     errdefer out.deinit(allocator);
 
@@ -219,6 +291,30 @@ pub fn transposeInner2dTracked(allocator: std.mem.Allocator, tensor: Tensor, tap
     const B = tensor.shape.dims[0];
     const M = tensor.shape.dims[1];
     const K = tensor.shape.dims[2];
+
+    // Milestone 2: CUDA branch. Same trick as transpose2dTracked —
+    // view the tensor with inner axes swapped (transposeInner2d
+    // returns a non-owning view with (B,K,M) shape and non-contig
+    // strides), then materialise contiguous via broadcastTo.
+    if (tensor.device == .cuda) {
+        const view = try transposeInner2d(tensor); // non-contig (B,K,M) CUDA view
+        var out = try cuda_dispatch.broadcastTo(view, view.shape);
+
+        if (tape) |t| {
+            if (tensor.requires_grad) {
+                const node_id = try t.record(Node{
+                    .id = undefined,
+                    .op = .transpose_inner2d,
+                    .parents = .{ tensor.tape_node, null },
+                    .n_parents = 1,
+                    .saved = .{ .tensor_ref = tensor },
+                });
+                out.requires_grad = true;
+                out.tape_node = node_id;
+            }
+        }
+        return out;
+    }
 
     var out = try Tensor.init(allocator, Shape.init3D(B, K, M));
     errdefer out.deinit(allocator);
