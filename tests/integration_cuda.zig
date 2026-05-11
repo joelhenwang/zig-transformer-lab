@@ -3387,3 +3387,141 @@ test "cuda debug.dump: CUDA tensor round-trips through .ztlt file" {
     try testing.expectEqual(@as(usize, 3), loaded.shape.dims[1]);
     for (0..6) |i| try testing.expectEqual(host.data[i], loaded.data[i]);
 }
+
+// ---------------------------------------------------------------------------
+// Stage 8 M8-c: device-aware checkpoint save/load
+// ---------------------------------------------------------------------------
+
+test "cuda checkpoint: CUDA model save/load round-trip is byte-identical" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    const alloc = testing.allocator;
+    const io = try testIo();
+    std.Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
+    const path = "zig-out/cuda_checkpoint_roundtrip.ztlc";
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    var rng = lab.rng.Rng.init(777);
+    const TransformerConfig = lab.nn.module.TransformerConfig;
+    const cfg = TransformerConfig{
+        .vocab_size = 16,
+        .d_model = 8,
+        .d_ff = 16,
+        .max_seq_len = 4,
+        .n_layer = 1,
+        .n_head = 2,
+    };
+
+    // Build a CPU model, snapshot its params for later comparison,
+    // move it to CUDA, then save. This exercises the DtoH scratch
+    // path in save() for every parameter.
+    var model_gpu = try TinyWordTransformer.init(alloc, cfg, &rng);
+    defer model_gpu.deinit();
+
+    var cpu_snapshot: std.ArrayList([]f32) = .empty;
+    defer {
+        for (cpu_snapshot.items) |buf| alloc.free(buf);
+        cpu_snapshot.deinit(alloc);
+    }
+    {
+        var params: std.ArrayList(*Tensor) = .empty;
+        defer params.deinit(alloc);
+        try params.ensureTotalCapacity(alloc, 32);
+        model_gpu.parameters(&params);
+        for (params.items) |p| {
+            const dup = try alloc.dupe(f32, p.data);
+            try cpu_snapshot.append(alloc, dup);
+        }
+    }
+
+    try model_gpu.moveToCuda(&ctx);
+    try model_gpu.save(io, path);
+    try ctx.synchronize();
+
+    // Fresh CUDA model; load; pull weights back to CPU for comparison.
+    var rng2 = lab.rng.Rng.init(1);
+    var model_load = try TinyWordTransformer.init(alloc, cfg, &rng2);
+    defer model_load.deinit();
+    try model_load.moveToCuda(&ctx);
+    try model_load.load(io, path);
+    try ctx.synchronize();
+
+    // Pull back to CPU and compare to the pre-save snapshot. Every
+    // byte must match: save/load is a lossless round-trip.
+    try model_load.moveToCpu();
+
+    var loaded_params: std.ArrayList(*Tensor) = .empty;
+    defer loaded_params.deinit(alloc);
+    try loaded_params.ensureTotalCapacity(alloc, 32);
+    model_load.parameters(&loaded_params);
+
+    try testing.expectEqual(cpu_snapshot.items.len, loaded_params.items.len);
+    for (cpu_snapshot.items, loaded_params.items) |expected, got| {
+        try testing.expectEqual(expected.len, got.data.len);
+        for (expected, got.data) |x, y| try testing.expectEqual(x, y);
+    }
+}
+
+test "cuda checkpoint: save from CUDA then load on a fresh CPU model" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    const alloc = testing.allocator;
+    const io = try testIo();
+    std.Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
+    const path = "zig-out/cuda_checkpoint_crossdevice.ztlc";
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    var rng = lab.rng.Rng.init(321);
+    const TransformerConfig = lab.nn.module.TransformerConfig;
+    const cfg = TransformerConfig{
+        .vocab_size = 16,
+        .d_model = 8,
+        .d_ff = 16,
+        .max_seq_len = 4,
+    };
+
+    // Snapshot the expected CPU param bytes before moving to CUDA.
+    var expected: std.ArrayList([]f32) = .empty;
+    defer {
+        for (expected.items) |buf| alloc.free(buf);
+        expected.deinit(alloc);
+    }
+    var model_src = try TinyWordTransformer.init(alloc, cfg, &rng);
+    defer model_src.deinit();
+    {
+        var params: std.ArrayList(*Tensor) = .empty;
+        defer params.deinit(alloc);
+        try params.ensureTotalCapacity(alloc, 32);
+        model_src.parameters(&params);
+        for (params.items) |p| {
+            const dup = try alloc.dupe(f32, p.data);
+            try expected.append(alloc, dup);
+        }
+    }
+
+    // Move src to CUDA and save — the whole point of this test is
+    // that a checkpoint produced from a CUDA-resident model is
+    // readable by a CPU-resident model without any manual conversion.
+    try model_src.moveToCuda(&ctx);
+    try model_src.save(io, path);
+    try ctx.synchronize();
+
+    var rng2 = lab.rng.Rng.init(2);
+    var model_dst = try TinyWordTransformer.init(alloc, cfg, &rng2);
+    defer model_dst.deinit();
+    try model_dst.load(io, path);
+
+    var got: std.ArrayList(*Tensor) = .empty;
+    defer got.deinit(alloc);
+    try got.ensureTotalCapacity(alloc, 32);
+    model_dst.parameters(&got);
+    try testing.expectEqual(expected.items.len, got.items.len);
+    for (expected.items, got.items) |e, g| {
+        try testing.expectEqual(e.len, g.data.len);
+        for (e, g.data) |x, y| try testing.expectEqual(x, y);
+    }
+}

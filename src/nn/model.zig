@@ -293,6 +293,12 @@ pub const TinyWordTransformer = struct {
 
     /// Save model checkpoint to a binary file (format v3, Stage 8 M6).
     ///
+    /// Device-aware: works for both CPU and CUDA parameters. CUDA
+    /// tensors are DtoH-copied into per-parameter scratch buffers
+    /// during the write (Stage 8 M8-c). No moveToCpu round-trip is
+    /// required, so the CUDA model's device residency is preserved
+    /// across the save call.
+    ///
     /// Format — little-endian throughout, f32 payloads written as raw
     /// IEEE 754 bytes. All padding fields are zeros.
     ///
@@ -375,12 +381,30 @@ pub const TinyWordTransformer = struct {
                 const dim: u32 = if (i < t.shape.ndim()) @intCast(t.shape.dims[i]) else 0;
                 try w.writeInt(u32, dim, .little);
             }
-            const data_len: u32 = @intCast(t.data.len * 4);
+            // Element count in a device-agnostic way. On CPU this is
+            // equivalent to `t.data.len`; on CUDA `t.data` is the stub
+            // empty slice so we must consult the storage length.
+            const n_elems = t.storage.len();
+            const data_len: u32 = @intCast(n_elems * 4);
             try w.writeInt(u32, data_len, .little);
             // Raw f32 bytes. Target platforms are little-endian; if we
             // ever port to a big-endian system we would byte-swap here.
-            const bytes = std.mem.sliceAsBytes(t.data);
-            try w.writeAll(bytes);
+            //
+            // CUDA payloads are DtoH-copied into a scratch host buffer
+            // per-parameter. This keeps the save path simple (one HtoD
+            // burst per param) and side-steps having to temporarily
+            // `moveToCpu` the whole model. The extra cost is dominated
+            // by the write itself; the copy and free both complete
+            // before the writer flushes.
+            switch (t.storage) {
+                .cpu => |s| try w.writeAll(std.mem.sliceAsBytes(s.data)),
+                .cuda => |b| {
+                    const scratch = try self.allocator.alloc(f32, n_elems);
+                    defer self.allocator.free(scratch);
+                    try b.copyToHost(scratch);
+                    try w.writeAll(std.mem.sliceAsBytes(scratch));
+                },
+            }
         }
 
         // Trailer.
@@ -389,6 +413,10 @@ pub const TinyWordTransformer = struct {
     }
 
     /// Load model checkpoint from a binary file (format v2, PR-η).
+    ///
+    /// Device-aware: works for both CPU and CUDA parameters. CUDA
+    /// tensors are filled via scratch buffer + HtoD upload (Stage 8
+    /// M8-c). No moveToCuda/moveToCpu round-trip required.
     ///
     /// Validates every header field, rejects:
     ///   - wrong magic               → error.IoError
@@ -536,11 +564,24 @@ pub const TinyWordTransformer = struct {
                 const expected_dim: u32 = if (i < t.shape.ndim()) @intCast(t.shape.dims[i]) else 0;
                 if (dims[i] != expected_dim) return error.ShapeMismatch;
             }
-            const expected_bytes: u32 = @intCast(t.data.len * 4);
+            // Device-agnostic size check. CUDA tensors have `t.data.len
+            // == 0`; the true element count lives in `t.storage.len()`.
+            const n_elems = t.storage.len();
+            const expected_bytes: u32 = @intCast(n_elems * 4);
             if (data_len != expected_bytes) return error.ShapeMismatch;
 
-            const bytes = std.mem.sliceAsBytes(t.data);
-            try r.readSliceAll(bytes);
+            // Read payload. On CPU: straight into the parameter's
+            // data slice. On CUDA: read into a scratch host buffer
+            // then HtoD-upload, symmetric with the save path.
+            switch (t.storage) {
+                .cpu => |s| try r.readSliceAll(std.mem.sliceAsBytes(s.data)),
+                .cuda => |b| {
+                    const scratch = try self.allocator.alloc(f32, n_elems);
+                    defer self.allocator.free(scratch);
+                    try r.readSliceAll(std.mem.sliceAsBytes(scratch));
+                    try b.copyFromHost(scratch);
+                },
+            }
         }
 
         // Every expected parameter must have been written.
