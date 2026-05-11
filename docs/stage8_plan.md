@@ -422,34 +422,50 @@ the common CUDA-kernel bugs catalog from `plan.md` §854.
       (commits `8a7b971` + `7aef7e6`, 2026-05-11)
 - [x] M6: ZTLC v3 round-trip test; v2 compatibility test loads synthetic v2 file with name rewrite.
       (commits `2382bd8` + `8f57498`, 2026-05-11)
-- [ ] M7: `docs/09_debugging.md` ≥ 500 lines.
-- [ ] M8: 2-block, 2-head, D=64 Shakespeare run on CUDA, `compute-sanitizer` clean, wall-clock <2× baseline.
-- [ ] AGENTS.md progress table updated: Stage 8 → **Done** with commit range.
-- [ ] SESSION_GUIDE.md §3 reflects Stage 8 completion.
-- [ ] Optional git tag `stage-8-complete`.
-- [ ] CPU test count stable at ≥ 282 (with the 15 debug tests added); CUDA tests ≥ 78 (with multi-head + oracle + 2-block tests added).
-      **Actual: 306 CPU + 79 CUDA + 15 oracle tests pass on remote RTX 4060 Ti at HEAD `8f57498`.**
+- [x] M7: `docs/09_debugging.md` = 600 lines (>= 500 target). (commit `f4362e3`, 2026-05-11)
+- [x] M8: Route A chosen (extended Trainer + TrainConfig). 2-block, 2-head, D=64
+      Shakespeare run on CUDA, `compute-sanitizer` clean (0 errors, 0 bytes
+      leaked), wall-clock 12.28 ms/step (2.61x baseline — OVER 2x budget,
+      deferred to Stage 9 perf follow-up per M8 step 4 escape hatch).
+      (commits `1cc82ce`, `fe32bac`, `6bcc0fe`, `0728532`, `65916ae`, 2026-05-11)
+- [x] AGENTS.md progress table updated: Stage 8 → **Done** with commit range.
+- [x] SESSION_GUIDE.md §3 reflects Stage 8 completion.
+- [x] Optional git tag `stage-8-complete` pushed.
+- [x] CPU test count stable at 306 (no regressions). CUDA tests 79 → 83
+      (+4: 2 checkpoint CUDA tests in M8-c, 2 Trainer CUDA smokes in M8-d).
+      **Final on RTX 4060 Ti: 306 CPU + 83 CUDA + 15 oracle tests pass.**
 
-### Session 1 landed (2026-05-11)
+### Session 2 landed (2026-05-11)
 
-Six milestones landed end-to-end in one session. Companion document:
-`docs/stage8_handoff.md` captures every commit, landmine, and
-remaining-work item for the fresh session that will execute M7 + M8.
+Sessions 1 + 2 together landed all 8 milestones. Session 2 executed
+M8 as 6 sub-commits followed by M7 and close-out:
 
-| Commit | Milestone | CPU test delta | Remote verified |
-|---|---|---|---|
-| `5c93fe2` | M1-a | +9 | yes |
-| `149b2bd` | M1-b | +6 | yes (CUDA paths too) |
-| `280472a` | M1-c | +6 | yes |
-| `1fb972e` | M1-d | +3 | yes |
-| `7e964bf` | M2 | +2 | yes |
-| `ab794c0` | M3 | +6 | yes |
-| `9b814d9` | M4 | +4 | yes |
-| `8a7b971` + `7aef7e6` | M5 | +1 oracle | yes (PyTorch fixture generated on remote) |
-| `2382bd8` + `8f57498` | M6 | +3 | yes |
+| Commit | Milestone | CPU test delta | CUDA test delta | Remote verified |
+|---|---|---|---|---|
+| `efec655` | M8-a | 0 | 0 | via M8-f |
+| `1cc82ce` | M8-b | 0 | 0 | via M8-f |
+| `fe32bac` | M8-c | 0 | +2 | yes |
+| `6bcc0fe`, `65916ae` | M8-d | 0 | +2 | yes |
+| `0728532` | M8-e | 0 | 0 (example, not tests) | yes (M8-f uses it) |
+| *(M8-f is verification, not a commit)* | M8-f | — | — | yes |
+| `f4362e3` | M7 | 0 | 0 | n/a (docs) |
 
-Test counts moved from 267 CPU / 73 CUDA / 14 oracle (Stage 7
-complete) to **306 CPU / 79 CUDA / 15 oracle** (M1-M6 complete).
+Test counts moved from 306 CPU / 79 CUDA / 15 oracle (M1-M6 complete)
+to **306 CPU / 83 CUDA / 15 oracle** (Stage 8 complete).
+
+### M8-f acceptance evidence
+
+- `zig build run-example -Dexample=10_train_deep -Dcuda=true` on
+  RTX 4060 Ti: 200 steps, loss 7.84 → 5.43, 12.28 ms/step.
+- `compute-sanitizer --tool=memcheck --leak-check=full <binary>
+  --sanitize`: 0 bytes leaked, 0 errors, 50 training steps clean.
+- `ncu --set basic` requires root for performance counters on this
+  machine (ERR_NVGPUCTRPERM); kernel catalog captured for M7 §7
+  documentation purposes (26 kernels total, cuBLAS internals +
+  our 22 CUDA kernels).
+- Baseline 1/1/32 from `examples/09_cuda_benchmark` remains
+  ~4.70 ms/step as documented in AGENTS.md.
+- Ratio: 2.61x > 2x budget. Training correctness unaffected.
 
 ---
 

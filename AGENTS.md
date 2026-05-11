@@ -6,42 +6,47 @@ Build a pedagogical Zig 0.16.0 library that trains a tiny 1-block 1-head word-le
 transformer on CPU, then on CUDA, with extensive documentation and heavily commented
 code that teaches how PyTorch-like systems work internally.
 
-## Current engineering gate — Stage 8 (debugging discipline + N-block refactor)
+## Current engineering gate — Stage 9 (documentation finalization)
 
-Stages 1–7 have all shipped (tag `stage-7-complete`). The current gate is
-Stage 8, whose scope is defined in `docs/stage8_plan.md`:
+Stages 1–8 have all shipped (tags `stage-7-complete`, `stage-8-complete`).
+Stage 8 closed on 2026-05-11 with 306 CPU + 83 CUDA + 15 oracle tests
+passing on the RTX 4060 Ti remote, compute-sanitizer clean on the
+2-block/2-head/D=64 acceptance sweep, and `docs/09_debugging.md`
+shipped at 600 lines.
 
-1. `src/debug/` utilities — `assertShape`, `assertFinite`, device-aware
-   `compare`, `dump` for Python-side inspection.
-2. `TransformerConfig` extension — `n_layer: u8 = 1`, `n_head: u8 = 1`,
-   `dropout: f32 = 0.0`, with defaults preserving all Stage 1–7 behavior
-   exactly.
-3. `TinyWordTransformer` multi-block — `blocks: []TransformerBlock`,
-   forward loops, `parameters` iterates, `save`/`load` handle variable
-   param counts.
-4. Multi-head attention — `(B, T, D) → (B, T, n_head, d_head)` reshape +
-   batched matmul via flattened `B' = B · n_head`.
-5. Multi-head oracle fixture (`multihead_attention_3d`) + parity tests.
-6. ZTLC v3 checkpoint format — backward-compatible with v2 (v2 reads as
-   `n_layer=1, n_head=1, dropout=0`).
-7. `docs/09_debugging.md` — shape-assert driven dev, NaN/Inf detection,
-   gradient checking, CPU/GPU compare, `compute-sanitizer` walkthrough,
-   Nsight Compute pass, common CUDA bug catalog.
-8. Acceptance sweep — 2-block, 2-head, D=64 Shakespeare run under
-   `compute-sanitizer`; wall-clock < 2× the 1/1/32 time.
+Stage 9 is scoped per `plan.md` §873 as a docs-finalisation pass:
+no new code. Planned deliverables:
 
-> **Stage 8 playbook:** `docs/stage8_plan.md`. A fresh session should
-> read that file end-to-end before touching code. Companion reference:
-> `docs/stage7_plan.md` + `docs/stage7_endgame_plan.md` for the style
-> of milestone/commit cadence.
+1. `docs/10_pytorch_parallels.md` — mapping every Zig abstraction
+   back to its PyTorch counterpart for readers coming from that
+   framework.
+2. Pad shorter chapters: `docs/07_cpu_training.md` (492 → 500+
+   lines) and `docs/08_backends_cuda.md` (410 → 500+ lines) to
+   match the ≥500 line bar the rest of the series meets.
+3. Per-subfolder READMEs under `src/` (each module directory gets
+   a short orientation note).
+4. Inline-comment polish across the hot paths.
 
-Historical context: Stage 6.5 (CPU hardening) passed in commit
-`f9c1d3b` on 2026-05. Stage 7 (CUDA backend) landed in commits
-`07bd274`..`584160b` over 2026-05-10..11, with 267 CPU + 73 CUDA tests
-passing on RTX 4060 Ti and a measured 30.59× speedup at the
-Shakespeare config. Both gates are documented in their respective
-plans (`docs/stage6.5_plan.md` — not committed; see session notes for
-details; and `docs/stage7_plan.md` + `docs/stage7_endgame_plan.md`).
+> **Stage 9 playbook:** not yet drafted. A fresh session should
+> read `plan.md` §873 and sketch a `docs/stage9_plan.md` before
+> beginning work, matching the Stage 7 / 8 planning cadence.
+
+Optional deferred perf follow-up (noted at Stage 8 close):
+- 2/2/64 wall-clock on CUDA is 2.61× the 1/1/32 baseline (over
+  the originally-scoped 2× budget). A pure-GPU gradient clip
+  (sumSq reduce + mulScalar) would reclaim ~5 % by eliminating
+  the DtoH/HtoD scratch path in `Trainer.train`. Tracked under
+  Stage 9 perf if it comes up.
+
+Historical context:
+- Stage 6.5 (CPU hardening) passed in commit `f9c1d3b` on 2026-05.
+- Stage 7 (CUDA backend) landed in commits `07bd274`..`584160b`
+  over 2026-05-10..11, with 267 CPU + 73 CUDA tests passing on
+  RTX 4060 Ti and a measured 30.59× speedup at the Shakespeare
+  config. Documented in `docs/stage7_plan.md` + `docs/stage7_endgame_plan.md`.
+- Stage 8 (debugging + N-block) landed in commits
+  `5c93fe2`..`f4362e3` over 2026-05-11. Documented in
+  `docs/stage8_plan.md` and `docs/stage8_handoff.md`.
 
 ## PyTorch oracle (post-6.5, CPU safety net before Stage 7)
 
@@ -196,7 +201,7 @@ Monitor for:
 | 6.5 — CPU Hardening | **Done** | Commits `f9c1d3b`, `28e73e1`, `97b0aaa`, `3331801` (refactor + docs + oracle + oracle expansion) |
 | 7-setup — Remote RTX workflow | **Done** | Commit `1e3b540` — SSH scripts, `.gitattributes`, smoke test confirmed |
 | 7 — CUDA Backend | **Done** | PRs α–ξ landed (commits `07bd274`–`584160b`). 267 CPU + 73 CUDA tests pass on RTX 4060 Ti, compute-sanitizer memory-clean. Measured speedup at Shakespeare config: **30.59×** (CPU 143.7 ms/step, CUDA 4.7 ms/step). See `docs/stage7_plan.md` + `docs/stage7_endgame_plan.md`. |
-| 8 — Debugging + N-block | **In progress** | M1-M6 landed (commits `5c93fe2`..`8f57498`, 2026-05-11). 306 CPU + 79 CUDA + 15 oracle tests pass on RTX 4060 Ti. `src/debug/` utilities, multi-block `TinyWordTransformer`, multi-head attention, ZTLC v3 checkpoint all shipped. Remaining: M7 (`docs/09_debugging.md`) + M8 (2-block/2-head/D=64 acceptance sweep under compute-sanitizer). See `docs/stage8_plan.md` + `docs/stage8_handoff.md`. |
+| 8 — Debugging + N-block | **Done** | All 8 milestones landed (commits `5c93fe2`..`f4362e3`, 2026-05-11). 306 CPU + 83 CUDA + 15 oracle tests pass on RTX 4060 Ti. `src/debug/` utilities, multi-block `TinyWordTransformer`, multi-head attention, ZTLC v3 checkpoint, Trainer CUDA support (route A), `examples/10_train_deep.zig` acceptance example, and `docs/09_debugging.md` (600 lines) all shipped. M8-f acceptance: 2/2/64 Shakespeare run compute-sanitizer clean (0 errors, 0 leaks); wall-clock 12.28 ms/step = 2.61x the 1/1/32 baseline (over 2x budget, deferred to Stage 9 perf follow-up). See `docs/stage8_plan.md`. |
 | 9 | Not started | |
 
 **Stage 3 committed:** `stage(3): tape-based autograd`

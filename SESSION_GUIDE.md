@@ -80,7 +80,17 @@ config: **30.59×** (CPU 143.7 ms/step, CUDA 4.7 ms/step). See
 `docs/stage7_plan.md` (playbook) and `docs/stage7_endgame_plan.md`
 (session-by-session landing log).
 
-### Stage 8 — Debugging and N-block Refactor 🔲 NOT STARTED
+### Stage 8 — Debugging and N-block Refactor ✅ COMPLETE
+
+Tag `stage-8-complete` on origin. 306 CPU + 83 CUDA + 15 oracle tests,
+compute-sanitizer memory-clean at the 2-block / 2-head / D=64
+acceptance config. `src/debug/` utilities, multi-block
+`TinyWordTransformer`, multi-head attention, ZTLC v3 checkpoint,
+Trainer CUDA support (route A), `examples/10_train_deep.zig`
+acceptance example, and `docs/09_debugging.md` (600 lines) all
+shipped. Acceptance wall-clock: 12.28 ms/step (2.61x the 1/1/32
+baseline — over the 2x budget; deferred to Stage 9 perf follow-up).
+See `docs/stage8_plan.md` + `docs/stage8_handoff.md`.
 
 ### Stage 9 — Documentation Finalization 🔲 NOT STARTED
 
@@ -168,16 +178,13 @@ zig build docs
 
 ## 7. How to Resume Implementation
 
-### To start Stage 8 (debugging discipline + N-block refactor):
+### Stage 8 reference (already COMPLETE):
 
-**First action:** open `docs/stage8_handoff.md`. Stage 8 Milestones
-1-6 have landed (commits `5c93fe2` .. `8f57498`, 2026-05-11) and
-the handoff doc captures all context for executing Milestones 7 +
-8 in a fresh session. Companion: `docs/stage8_plan.md` is the full
-spec; the handoff doc is the execution log + what-remains summary.
-
-Secondary reading: `docs/stage7_endgame_plan.md` for the style of
-milestone cards and the cadence that worked well in Stage 7.
+Tag `stage-8-complete` on origin. 306 CPU + 83 CUDA + 15 oracle
+tests, compute-sanitizer memory-clean at 2-block / 2-head / D=64.
+Reference docs: `docs/stage8_plan.md` (playbook as executed) and
+`docs/stage8_handoff.md` (mid-stage handoff document from the
+M1-M6 → M7-M8 boundary).
 
 ### Stage 7 reference (already COMPLETE):
 
@@ -328,13 +335,13 @@ When starting a new session, do these in order:
 1. `cd` into the repo (Windows: `C:\Users\...\zig-transformer-lab`; Linux: `/home/joelwang-rtx/Desktop/ai_lab/zig-transformer-lab`)
 2. Read `AGENTS.md` (agent contract, progress, gotchas, current gate)
 3. Read this file (`SESSION_GUIDE.md`) for current state
-4. **If Stage 8:** read `docs/stage8_plan.md` in full before touching code. Milestones 1–8 with commit plans.
-5. Check `git log --oneline -15` for completed stages (expect stages 1–7 done + tag `stage-7-complete`).
-6. Run `zig build test` to verify baseline (267+ tests after Stage 7; 282+ after Stage 8 M1).
-7. Run `zig build test-oracle` to verify oracle fixtures (14+ tests; 15+ after Stage 8 M5).
+4. **If Stage 9:** sketch `docs/stage9_plan.md` based on `plan.md` §873 before touching code. No new code expected — docs-only pass.
+5. Check `git log --oneline -15` for completed stages (expect stages 1–8 done + tags `stage-7-complete`, `stage-8-complete`).
+6. Run `zig build test` to verify baseline (306 tests at Stage 8 close).
+7. Run `zig build test-oracle` to verify oracle fixtures (15 tests at Stage 8 close).
 8. For CUDA work: verify remote access with `bash ./run_remote_example.sh "echo ok && zig version && nvcc --version | tail -1"`.
 9. Load `skills/modern-zig-0-16-tutor/SKILL.md` for any Zig API questions.
-10. Pick up at the next unchecked milestone in `docs/stage8_plan.md`.
+10. Pick up at the next unchecked milestone in the stage plan, or (if between stages) draft the next plan from `plan.md`.
 
 ---
 
