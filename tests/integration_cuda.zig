@@ -2364,16 +2364,25 @@ test "cuda LayerNorm: oracle layernorm_3d forward + backward parity" {
     {
         var da_back = try a_gpu.grad.?.*.toCpu(alloc);
         defer da_back.deinit(alloc);
+        const abs_diff = try oracle.maxAbsDiff(da_back, expect_da);
+        const rel_err = try oracle.maxRelErr(da_back, expect_da, 1e-8);
+        std.debug.print("  LN da  abs_diff={d:.6} rel_err={d:.6}\n", .{ abs_diff, rel_err });
         try oracle.expectClose(da_back, expect_da, .{ .rel_tol = 1e-3, .abs_tol = 1e-4 });
     }
     {
         var dgamma_back = try gamma_gpu.grad.?.*.toCpu(alloc);
         defer dgamma_back.deinit(alloc);
+        const abs_diff = try oracle.maxAbsDiff(dgamma_back, expect_dgamma);
+        const rel_err = try oracle.maxRelErr(dgamma_back, expect_dgamma, 1e-8);
+        std.debug.print("  LN dg  abs_diff={d:.6} rel_err={d:.6}\n", .{ abs_diff, rel_err });
         try oracle.expectClose(dgamma_back, expect_dgamma, .{ .rel_tol = 1e-3, .abs_tol = 1e-4 });
     }
     {
         var dbeta_back = try beta_gpu.grad.?.*.toCpu(alloc);
         defer dbeta_back.deinit(alloc);
+        const abs_diff = try oracle.maxAbsDiff(dbeta_back, expect_dbeta);
+        const rel_err = try oracle.maxRelErr(dbeta_back, expect_dbeta, 1e-8);
+        std.debug.print("  LN db  abs_diff={d:.6} rel_err={d:.6}\n", .{ abs_diff, rel_err });
         try oracle.expectClose(dbeta_back, expect_dbeta, .{ .rel_tol = 1e-3, .abs_tol = 1e-4 });
     }
 }
