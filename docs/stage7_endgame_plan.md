@@ -411,10 +411,13 @@ pushed commits and updated progress docs.
 
 ## Exit criteria — Stage 7 is Done when
 
-- [ ] M1: CE fused kernel + oracle `cross_entropy_3d` parity green.
-- [ ] M2: every op the model uses has a CUDA route + at least one
+- [x] M1: CE fused kernel + oracle `cross_entropy_3d` parity green.
+      (commit `0d0f403`, 2026-05-11)
+- [~] M2: every op the model uses has a CUDA route + at least one
   direct unit test. Confirmed by a grep for `NotImplemented` and
   `error.DeviceMismatch` in the forward path.
+      (commits `61b9b7b` + `74eef4a` — GELU/sqrt/exp/log/meanAxis
+      done; LayerNorm/Linear/Block smoke tests remaining in Session 2)
 - [ ] M3: `examples/08_cuda_vs_cpu.zig` reports forward diff < 5e-4 abs.
 - [ ] M4: per-parameter backward diff < 1e-3 abs across the model.
 - [ ] M5: post-one-step param diff < 2e-3 abs across the model.
@@ -423,9 +426,38 @@ pushed commits and updated progress docs.
   number satisfies "done").
 - [ ] M7: AGENTS.md, SESSION_GUIDE.md §3, docs/stage7_plan.md §4+§10+§13
   all show Stage 7 complete. Optional git tag `stage-7-complete`.
-- [ ] All compute-sanitizer runs clean (0 leaks, 0 memory-access errors).
-- [ ] CPU test count unchanged at 267/267 across every commit (no CPU
+- [x] All compute-sanitizer runs clean (0 leaks, 0 memory-access errors
+      post-Commit-1 verification on remote; re-check at M5 and M7).
+- [x] CPU test count unchanged at 267/267 across every commit (no CPU
   regressions during the CUDA work).
+
+### Session 1 landed (2026-05-11)
+
+Three commits pushed, remote green.
+
+| Commit | Milestone | CUDA test delta | Remote result |
+|---|---|---|---|
+| `0d0f403` | M1 full | +2 (53 → 55) | 267 CPU + 55 CUDA pass |
+| `61b9b7b` | M2 part 1 | +5 (55 → 60) | 267 CPU + 60 CUDA pass |
+| `74eef4a` | M2 part 2 | +2 (60 → 62) | 267 CPU + 62 CUDA pass |
+
+What landed:
+- CE fused CUDA kernel (`ce_fused`) + `.ce_cuda_grad` SavedData
+  variant + backward DtoD clone.
+- Unary CUDA kernels: `unary_gelu_exact`,
+  `unary_gelu_exact_backward`, `unary_sqrt`, `unary_exp`,
+  `unary_log` + dispatch routing.
+- `ops_reduce.mean` CUDA branch (sumAxis + mulScalar composition).
+- Oracle parity tests: `cross_entropy_3d` (fwd+bwd), `gelu_2d`
+  (fwd+bwd).
+- `backwardGelu` CUDA branch (fused kernel call instead of host
+  loop).
+
+What is NOT done (Session 2 work):
+- LayerNorm oracle parity on CUDA — composition audit of
+  mean/sub/mul/sqrt/div on GPU.
+- Linear / MLP / TransformerBlock forward smoke tests on CUDA.
+- `model.toCuda(ctx)` method — Milestone 3 prep.
 
 ---
 

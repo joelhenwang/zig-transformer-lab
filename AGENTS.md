@@ -197,7 +197,7 @@ Monitor for:
 | 6 — End-to-end CPU Training | **Done** | Commit `015da3c` — Trainer, generation, gradient clipping, bug fixes |
 | 6.5 — CPU Hardening | **Done** | Commits `f9c1d3b`, `28e73e1`, `97b0aaa`, `3331801` (refactor + docs + oracle + oracle expansion) |
 | 7-setup — Remote RTX workflow | **Done** | Commit `1e3b540` — SSH scripts, `.gitattributes`, smoke test confirmed |
-| 7 — CUDA Backend | **In progress** | PRs α–μ landed (partial) — embedding forward/backward + AdamW step CUDA kernels + oracle embedding_3d parity + AdamW numerical parity. 267/267 CPU + 53/53 CUDA tests pass on RTX 4060 Ti, compute-sanitizer memory-clean. Cross-entropy CUDA deferred to follow-up. See `docs/stage7_plan.md`. |
+| 7 — CUDA Backend | **In progress** | PRs α–μ landed + Milestone 1 CE + Milestone 2 (unary + meanAxis) — 267/267 CPU + 62/62 CUDA tests pass on RTX 4060 Ti, compute-sanitizer memory-clean. Remaining: LayerNorm/Block smoke tests, model.toCuda, full-model parity, benchmark. See `docs/stage7_plan.md` + `docs/stage7_endgame_plan.md`. |
 | 8–9 | Not started | |
 
 **Stage 3 committed:** `stage(3): tape-based autograd`
