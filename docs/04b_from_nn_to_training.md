@@ -1070,3 +1070,47 @@ the gradient signal intelligently.
 - **Stage 7** — Generation: sample from the model's output distribution
 - **Stage 8** — CUDA acceleration: same model, faster matmul
 - **docs/05_transformer_math.md** — Detailed shape trace through the math
+
+
+---
+
+## Exercises
+
+**Exercise 1.** AdamW's update rule includes a bias-correction
+factor `1 / (1 - beta^t)`. At what step `t` does this factor
+become negligible (say, within 1% of 1.0) for `beta1 = 0.9`?
+
+<details><summary>Solution</summary>
+
+`1 / (1 - 0.9^t) < 1.01` solves to
+`0.9^t < 1 / 1.01 * (1 - 1) = ...`, or equivalently
+`1 - 0.9^t > 0.990...`, so `0.9^t < 0.01`. Taking logs:
+`t * log(0.9) < log(0.01)`, `t > log(0.01) / log(0.9) = 43.7`.
+So by step 44, bias correction is within 1% of 1.0 and the update
+is effectively uncorrected Adam.
+
+For `beta2 = 0.999` the number is much larger: `t > log(0.01) /
+log(0.999) = 4602`. This is why the first several thousand steps
+of AdamW behave measurably differently from Adam - the second
+moment is still warming up.
+
+</details>
+
+**Exercise 2.** A `Linear(64, 2000)` layer has weight matrix of
+shape `(2000, 64)` = 128 000 floats. With AdamW each parameter
+needs two moment buffers. What is the total memory footprint of
+this single layer's trainable state?
+
+<details><summary>Solution</summary>
+
+Weight: `128 000 * 4 = 512 KB`.
+First moment `m`: `512 KB`.
+Second moment `v`: `512 KB`.
+Gradient buffer: `512 KB` (transient per step).
+Total: `~2 MB` for one layer while training.
+
+At inference: weight only, 512 KB. This is the 4x-at-training
+overhead AdamW is known for. If memory is tight, switching to SGD
+drops this to weight + grad = 1 MB (2x inference).
+
+</details>

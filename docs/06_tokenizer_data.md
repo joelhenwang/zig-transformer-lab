@@ -1504,3 +1504,43 @@ training bug either originates here (wrong tokenization, off-by-one in
 windowing) or manifests here (loss not decreasing because target is wrong).
 
 Next: [Chapter 07 — Training Loop & Loss Functions](07_training_loop.md)
+
+
+---
+
+## Exercises
+
+**Exercise 1.** A corpus produces `tokens.len = 1000` after
+encoding. With `T = 16` and `B = 4`, how many batches make up
+one epoch? How many next-token prediction *pairs* does the model
+see in one epoch?
+
+<details><summary>Solution</summary>
+
+Windows per epoch: `count() = 1000 - 16 = 984`. Batches per epoch:
+`ceil(984 / 4) = 246` (or 245 if trailing-window handling drops
+the remainder - see `batcher.zig` for your actual policy).
+
+Next-token pairs per epoch: `984 windows * 16 predictions/window =
+15744` (if every batch is full; slightly less if the trailing
+incomplete batch is dropped).
+
+</details>
+
+**Exercise 2.** Your tokenizer is configured with `lowercase = true`
+but the corpus contains `The sailor` and `the sailor` at various
+places. How many entries in the vocab will these map to? How about
+with `lowercase = false`?
+
+<details><summary>Solution</summary>
+
+With `lowercase = true`: one entry each for `the` and `sailor`.
+The capital `T` version lowercases to the same token.
+
+With `lowercase = false`: three entries - `The`, `the`,
+`sailor`. The model treats `The` as a distinct token from
+`the`. This nearly doubles the effective vocab size and makes
+the embedding for each form less well-trained. That's why lowercase
+is usually the right call for small-vocab word-level training.
+
+</details>

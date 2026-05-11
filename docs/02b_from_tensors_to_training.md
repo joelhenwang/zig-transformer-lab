@@ -859,3 +859,61 @@ If you've seen PyTorch before, here's how our Stage 2 API maps to `torch`:
 - **Stage 6 (`docs/07_cpu_training.md`):** The complete training loop —
   all the pieces from Stages 2-5 assembled into a working program that
   trains a transformer and generates text.
+
+
+---
+
+## Common Mistakes
+
+- **Reading `tensor.data` on a CUDA tensor.** Returns the empty
+  stub slice. Use `tensor.toCpu(alloc).data` instead - see
+  `docs/02d_storage_and_views.md`.
+- **Forgetting to set `requires_grad = true` on a leaf parameter.**
+  `tape.trackLeaf` respects the flag; if it is false, the leaf is
+  still recorded on the tape but its gradient stays `null` after
+  backward. No crash, just silent no-training.
+- **Using `reshape` instead of `reshapeTracked` in a training
+  loop.** Views don't record a node; the backward re-enters with the
+  wrong shape. Always use the tracked variant in any tensor-flow
+  that has gradients upstream and downstream.
+- **Returning a tensor view from a function that owns its source.**
+  The view's storage has `owned = false`; when the caller's source
+  tensor deinits, the view's backing memory is freed, and subsequent
+  reads from the view are use-after-free. Either return the owning
+  tensor or copy into a fresh owned one.
+
+---
+
+## Exercises
+
+**Exercise 1.** Sketch the shape trace of a single `matmul(A, B)`
+call where `A` is `(B=2, T=4, D=8)` and `B` is `(8, D_out=6)`.
+What does the output shape look like, and does the library handle
+this case?
+
+<details><summary>Solution</summary>
+
+Our `matmul` takes two 2-D tensors. For a 3-D input we need
+`matmulBatch` - which broadcasts over the batch dim. With the
+shapes given, you'd instead reshape `A` to `(B*T, D) = (8, 8)`,
+call `matmul(A_2d, B)` for `(8, D_out) = (8, 6)`, then reshape
+back to `(B, T, D_out) = (2, 4, 6)`. This is exactly what
+`nn/linear.zig:forward` does for 3-D inputs.
+
+</details>
+
+**Exercise 2.** You notice training is using 100 MB more memory
+than expected. Which tool do you reach for first?
+
+<details><summary>Solution</summary>
+
+DebugAllocator. Our tests use `std.testing.allocator`; runtime
+code can swap to `std.heap.DebugAllocator` to get leak reports
+on program exit.
+
+Typical findings: a forgotten `defer deinit` somewhere in the
+forward path, or a view whose source tensor was freed early
+(`errdefer` ordering). DebugAllocator prints per-allocation stack
+traces which localise to the exact line.
+
+</details>

@@ -971,3 +971,38 @@ is explicit, every free is explicit.
     throughout. When we add CUDA (Stage 7), cuBLAS expects column-major
     inputs. The wrapping in `src/backend/cuda/gemm.zig` handles the
     transpose — don't try to do it manually in the tensor layer.
+
+
+---
+
+## Exercises
+
+**Exercise 1.** A row-major tensor of shape `(2, 3, 4)` has what
+strides? At flat index 11, what are the logical `(i, j, k)`
+coordinates?
+
+<details><summary>Solution</summary>
+
+Strides: `(12, 4, 1)`. Each step along axis 0 jumps 12 elements
+(one full `(3, 4)` slab); each step along axis 1 jumps 4 (one row);
+each step along axis 2 jumps 1 (one element).
+
+Flat index 11: `11 = 0*12 + 2*4 + 3*1`, so `(i=0, j=2, k=3)`.
+
+</details>
+
+**Exercise 2.** Consider `a + b` where `a: (1, 4)` and `b: (3, 4)`.
+Does broadcasting succeed? What is the output shape, and which element
+of `a` is read for output position `(2, 1)`?
+
+<details><summary>Solution</summary>
+
+Broadcasting succeeds: the `1` in `a`'s shape aligns with the
+`3` in `b`'s shape and is stretched. Output shape `(3, 4)`.
+
+For output `(2, 1)`, we read `a[0, 1]` (the size-1 axis always
+reads index 0 regardless of the output index) plus `b[2, 1]`. The
+broadcast is implemented via stride-0 axes in `a`; no copy is
+made.
+
+</details>

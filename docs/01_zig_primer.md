@@ -801,3 +801,52 @@ const Shape = ztl.shape.Shape;
 10. **Writing `tests/unit_all.zig`** — That file is dead code. Add tests
     co-located in the source file, and they'll be discovered automatically
     through `src/root.zig`.
+
+
+---
+
+## Exercises
+
+**Exercise 1.** Given the following snippet, what is the type of 
+ums and why does this compile?
+
+```zig
+const std = @import("std");
+pub fn main() void {
+    const nums = [_]i32{ 1, 2, 3 };
+    std.debug.print("{any}\n", .{nums});
+}
+```
+
+<details><summary>Solution</summary>
+
+[3]i32 - a fixed-size array. The [_] syntax asks the compiler to
+infer the length from the initializer. Because the length is known at
+comptime, this is a concrete array type, not a slice. Printing uses
+the {any} format spec because [3]i32 is not a string.
+
+</details>
+
+**Exercise 2.** Write a function that takes a `std.mem.Allocator` and
+returns `![]u8` - a slice of freshly allocated bytes initialised to
+zero - of a caller-specified length. Include the correct `errdefer`.
+
+<details><summary>Solution</summary>
+
+```zig
+fn zeroes(alloc: std.mem.Allocator, n: usize) ![]u8 {
+    const buf = try alloc.alloc(u8, n);
+    errdefer alloc.free(buf);
+    @memset(buf, 0);
+    return buf;
+}
+```
+
+The `errdefer` covers the edge case where a later operation in this
+function fails between the `alloc` and the `return`. Today there
+are no such operations, but adding one without the `errdefer` would
+leak the allocation. Good Zig habit: add `errdefer` immediately
+next to every `alloc` unless you have already ruled out the path
+that would need it.
+
+</details>

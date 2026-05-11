@@ -687,3 +687,46 @@ src/autograd/
     only if at least one input requires grad. If you forget to set
     `requires_grad = true` on your leaf parameters, no nodes will be
     recorded, and `tape.backward()` will find an empty graph.
+
+
+---
+
+## Exercises
+
+**Exercise 1.** Consider `y = a * b + c` where all three operands
+are `(4,)`-shaped tensors with `requires_grad = true` and the
+final `sumAll(y)` is our loss. What is `dL/da`?
+
+<details><summary>Solution</summary>
+
+`dL/dy = 1` (from `sumAll`). Then:
+- `dL/d(a*b) = dL/dy * 1 = 1` (add backward: identity to both inputs)
+- `dL/da     = dL/d(a*b) * b = b` (mul backward: other operand)
+
+So `dL/da = b`. In the tape, three nodes: `add`, `mul`, `sumAll`.
+Running `tape.backward(&loss)` fills in `a.grad = b`, `b.grad = a`,
+`c.grad = [1, 1, 1, 1]`.
+
+</details>
+
+**Exercise 2.** Why does `backwardMul` need the snapshot of both
+input tensors (`a` and `b`) in its `SavedData` payload, not
+just pointers?
+
+<details><summary>Solution</summary>
+
+The gradient of `a * b` with respect to `a` is `b` times the
+upstream gradient, and vice versa. So the backward needs to read
+the *values* of both operands.
+
+Snapshot (by value) is required because the forward ops take
+`Tensor` by value in Zig; the compiler creates a stack-local copy
+of each argument, and `@constCast(&param)` would store a pointer
+to that local, which is dangling after the forward returns. Storing
+by value captures the `data` slice in the snapshot; the slice
+still points at the caller's heap-allocated buffer, which remains
+live for the duration of the tape. See `docs/03c_saved_tensors.md`
+for the full discussion (including the now-deleted `keepAlive`
+detour).
+
+</details>

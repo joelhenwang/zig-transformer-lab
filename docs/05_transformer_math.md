@@ -1439,3 +1439,41 @@ weight feature dimensions, not to attend to context.
 | Transpose inner | `src/tensor/ops/shape_ops.zig` | `transposeInner2d()` |
 | keepAlive | `src/autograd/tape.zig` | `Tape.keepAlive()` |
 | Reshape tracked | `src/tensor/ops/shape_ops.zig` | `reshapeTracked()` |
+
+
+---
+
+## Exercises
+
+**Exercise 1.** A transformer block with `D = 64` and `n_head = 4`
+produces per-head attention scores of what shape? For `B = 2, T = 8`.
+
+<details><summary>Solution</summary>
+
+Per-head dimension: `d_head = D / n_head = 64 / 4 = 16`. Q, K, V
+after split-heads: `(B, n_head, T, d_head) = (2, 4, 8, 16)`. The
+attention scores `Q @ K^T` produce `(B, n_head, T, T) = (2, 4, 8, 8)`.
+After softmax and multiplication by V, back to `(B, n_head, T, d_head)`.
+Reverse merge-heads returns to `(B, T, D) = (2, 8, 64)`.
+
+</details>
+
+**Exercise 2.** Why is the scale factor in attention `1 / sqrt(d_head)`
+rather than `1 / sqrt(D)`?
+
+<details><summary>Solution</summary>
+
+Each attention head operates in its own `d_head`-dimensional
+subspace. The dot products `Q @ K^T` have magnitude proportional
+to `sqrt(d_head)` (central limit argument: sum of `d_head`
+roughly-independent products). Dividing by `sqrt(d_head)` keeps
+the softmax input at unit magnitude regardless of head size. If you
+used `1 / sqrt(D)` with `D = 64` and `d_head = 8` you'd be
+scaling by `1/8` when only `1/2.83` is needed, squashing the
+attention distribution toward uniform.
+
+This is a Stage 8 M4 detail: early drafts of the multi-head code
+used `D` and the attention outputs collapsed to near-uniform
+softmax distributions until the scale was fixed.
+
+</details>

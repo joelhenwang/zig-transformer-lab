@@ -790,3 +790,52 @@ matmul. This makes a contiguous copy. Precedent: `backwardMatmul` and
 ---
 
 *End of Chapter 9 — Debugging: shape asserts, gradient checks, CUDA sanitizers.*
+
+
+---
+
+## Exercises
+
+**Exercise 1.** You've added a new op `my_op` and its gradient
+check passes at tolerance `1e-4`. A week later, a refactor touches
+the forward and the gradient check now fails with
+`max_rel_err = 0.3` but `max_abs_diff = 2e-5`. Is this a
+backward bug?
+
+<details><summary>Solution</summary>
+
+Probably not. `max_abs_diff = 2e-5` is tiny, which means the
+gradient itself is near zero at the test input. The relative error
+measure explodes for near-zero values (any small numerical noise
+divided by a tiny denominator blows up). Our combined assertion
+`max_rel_err < 0.05 OR max_abs_diff < 1e-2` exists for this
+reason. If you see this pattern on a freshly failing test, look
+at the absolute error and `denom_floor` before assuming the
+backward is wrong.
+
+If `max_abs_diff` were also large (say `1e-2`), that *would*
+indicate a real backward bug.
+
+</details>
+
+**Exercise 2.** A CUDA training run passes all parity tests in your
+suite but `examples/10_train_deep --sanitize` reports a memory
+leak on step 20. What's the most likely cause?
+
+<details><summary>Solution</summary>
+
+A tape-owned tensor that isn't being freed when the tape deinit
+fires. The per-step pipeline creates many intermediate CUDA
+tensors; each goes through `Tape.cloneTensorData` which either
+snapshots a CPU buffer or DtoD-copies a device one, both of which
+are freed in `tape.deinit`. If a new op registered after the
+main test suite doesn't route its allocation through the tape,
+it leaks per step.
+
+Debug approach: shrink `max_steps` to 1, then 2, then 5. If the
+leak is N-bytes-per-step, linear scaling confirms per-step leak.
+Then enable verbose logging in `Tape.deinit` to print every
+buffer it releases; the count should match the count of buffers
+allocated inside the step.
+
+</details>

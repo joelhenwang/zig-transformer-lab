@@ -1677,3 +1677,69 @@ tools like BertViz work.
 10. **AdamW's bias correction matters.** Without it, the effective learning
     rate is 1000x too small on the first step. The bias correction
     compensates for zero-initialized moments.
+
+
+---
+
+## Common Mistakes
+
+- **Confusing `param.grad` with `tape.nodes[param.tape_node].grad`.**
+  Our leaf parameters accumulate their gradient into `param.grad`
+  directly. Intermediate tape nodes' gradients live inside the
+  tape's `grad_map`. The optimiser reads from `param.grad`; the
+  tape owns intermediates.
+- **Running `optimizer.step` before `tape.backward`.** The
+  gradient buffers are populated by backward. Calling step first
+  reads zero (or stale) gradients. Keep the ordering: forward →
+  loss → backward → clip → step → zeroGrad.
+- **Leaving `tape_node` set on a param across training steps.**
+  `Tape.init` is fresh per step; a stale `tape_node` from an
+  older tape collides with new node IDs. `tape.trackLeaf` now
+  always creates a fresh node (see AGENTS.md compilation gotcha #17).
+- **Not setting `requires_grad = true` before `trackLeaf`.**
+  Silent no-training: the node exists, no gradient accumulates.
+  Our Trainer sets `requires_grad = true` each step defensively.
+
+---
+
+## Exercises
+
+**Exercise 1.** The Trainer creates a fresh `Tape` per step. Why
+not per epoch, matching PyTorch's graph-per-step pattern?
+
+<details><summary>Solution</summary>
+
+Per-step tape frees all intermediate tensors at the end of the
+step. A per-epoch tape would accumulate forward intermediates from
+every step without bound - unbounded memory growth. PyTorch's
+`.backward()` automatically frees the graph (unless
+`retain_graph = True`); our explicit `tape.deinit` in the
+defer chain mirrors that.
+
+</details>
+
+**Exercise 2.** You add a `warmup` phase to your trainer: for the
+first 100 steps, linearly ramp `lr` from 0 to its target value.
+Where in the training loop do you inject the change?
+
+<details><summary>Solution</summary>
+
+Before `opt.step(params.items)`. AdamW's `opt` is a vtable
+wrapping an `AdamWState`. If you expose a `setLr(new_lr)` on
+the state (or pass `lr` as an argument to `step`, which our
+current API does not), you mutate it each step based on the
+current step index. Practically:
+
+```zig
+if (step < warmup_steps) {
+    const warmup_lr = cfg.lr * @as(f32, @floatFromInt(step + 1)) /
+                                 @as(f32, @floatFromInt(warmup_steps));
+    adam.lr = warmup_lr;
+}
+try opt.step(params.items);
+```
+
+Our AdamW stores `lr` on the struct; mutating it before step is
+safe because step reads it each call.
+
+</details>

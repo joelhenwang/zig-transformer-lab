@@ -745,3 +745,47 @@ If you've used PyTorch's autograd, here's how our Stage 3 API maps:
    snapshots share the `data` buffer, modifying a tensor after it's been
    recorded changes what the backward function sees. Always complete the
    forward pass before modifying any tensor data.
+
+
+---
+
+## Exercises
+
+**Exercise 1.** During backward through a residual branch
+`h = x + layer(x)`, the gradient flowing back into `x` is what?
+
+<details><summary>Solution</summary>
+
+Both branches contribute, summed. `dh/dx_left = 1` (identity
+through the add), so `dL/dx` from the left branch is just
+`dL/dh`. `dh/dx_right = dLayer/dx` (whatever `layer` does),
+so `dL/dx` from the right branch is
+`dL/dh * dLayer/dx`. Total: `dL/dx = dL/dh + dL/dh * dLayer/dx`.
+
+This is why residual connections are powerful - they guarantee at
+least the identity-path gradient reaches every layer, so very deep
+stacks can still train. Without the skip, only the right branch's
+`dLayer/dx` contributes and that shrinks geometrically with
+depth.
+
+</details>
+
+**Exercise 2.** The tape stores `SavedData` snapshots for each op's
+backward. For `softmax` specifically, what does the backward need
+to save from the forward?
+
+<details><summary>Solution</summary>
+
+The softmax output itself. Given `y = softmax(x)`, the backward
+with respect to `x` is:
+
+`
+dL/dx_i = y_i * (dL/dy_i - sum_j dL/dy_j * y_j)
+`
+
+This depends on `y`, not on `x`. So the forward stashes a
+snapshot of `y`, and the backward reads it. Stashing `x` would
+also work (then you'd recompute `y` in the backward) but costs
+two extra exponentials per element - wasteful.
+
+</details>
