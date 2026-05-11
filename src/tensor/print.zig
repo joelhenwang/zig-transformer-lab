@@ -29,9 +29,9 @@
 //!   "flat" stats may not match the logical element order, but they
 //!   still tell you if the buffer contains NaN/Inf.
 //!
-//!   TODO: add a per-axis variant that respects strides for correctness
-//!   on non-contiguous tensors. For now, Stage 2 only produces contiguous
-//!   tensors in practice.
+//!   future: add a per-axis variant that respects strides so that
+//!   non-contiguous tensors print correctly. Today's fast path only
+//!   works for contiguous tensors.
 //!
 //! Memory ownership:
 //!   Neither function allocates memory. They write directly to the
@@ -41,8 +41,10 @@
 //!   - IoError: if writing to the writer fails (e.g., broken pipe).
 //!
 //! TODO:
-//!   - Support non-contiguous tensors by iterating with flatIndex().
-//!   - Add a printMatrix() variant that formats 2D tensors as grids.
+//!   - future: support non-contiguous tensors by iterating with
+//!     flatIndex() (today's loop assumes contiguous storage).
+//!   - future: a printMatrix() variant that formats 2D tensors as
+//!     grids with aligned column widths.
 //;
 
 const std = @import("std");

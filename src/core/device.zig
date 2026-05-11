@@ -18,8 +18,9 @@
 //!   None.
 //!
 //! TODO:
-//!   - Stage 7 will add a `device_id: u8` field alongside Device so that
-//!     multi-GPU selection is possible, but for now one GPU is enough.
+//!   - future: add a `device_id: u8` field alongside Device so that
+//!     multi-GPU selection is possible. Decision D14 hard-codes one
+//!     GPU for the Stage 1-9 scope; multi-GPU is a post-Stage-9 topic.
 //!
 //! Credits:
 //!   Pattern mirrors PyTorch's torch.device('cpu') / torch.device('cuda');

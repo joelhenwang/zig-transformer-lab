@@ -25,7 +25,9 @@
 //!   InvalidArgument — axis >= tensor's ndim
 //!   OutOfMemory — allocation failure
 //!
-//! TODO: support keep_dims=false (remove the axis dim entirely, not just set to 1)
+//! TODO: future: support keep_dims=false (remove the axis dim entirely,
+//!       not just set to 1). Today every axis-reduce emits a 1-sized
+//!       axis so the result keeps the original rank.
 //!
 
 const std = @import("std");

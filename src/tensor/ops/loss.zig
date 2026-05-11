@@ -43,9 +43,9 @@
 //!   OutOfMemory    — allocator could not fulfill the output buffer
 //!
 //! TODO:
-//!   - Stage 7: CUDA kernel fusing log_softmax + gather + mean
-//!   - Support label smoothing (soft targets)
-//!   - Support ignore_index for padding tokens
+//!   - future: support label smoothing (soft targets).
+//!   - future: support ignore_index for padding tokens (today every
+//!     target contributes to the loss equally).
 //!
 //! Credits:
 //!   Cross-entropy loss is standard in ML textbooks.  The numerical

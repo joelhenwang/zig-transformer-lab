@@ -36,8 +36,8 @@
 //!   OutOfMemory — allocator could not fulfill the output buffer
 //!
 //! TODO:
-//!   - Stage 7: CUDA kernel using warp-level reductions
-//!   - Support for axis parameter (softmax along arbitrary axis)
+//!   - future: support an axis parameter (softmax along arbitrary
+//!     axis instead of the implicit last axis).
 //!
 //! Credits:
 //!   The max-subtraction trick is standard in every deep learning

@@ -31,7 +31,9 @@
 //!   IoError — file not found, read error
 //!
 //! TODO:
-//!   - Stage 6: streaming/lazy loading for very large files
+//!   - future: streaming / lazy loading for very large files
+//!     (current load is whole-file-into-memory; fine for tiny
+//!     corpora but not for multi-GB datasets).
 //!
 //! Credits:
 //!   Standard text dataset pattern. No code copied.

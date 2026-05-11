@@ -37,8 +37,8 @@
 //!   OutOfMemory — allocation failure during loss recomputation
 //!
 //! TODO:
-//!   - Add support for non-scalar losses (sum reduction first)
-//!   - Parallelize the parameter perturbation loop
+//!   - future: support for non-scalar losses (sum reduction first)
+//!   - future: parallelize the parameter perturbation loop
 //!
 //! Credits:
 //!   The central-difference gradient check is standard in every deep

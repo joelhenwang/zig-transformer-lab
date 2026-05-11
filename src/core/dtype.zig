@@ -21,7 +21,8 @@
 //!   None. All variants return a known byte count.
 //!
 //! TODO:
-//!   - Add .f16, .bf16 when mixed-precision support is designed (post-Stage 9).
+//!   - future: add .f16, .bf16 when mixed-precision support is
+//!     designed (post-Stage-9; gated by decision D7 today).
 //!
 //! Credits:
 //!   Pattern inspired by PyTorch's ScalarType enum (aten/src/ATen/core/scalar_type.h);

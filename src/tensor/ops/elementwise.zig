@@ -44,7 +44,9 @@
 //!   InvalidLayout — addInPlace called on a non-contiguous tensor
 //!   OutOfMemory — allocation failure
 //!
-//! TODO: rank > 3 broadcasting, SIMD vectorization
+//! TODO: future: rank-5+ broadcasting (today the CUDA fast path is
+//!       stride-aware through rank 4); SIMD vectorization of the
+//!       CPU elementwise loops.
 //!
 
 const std = @import("std");

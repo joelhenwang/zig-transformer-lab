@@ -40,8 +40,9 @@
 //!   OutOfMemory — allocator could not fulfill the output buffer
 //!
 //! TODO:
-//!   - Add geluApprox using the tanh approximation
-//!   - Add sigmoid, silu/swish as needed by later stages
+//!   - future: a geluApprox using the tanh approximation
+//!     (faster than the exact erf-based form).
+//!   - future: sigmoid, silu/swish - add as needed.
 //!
 //! Credits:
 //!   GELU was introduced in "Gaussian Error Linear Units" (Hendrycks

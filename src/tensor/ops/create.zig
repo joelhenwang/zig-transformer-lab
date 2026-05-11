@@ -21,8 +21,6 @@
 //!   Scaled as X = mean + std_dev * Z to get N(mean, std_dev²).
 //!   randu: X = low + (high - low) * U where U ~ Uniform(0, 1).
 //!
-//! TODO: Kaiming/Xavier init helpers (moved to nn/ in Stage 4)
-//!
 
 const std = @import("std");
 const LabError = @import("../../core/errors.zig").LabError;

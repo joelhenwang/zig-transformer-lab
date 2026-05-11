@@ -46,9 +46,10 @@
 //!   OutOfMemory     — allocator could not fulfill the output buffer
 //!
 //! TODO:
-//!   - Stage 7: replace with cuBLAS gemm for GPU tensors
-//!   - Stage 8: tiled matmul for better CPU cache utilization
-//!   - Consider supporting broadcast batched matmul (B,M,K) x (K,N)
+//!   - future: tiled CPU matmul for better cache utilization (today
+//!     uses naive triple-nested loops).
+//!   - future: broadcast batched matmul (B,M,K) x (K,N) that
+//!     broadcasts the RHS across the batch dim without replication.
 //!
 //! Credits:
 //!   The ikj loop order insight is from "What Every Programmer Should

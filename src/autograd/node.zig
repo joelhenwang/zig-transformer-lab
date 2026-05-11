@@ -48,11 +48,10 @@
 //!   None in this file — Node construction is infallible.
 //!
 //! TODO:
-//!   - Stage 4: implement embedding backward (scatter-add)
-//!   - Consider compressing saved tensors: for unary ops, we could
-//!     recompute the forward instead of storing inputs. This saves
-//!     memory at the cost of compute (the classic "activation
-//!     checkpointing" / "gradient checkpointing" tradeoff).
+//!   - future: compress saved tensors by recomputing the forward for
+//!     unary ops instead of storing inputs. Classic activation
+//!     checkpointing / gradient checkpointing tradeoff: saves memory
+//!     at the cost of compute.
 //!
 //! Credits:
 //!   The tape-based autograd design is inspired by micrograd (Andrej

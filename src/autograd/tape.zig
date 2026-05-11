@@ -57,9 +57,10 @@
 //!   NumericalError — NaN detected in gradient (optional, not yet impl'd)
 //!
 //! TODO:
-//!   - Add NaN detection in gradient accumulation (debug mode)
-//!   - Add gradient clipping hooks
-//!   - Consider double-backward (not planned — D12 says "not generic")
+//!   - future: NaN detection in gradient accumulation (debug mode)
+//!   - future: gradient clipping hooks inside the tape (clipping
+//!     currently lives in the Trainer; moving it here would let
+//!     tape users opt in via config).
 //!
 //! Credits:
 //!   The tape-based autograd design is inspired by micrograd (Andrej

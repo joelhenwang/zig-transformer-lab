@@ -40,8 +40,8 @@
 //!   broadcastShapes  → LabError.ShapeMismatch  when dims are incompatible.
 //!
 //! TODO:
-//!   - `unsqueeze(shape, axis)` — the inverse of squeeze (Stage 3 autograd).
-//!   - `broadcastTo(shape, target)` — expand to a target shape (Stage 2 ops).
+//!   - future: `unsqueeze(shape, axis)` - the inverse of squeeze,
+//!     useful for aligning rank between broadcasting partners.
 //!
 //! Credits:
 //!   Broadcasting rules are identical to NumPy (numpy/doc/broadcasting.rst).

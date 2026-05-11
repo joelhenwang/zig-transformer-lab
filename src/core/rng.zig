@@ -37,8 +37,11 @@
 //!   None.  All methods are infallible — the seed is always valid (any u64).
 //!
 //! TODO:
-//!   - Stage 7 will need a CUDA-side curand generator with matching seed.
-//!   - Consider a `normalF32Slice` bulk method for weight initialization.
+//!   - future: a CUDA-side curand generator with matching seed so
+//!     that GPU-side sampling (e.g. dropout, MC sampling) can be
+//!     reproducible against a CPU reference.
+//!   - future: a `normalF32Slice` bulk method for weight init that
+//!     avoids per-element call overhead.
 //!
 //! Credits:
 //!   Box-Muller transform is standard (Box & Muller, 1958).  The spare-value

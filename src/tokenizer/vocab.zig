@@ -52,9 +52,6 @@
 //!   OutOfMemory — from HashMap/ArrayList allocation
 //!   IoError — from save/load file I/O
 //!
-//! TODO:
-//!   - Stage 7: consider CUDA-side vocab for GPU text generation
-//!
 //! Credits:
 //!   Word-level tokenization is standard in NLP. The special-token layout
 //!   follows the convention used by GPT-2 and many modern LMs.

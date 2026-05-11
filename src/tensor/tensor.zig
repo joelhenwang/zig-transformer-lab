@@ -46,11 +46,8 @@
 //!   painful struct-migration when Stage 3 adds the tape-based autograd.
 //!
 //! TODO:
-//!   - Stage 3: wire requires_grad/grad/tape_node into the autograd engine.
-//!   - Stage 7: .cuda tensors will have data pointing to device memory.
-//!     The deinit logic will need a branch for cuMemFree_v2.
-//!   - Future: support .reshape() with copy for non-contiguous tensors
-//!     instead of returning NotImplemented.
+//!   - future: support .reshape() with copy for non-contiguous
+//!     tensors instead of returning NotImplemented.
 //;
 
 const std = @import("std");
