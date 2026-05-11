@@ -3525,3 +3525,75 @@ test "cuda checkpoint: save from CUDA then load on a fresh CPU model" {
         for (e, g.data) |x, y| try testing.expectEqual(x, y);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Stage 8 M8-d: Trainer CUDA smoke tests (moved here from
+// src/lab/train.zig because the main test binary does not link
+// against libcuda.so.1 — only the CUDA test binary does).
+// ---------------------------------------------------------------------------
+
+const TrainConfig = lab.lab.TrainConfig;
+const Trainer = lab.lab.Trainer;
+
+test "cuda Trainer: 5-step smoke at n_layer=1 n_head=1" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    const io = try testIo();
+
+    // Tiny config so the test runs in a handful of kernel launches.
+    // We're proving the CUDA path doesn't crash and produces finite
+    // losses — not convergence.
+    const cfg = TrainConfig{
+        .max_vocab = 64,
+        .seq_len = 4,
+        .batch_size = 2,
+        .d_model = 16,
+        .d_ff = 32,
+        .max_steps = 5,
+        .log_every = 100, // silence logging
+        .lr = 1e-3,
+        .use_cuda = true,
+    };
+
+    var trainer = try Trainer.init(alloc, io, "data/tiny.txt", cfg);
+    defer trainer.deinit();
+
+    const result = try trainer.train(null, null);
+
+    // Finite loss proves backward ran cleanly on CUDA and the
+    // optimizer step wrote sensible values.
+    try testing.expect(std.math.isFinite(result.final_loss));
+    try testing.expectEqual(@as(usize, 5), result.steps_completed);
+}
+
+test "cuda Trainer: 2-block 2-head one-step produces finite loss" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const alloc = testing.allocator;
+    const io = try testIo();
+
+    // Smallest config that exercises multi-block + multi-head on CUDA
+    // via the full Trainer path. d_model must be divisible by n_head;
+    // d_model=16, n_head=2 -> d_head=8.
+    const cfg = TrainConfig{
+        .max_vocab = 64,
+        .seq_len = 4,
+        .batch_size = 2,
+        .d_model = 16,
+        .d_ff = 32,
+        .max_steps = 1,
+        .log_every = 100,
+        .lr = 1e-3,
+        .n_layer = 2,
+        .n_head = 2,
+        .use_cuda = true,
+    };
+
+    var trainer = try Trainer.init(alloc, io, "data/tiny.txt", cfg);
+    defer trainer.deinit();
+
+    const result = try trainer.train(null, null);
+    try testing.expect(std.math.isFinite(result.final_loss));
+    try testing.expectEqual(@as(usize, 1), result.steps_completed);
+}

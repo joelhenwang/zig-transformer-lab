@@ -848,78 +848,9 @@ test "generate — respects max_seq_len context window" {
     try std.testing.expect(generated.len >= 6);
 }
 
-// ---------------------------------------------------------------------------
-// Stage 8 M8-d: Trainer CUDA smoke tests
-//
-// Gated on builtin.os.tag == .linux. On every other platform (Windows,
-// macOS) these early-return error.SkipZigTest so the test binary still
-// counts them but skips the body. Mirrors the pattern used throughout
-// tests/integration_cuda.zig.
-// ---------------------------------------------------------------------------
-
-const builtin = @import("builtin");
-
-test "Trainer CUDA: 5-step smoke at n_layer=1 n_head=1" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
-
-    const alloc = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(alloc, .{});
-    const io = threaded.io();
-
-    // Tiny config so the test runs in a handful of kernel launches.
-    // We're proving the CUDA path doesn't crash and produces finite
-    // losses — not convergence.
-    const cfg = TrainConfig{
-        .max_vocab = 64,
-        .seq_len = 4,
-        .batch_size = 2,
-        .d_model = 16,
-        .d_ff = 32,
-        .max_steps = 5,
-        .log_every = 100, // silence logging
-        .lr = 1e-3,
-        .use_cuda = true,
-    };
-
-    var trainer = try Trainer.init(alloc, io, "data/tiny.txt", cfg);
-    defer trainer.deinit();
-
-    const result = try trainer.train(null, null);
-
-    // Finite loss proves backward ran cleanly on CUDA and the
-    // optimizer step wrote sensible values.
-    try std.testing.expect(std.math.isFinite(result.final_loss));
-    try std.testing.expectEqual(@as(usize, 5), result.steps_completed);
-}
-
-test "Trainer CUDA: 2-block 2-head one-step produces finite loss" {
-    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
-
-    const alloc = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(alloc, .{});
-    const io = threaded.io();
-
-    // Smallest config that exercises multi-block + multi-head on CUDA
-    // via the full Trainer path. d_model must be divisible by n_head;
-    // d_model=16, n_head=2 -> d_head=8.
-    const cfg = TrainConfig{
-        .max_vocab = 64,
-        .seq_len = 4,
-        .batch_size = 2,
-        .d_model = 16,
-        .d_ff = 32,
-        .max_steps = 1,
-        .log_every = 100,
-        .lr = 1e-3,
-        .n_layer = 2,
-        .n_head = 2,
-        .use_cuda = true,
-    };
-
-    var trainer = try Trainer.init(alloc, io, "data/tiny.txt", cfg);
-    defer trainer.deinit();
-
-    const result = try trainer.train(null, null);
-    try std.testing.expect(std.math.isFinite(result.final_loss));
-    try std.testing.expectEqual(@as(usize, 1), result.steps_completed);
-}
+// Stage 8 M8-d: Trainer CUDA smoke tests live in
+// `tests/integration_cuda.zig` because the main test binary (driven
+// by `src/root.zig`) does not link against `libcuda.so.1`. Only the
+// dedicated CUDA test binary has the runtime library linkage. Moving
+// the two Trainer CUDA smokes there keeps the boundary between
+// "CPU-only tests" and "CUDA-linked tests" clean.
