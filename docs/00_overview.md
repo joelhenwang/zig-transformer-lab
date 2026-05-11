@@ -102,7 +102,7 @@ These are final. Do not revisit without explicit user approval.
 | D2 | CPU BLAS | None. CPU-naive f32 matmul (correctness oracle) then directly to CUDA with cuBLAS. |
 | D3 | CUDA kernel build | Offline nvcc -arch=sm_89 -ptx at Zig build time. .ptx under zig-out/ptx/. Loaded at runtime with cuModuleLoadData. No NVRTC, no JIT. |
 | D4 | Python oracle | tools/oracle.py using NumPy plus PyTorch. |
-| D5 | Model shape during Stages 2–7 | Hard-coded 1 block / 1 head. Generalization to configurable n_layer, n_head is Stage 8. |
+| D5 | Model shape | Stages 2–7 hard-coded 1 block / 1 head. Stage 8 (Milestone 2) added `TransformerConfig.n_layer: u8`, `n_head: u8`, `dropout: f32` with defaults `(1, 1, 0.0)` preserving the Stage 2–7 behaviour. Milestones 3–4 wire them through to `TinyWordTransformer.blocks: []TransformerBlock` and multi-head `CausalSelfAttention`. |
 | D6 | Documentation | Book-level docs/0X_*.md chapter per stage (500–1500 lines each) plus heavy inline comments. Raw markdown only. ASCII art for diagrams. |
 | D7 | Environment | Linux; system Zig 0.16.0; system CUDA Toolkit; RTX 4060 Ti (sm_89). |
 | D8 | Training corpora | data/tiny.txt (~5 KB crafted) and data/tinyshakespeare.txt (~1 MB). |

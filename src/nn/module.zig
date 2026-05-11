@@ -97,6 +97,12 @@ pub fn resetParamIdCounterForTests() void {
 /// All fields have pedagogically small defaults so the model can
 /// run on CPU in reasonable time. The vocab_size must match the
 /// tokenizer (Stage 5).
+///
+/// Stage 8 adds `n_layer`, `n_head`, `dropout`. All three default
+/// to values that preserve Stage 1–7 behavior bit-for-bit
+/// (`n_layer = 1`, `n_head = 1`, `dropout = 0.0`) so every existing
+/// test, checkpoint, and example continues to behave identically
+/// unless the caller explicitly opts in.
 pub const TransformerConfig = struct {
     /// Vocabulary size (number of unique tokens).
     vocab_size: usize = 64,
@@ -110,6 +116,30 @@ pub const TransformerConfig = struct {
     ln_eps: f32 = 1e-5,
     /// Whether to use bias in Linear layers.
     bias: bool = true,
+
+    /// Number of stacked TransformerBlock layers. Default 1 matches
+    /// the Stage 2–7 model shape; Milestone 3 wires this through to
+    /// `TinyWordTransformer.blocks: []TransformerBlock`. Capped at
+    /// 255 via the u8 width — enough headroom for any pedagogical
+    /// experiment; a `u32` widening is additive if we ever need
+    /// a bigger model.
+    n_layer: u8 = 1,
+
+    /// Number of attention heads per block. Default 1 matches the
+    /// single-head attention of Stages 2–7. Milestone 4 generalises
+    /// `CausalSelfAttention` to `n_head ≥ 1`. Requires
+    /// `d_model % n_head == 0` (checked in `CausalSelfAttention.init`).
+    n_head: u8 = 1,
+
+    /// Dropout probability applied to attention weights and MLP
+    /// outputs. Default 0.0 — i.e. dropout is disabled.
+    ///
+    /// **NOT implemented in Stage 8.** The field is reserved so
+    /// future work can thread it through without another config
+    /// migration. Milestone 3 reads the field but never acts on it;
+    /// a non-zero value is silently ignored until a future stage
+    /// implements masked dropout + dropout-aware backward.
+    dropout: f32 = 0.0,
 };
 
 /// Helper: collect parameters from a slice of layers that all have
@@ -141,4 +171,20 @@ test "TransformerConfig defaults are pedagogically small" {
     try std.testing.expectEqual(@as(usize, 128), cfg.d_ff);
     try std.testing.expectEqual(@as(f32, 1e-5), cfg.ln_eps);
     try std.testing.expect(cfg.bias);
+}
+
+test "TransformerConfig Stage 8 defaults preserve Stage 2-7 semantics" {
+    // Defaults must be n_layer=1, n_head=1, dropout=0.0 so every
+    // existing test, checkpoint, and example stays bit-identical.
+    const cfg = TransformerConfig{};
+    try std.testing.expectEqual(@as(u8, 1), cfg.n_layer);
+    try std.testing.expectEqual(@as(u8, 1), cfg.n_head);
+    try std.testing.expectEqual(@as(f32, 0.0), cfg.dropout);
+}
+
+test "TransformerConfig accepts non-default n_layer / n_head / dropout" {
+    const cfg = TransformerConfig{ .n_layer = 6, .n_head = 4, .dropout = 0.1 };
+    try std.testing.expectEqual(@as(u8, 6), cfg.n_layer);
+    try std.testing.expectEqual(@as(u8, 4), cfg.n_head);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.1), cfg.dropout, 1e-6);
 }
