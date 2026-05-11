@@ -325,11 +325,11 @@ All ten milestones landed end to end in one session.
 | `88ca471` | M3 (08 pad) | 373 |
 | `eff5b7a` | M4a (05b new) | 556 |
 | `78d9038` | M4b (08b new) | 615 |
-| `f3fb5be` | M5 (13 READMEs) | ~500 |
+| `df9713a` | M5 (13 READMEs) | ~500 |
 | `22e1107` | M6 (chapter 10) | 706 + 8 (TOC update) |
 | `4649374` | M7 (audit pass, 11 files) | 504 |
 | `53be82e` | M8 (TODO triage, 18 files) | 52 (net) |
-| `<this>` | M9 (close-out) | — |
+| `048c8ae` | M9 (close-out) | — |
 
 Total new documentation: ~5500 lines across one new plan doc, two
 padded chapters, two new learning-guide chapters, one new final
