@@ -92,7 +92,19 @@ shipped. Acceptance wall-clock: 12.28 ms/step (2.61x the 1/1/32
 baseline — over the 2x budget; deferred to Stage 9 perf follow-up).
 See `docs/stage8_plan.md` + `docs/stage8_handoff.md`.
 
-### Stage 9 — Documentation Finalization 🔲 NOT STARTED
+### Stage 9 — Documentation Finalization ✅ COMPLETE
+
+Tag `stage-9-complete` on origin. No new runtime code; ~5500 lines
+of new documentation including the final `docs/10_pytorch_parallels.md`
+chapter, two new learning-guide bridges (`05b_from_tokenizer_to_training.md`,
+`08b_from_cuda_to_training.md`), padded mechanics chapters
+(`07_cpu_training.md` 373→744, `08_backends_cuda.md` 309→783), 13
+per-subfolder `src/**/README.md` files, exercises + common-mistakes
+audit across all chapters, and a TODO triage reducing 19 stale
+entries to 16 `// future:`-tagged items. Reference: `docs/stage9_plan.md`.
+
+Test counts unchanged from Stage 8 close: 306 CPU + 83 CUDA + 15
+oracle. The project's scoped mission is complete.
 
 ---
 

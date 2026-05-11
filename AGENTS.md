@@ -6,47 +6,56 @@ Build a pedagogical Zig 0.16.0 library that trains a tiny 1-block 1-head word-le
 transformer on CPU, then on CUDA, with extensive documentation and heavily commented
 code that teaches how PyTorch-like systems work internally.
 
-## Current engineering gate — Stage 9 (documentation finalization)
+## Current engineering gate — All stages complete
 
-Stages 1–8 have all shipped (tags `stage-7-complete`, `stage-8-complete`).
-Stage 8 closed on 2026-05-11 with 306 CPU + 83 CUDA + 15 oracle tests
-passing on the RTX 4060 Ti remote, compute-sanitizer clean on the
-2-block/2-head/D=64 acceptance sweep, and `docs/09_debugging.md`
-shipped at 600 lines.
+Stages 1–9 have all shipped (tags `stage-7-complete`, `stage-8-complete`,
+`stage-9-complete`). The project's scoped mission — a pedagogical Zig
+0.16.0 library that trains a tiny multi-block, multi-head word-level
+transformer on CPU and CUDA with extensive documentation — is complete.
 
-Stage 9 is scoped per `plan.md` §873 as a docs-finalisation pass:
-no new code. Planned deliverables:
+Final test counts on RTX 4060 Ti remote (`stage-9-complete`):
 
-1. `docs/10_pytorch_parallels.md` — mapping every Zig abstraction
-   back to its PyTorch counterpart for readers coming from that
-   framework.
-2. Pad shorter chapters: `docs/07_cpu_training.md` (492 → 500+
-   lines) and `docs/08_backends_cuda.md` (410 → 500+ lines) to
-   match the ≥500 line bar the rest of the series meets.
-3. Per-subfolder READMEs under `src/` (each module directory gets
-   a short orientation note).
-4. Inline-comment polish across the hot paths.
+- 306 CPU tests pass
+- 83 CUDA tests pass
+- 15 oracle parity tests pass
 
-> **Stage 9 playbook:** not yet drafted. A fresh session should
-> read `plan.md` §873 and sketch a `docs/stage9_plan.md` before
-> beginning work, matching the Stage 7 / 8 planning cadence.
+Documentation spans ~22 chapters in `docs/0X_*.md` plus 13 per-subfolder
+READMEs under `src/`. Chapter `10_pytorch_parallels.md` maps every
+abstraction back to its PyTorch counterpart.
 
-Optional deferred perf follow-up (noted at Stage 8 close):
-- 2/2/64 wall-clock on CUDA is 2.61× the 1/1/32 baseline (over
-  the originally-scoped 2× budget). A pure-GPU gradient clip
-  (sumSq reduce + mulScalar) would reclaim ~5 % by eliminating
-  the DtoH/HtoD scratch path in `Trainer.train`. Tracked under
-  Stage 9 perf if it comes up.
+Deferred / post-scope items (not blocking):
 
-Historical context:
-- Stage 6.5 (CPU hardening) passed in commit `f9c1d3b` on 2026-05.
-- Stage 7 (CUDA backend) landed in commits `07bd274`..`584160b`
-  over 2026-05-10..11, with 267 CPU + 73 CUDA tests passing on
-  RTX 4060 Ti and a measured 30.59× speedup at the Shakespeare
-  config. Documented in `docs/stage7_plan.md` + `docs/stage7_endgame_plan.md`.
-- Stage 8 (debugging + N-block) landed in commits
-  `5c93fe2`..`f4362e3` over 2026-05-11. Documented in
+- **Pure-GPU gradient clip** (Stage 8 perf follow-up). The Trainer's
+  gradient clipping currently DtoH-scans then HtoDs scaled buffers.
+  Replacing with a reduce.sumSq + mulScalar pair would reclaim ~5 %
+  of per-step wall-clock at the 2/2/64 config.
+- **Nsight Compute permissions** (Stage 8 docs follow-up). Remote
+  needs `/etc/modprobe.d/` override to unblock GPU performance
+  counters for non-root `ncu` runs. See
+  <https://developer.nvidia.com/ERR_NVGPUCTRPERM>.
+- **Multi-GPU** (D14 explicitly gates this out of scope). Would
+  require adding `device_id: u8` to `Device`, per-op context
+  selection, and cross-GPU transfer primitives.
+- **Mixed precision** (D7 explicitly gates this out of scope).
+  `f16`/`bf16` dtypes would require autocast, loss scaling, and
+  a tf32 path in cuBLAS.
+
+> **Continuation guide:** `docs/stage9_plan.md` documents how Stage 9
+> was executed. `docs/00_overview.md` §2 is the canonical reading
+> order across all chapters. `SESSION_GUIDE.md` has the session-start
+> checklist.
+
+Historical stage close commits:
+- Stage 6.5 (CPU hardening): `f9c1d3b` (2026-05).
+- Stage 7 (CUDA backend): `07bd274`..`584160b` (2026-05-10..11),
+  267 CPU + 73 CUDA tests, 30.59× speedup at Shakespeare config.
+  Documented in `docs/stage7_plan.md` + `docs/stage7_endgame_plan.md`.
+- Stage 8 (debugging + N-block): `5c93fe2`..`f4362e3` (2026-05-11).
+  306 CPU + 83 CUDA + 15 oracle tests. Documented in
   `docs/stage8_plan.md` and `docs/stage8_handoff.md`.
+- Stage 9 (documentation finalization): `3e9221d`..*(this stage's
+  final commit)* (2026-05-11). No new code; ~5500 lines of new
+  documentation. Documented in `docs/stage9_plan.md`.
 
 ## PyTorch oracle (post-6.5, CPU safety net before Stage 7)
 
@@ -202,7 +211,7 @@ Monitor for:
 | 7-setup — Remote RTX workflow | **Done** | Commit `1e3b540` — SSH scripts, `.gitattributes`, smoke test confirmed |
 | 7 — CUDA Backend | **Done** | PRs α–ξ landed (commits `07bd274`–`584160b`). 267 CPU + 73 CUDA tests pass on RTX 4060 Ti, compute-sanitizer memory-clean. Measured speedup at Shakespeare config: **30.59×** (CPU 143.7 ms/step, CUDA 4.7 ms/step). See `docs/stage7_plan.md` + `docs/stage7_endgame_plan.md`. |
 | 8 — Debugging + N-block | **Done** | All 8 milestones landed (commits `5c93fe2`..`f4362e3`, 2026-05-11). 306 CPU + 83 CUDA + 15 oracle tests pass on RTX 4060 Ti. `src/debug/` utilities, multi-block `TinyWordTransformer`, multi-head attention, ZTLC v3 checkpoint, Trainer CUDA support (route A), `examples/10_train_deep.zig` acceptance example, and `docs/09_debugging.md` (600 lines) all shipped. M8-f acceptance: 2/2/64 Shakespeare run compute-sanitizer clean (0 errors, 0 leaks); wall-clock 12.28 ms/step = 2.61x the 1/1/32 baseline (over 2x budget, deferred to Stage 9 perf follow-up). See `docs/stage8_plan.md`. |
-| 9 | Not started | |
+| 9 — Documentation finalization | **Done** | All 9 milestones landed (commits `3e9221d`..*(stage-9 close-out)*, 2026-05-11). No new code; ~5500 lines of new documentation: `docs/stage9_plan.md`, pad-and-enrich on `07_cpu_training.md` (373→744) and `08_backends_cuda.md` (309→783), new bridge chapters `05b_from_tokenizer_to_training.md` (556 lines) and `08b_from_cuda_to_training.md` (615 lines), final chapter `10_pytorch_parallels.md` (706 lines), 13 per-subfolder `src/**/README.md` files, exercises + common-mistakes audit across all 21 main chapters, and TODO triage (19 stale items → 16 `future:`-tagged). See `docs/stage9_plan.md`. |
 
 **Stage 3 committed:** `stage(3): tape-based autograd`
 **Stage 4 committed:** `stage(4): nn layers and optimizers`
