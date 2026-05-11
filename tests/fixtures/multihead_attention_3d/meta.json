@@ -1,0 +1,54 @@
+{
+  "B": 2,
+  "D": 8,
+  "H": 2,
+  "T": 3,
+  "backward_tol": 0.0005,
+  "bias": true,
+  "d_head": 4,
+  "description": "multi-head causal self-attention (B=2, T=3, D=8, H=2); exercises reshape + permute + batched matmul + softmax + output projection",
+  "forward_tol": 0.0001,
+  "loss": "sumAll",
+  "name": "multihead_attention_3d",
+  "op": "attention",
+  "output_shape": [
+    2,
+    3,
+    8
+  ],
+  "shapes": [
+    [
+      2,
+      3,
+      8
+    ],
+    [
+      8,
+      8
+    ],
+    [
+      8
+    ],
+    [
+      8,
+      8
+    ],
+    [
+      8
+    ],
+    [
+      8,
+      8
+    ],
+    [
+      8
+    ],
+    [
+      8,
+      8
+    ],
+    [
+      8
+    ]
+  ]
+}

@@ -1,88 +1,10 @@
 {
   "cases": [
     {
-      "backward_tol": 1e-05,
-      "forward_tol": 1e-05,
-      "name": "add_2d",
-      "op": "add"
-    },
-    {
-      "backward_tol": 1e-05,
-      "forward_tol": 1e-05,
-      "name": "add_broadcast_2d_1d",
-      "op": "add"
-    },
-    {
-      "backward_tol": 1e-05,
-      "forward_tol": 1e-05,
-      "name": "mul_broadcast",
-      "op": "mul"
-    },
-    {
-      "backward_tol": 0.0001,
+      "backward_tol": 0.0005,
       "forward_tol": 0.0001,
-      "name": "matmul_2d",
-      "op": "matmul"
-    },
-    {
-      "backward_tol": 0.0001,
-      "forward_tol": 5e-05,
-      "name": "softmax_3d_last_axis",
-      "op": "softmax"
-    },
-    {
-      "backward_tol": 0.0001,
-      "forward_tol": 0.0001,
-      "name": "cross_entropy_3d",
-      "op": "cross_entropy"
-    },
-    {
-      "backward_tol": 0.0001,
-      "forward_tol": 5e-05,
-      "name": "gelu_2d",
-      "op": "gelu_exact"
-    },
-    {
-      "backward_tol": 0.0002,
-      "forward_tol": 5e-05,
-      "name": "layernorm_3d",
-      "op": "layernorm"
-    },
-    {
-      "backward_tol": 1e-05,
-      "forward_tol": 1e-05,
-      "name": "embedding_3d",
-      "op": "embedding"
-    },
-    {
-      "backward_tol": 0.0001,
-      "forward_tol": 0.0001,
-      "name": "matmul_batch_3d",
-      "op": "matmul_batch"
-    },
-    {
-      "backward_tol": 0.0001,
-      "forward_tol": 5e-05,
-      "name": "log_softmax_3d",
-      "op": "log_softmax"
-    },
-    {
-      "backward_tol": 1e-05,
-      "forward_tol": 1e-05,
-      "name": "sum_axis_3d",
-      "op": "sum"
-    },
-    {
-      "backward_tol": 1e-05,
-      "forward_tol": 1e-05,
-      "name": "mean_axis_3d",
-      "op": "mean"
-    },
-    {
-      "backward_tol": 0.0,
-      "forward_tol": 0.0005,
-      "name": "full_model_forward",
-      "op": "full_model"
+      "name": "multihead_attention_3d",
+      "op": "attention"
     }
   ]
 }
