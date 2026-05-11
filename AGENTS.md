@@ -197,7 +197,7 @@ Monitor for:
 | 6 — End-to-end CPU Training | **Done** | Commit `015da3c` — Trainer, generation, gradient clipping, bug fixes |
 | 6.5 — CPU Hardening | **Done** | Commits `f9c1d3b`, `28e73e1`, `97b0aaa`, `3331801` (refactor + docs + oracle + oracle expansion) |
 | 7-setup — Remote RTX workflow | **Done** | Commit `1e3b540` — SSH scripts, `.gitattributes`, smoke test confirmed |
-| 7 — CUDA Backend | **In progress** | PRs α–μ landed + Milestone 1 CE + Milestone 2 (unary + meanAxis) — 267/267 CPU + 62/62 CUDA tests pass on RTX 4060 Ti, compute-sanitizer memory-clean. Remaining: LayerNorm/Block smoke tests, model.toCuda, full-model parity, benchmark. See `docs/stage7_plan.md` + `docs/stage7_endgame_plan.md`. |
+| 7 — CUDA Backend | **Done** | PRs α–ξ landed (commits `07bd274`–`584160b`). 267 CPU + 73 CUDA tests pass on RTX 4060 Ti, compute-sanitizer memory-clean. Measured speedup at Shakespeare config: **30.59×** (CPU 143.7 ms/step, CUDA 4.7 ms/step). See `docs/stage7_plan.md` + `docs/stage7_endgame_plan.md`. |
 | 8–9 | Not started | |
 
 **Stage 3 committed:** `stage(3): tape-based autograd`

@@ -1671,14 +1671,9 @@ Appended to as PRs land. Format: `- [x] PR-X — <scope> (commit HASH, YYYY-MM-D
 - [x] PR-ι — CUDA reductions (43a2f1e, 2026-05-10) — sumAll (atomicAdd), sumAxis (row-major contiguous), bcast_copy + broadcastTo + sumToShape; device-aware zerosLike/onesLike + tape.backward seeds on the same device as loss; **full oracle add_2d forward+backward parity end-to-end on GPU**; 40/40 CUDA pass; compute-sanitizer 0 leaks, 0 memory errors.
 - [x] PR-κ — cuBLAS GEMM + docs/08 (42e917f + fix 4e40453, 2026-05-10) — docs/08_backends_cuda.md (330 lines) with full row-major ↔ col-major derivation; gemm.zig wraps cublasSgemm_v2 and cublasSgemmStridedBatched using the operand-swap trick; ops_matmul.matmul routes CUDA inputs; **oracle matmul_2d forward+backward parity and matmul_batch_3d forward parity within rel_tol=1e-4, abs_tol=5e-5**; 45/45 CUDA tests pass; compute-sanitizer 0 leaks, 0 memory errors.
 - [x] PR-λ — Softmax + log-softmax CUDA (52abdf7, 2026-05-10) — softmax_last/log_softmax_last kernels (block-per-row, 3-pass shared-memory reduction); ops_softmax routes CUDA inputs; oracle softmax_3d_last_axis forward+backward parity + log_softmax_3d forward parity + large-C (D=64) stress test; 49/49 CUDA tests pass; compute-sanitizer 0 leaks, 0 memory errors. Causal mask reuses ops_elementwise.add (no dedicated kernel needed).
-- [~] PR-μ — Embedding + AdamW (75d4914 + fix 9b96189, 2026-05-10) — embedding forward (gather) and backward (atomicAdd scatter-add) kernels; Embedding.forward + backwardEmbedding route CUDA; oracle embedding_3d forward + backward parity. AdamW step kernel; AdamW.step + zeroGrad route CUDA. 53/53 CUDA tests pass; compute-sanitizer 0 leaks, 0 memory errors. **Cross-entropy CUDA deferred** to follow-up (needs a fused forward kernel + tape-saved grad_logits — scoped out to keep this commit review-sized).
-- [ ] PR-θ — Broadcasting / scalar CUDA ops + parity
-- [ ] PR-ι — CUDA reductions + parity
-- [ ] PR-κ — cuBLAS row-major GEMM + docs/08
-- [ ] PR-λ — Softmax + causal mask CUDA + parity
-- [ ] PR-μ — Embedding + cross-entropy + AdamW CUDA + parity
-- [ ] PR-ν — Full-model CUDA parity
-- [ ] PR-ξ — Training speed benchmarks
+- [x] PR-μ — Embedding + AdamW + CE (75d4914 + fix 9b96189, 2026-05-10 initial; cross-entropy completed in commit `0d0f403`, 2026-05-11) — embedding forward (gather) and backward (atomicAdd scatter-add) kernels; AdamW step kernel; Embedding.forward/backward + AdamW.step/zeroGrad + loss.crossEntropy all route CUDA; oracle embedding_3d + cross_entropy_3d forward+backward parity. 55/55 CUDA pass with CE complete; compute-sanitizer 0 leaks, 0 memory errors.
+- [x] PR-ν — Full-model CUDA parity (commits b817a05 + 47e463d + 84aca00 + 6358351, 2026-05-11) — model.moveToCuda method walks all params; forward parity abs_diff=1e-6, rel_err=3e-5; backward parity worst_abs=4e-6; one-training-step parity worst_abs=2.7e-4 (within 2e-3 playbook budget); loss matches to 6 decimals. 73/73 CUDA tests pass. Tape-deinit-nulls-leaf.grad fix (584160b) prevents use-after-free across training iterations.
+- [x] PR-ξ — Training speed benchmarks (commit fea5a5e + fix 584160b, 2026-05-11) — examples/08_cuda_vs_cpu.zig (end-to-end forward+backward+step parity demo) and examples/09_cuda_benchmark.zig (V=2000, D=32, T=16, B=4 wall-clock). **Measured speedup: 30.59× on RTX 4060 Ti** (CPU: 143.749 ms/step, CUDA: 4.700 ms/step). Playbook target of ≥30× met. Final losses match (cpu=0.8372, cuda=0.8372).
 ```
 
 ---

@@ -413,21 +413,36 @@ pushed commits and updated progress docs.
 
 - [x] M1: CE fused kernel + oracle `cross_entropy_3d` parity green.
       (commit `0d0f403`, 2026-05-11)
-- [~] M2: every op the model uses has a CUDA route + at least one
+- [x] M2: every op the model uses has a CUDA route + at least one
   direct unit test. Confirmed by a grep for `NotImplemented` and
   `error.DeviceMismatch` in the forward path.
-      (commits `61b9b7b` + `74eef4a` — GELU/sqrt/exp/log/meanAxis
-      done; LayerNorm/Linear/Block smoke tests remaining in Session 2)
-- [ ] M3: `examples/08_cuda_vs_cpu.zig` reports forward diff < 5e-4 abs.
-- [ ] M4: per-parameter backward diff < 1e-3 abs across the model.
-- [ ] M5: post-one-step param diff < 2e-3 abs across the model.
-- [ ] M6: `examples/09_cuda_benchmark.zig` reports speedup (actual
+      (commits `61b9b7b` + `74eef4a` + `73441ce` — GELU/sqrt/exp/log,
+      meanAxis, LayerNorm oracle, Linear/MLP/Attention/Block smoke
+      tests all green)
+- [x] M3: `examples/08_cuda_vs_cpu.zig` reports forward diff < 5e-4 abs.
+      Integration test `TinyWordTransformer.moveToCuda + forward`
+      reports `abs_diff=0.000001 rel_err=0.000028`. Example 08
+      prints the same diff as part of its output.
+      (commit `b817a05`)
+- [x] M4: per-parameter backward diff < 1e-3 abs across the model.
+      Integration test reports `worst_abs=0.000004` (param 9).
+      (commits `47e463d` + `84aca00`)
+- [x] M5: post-one-step param diff < 2e-3 abs across the model.
+      Integration test reports `worst_abs=0.000271` (param 7);
+      example 08 confirms `0.000153`. Well inside the 2e-3 budget.
+      (commit `6358351`)
+- [x] M6: `examples/09_cuda_benchmark.zig` reports speedup (actual
   number whatever it is; 30× is aspirational, documenting the real
   number satisfies "done").
+      **Measured speedup: 30.59× on RTX 4060 Ti** at the Shakespeare
+      config. CPU: 143.749 ms/step, CUDA: 4.700 ms/step. Final
+      losses match (cpu=0.8372, cuda=0.8372). Playbook target met.
+      (commits `fea5a5e` + `584160b`)
 - [ ] M7: AGENTS.md, SESSION_GUIDE.md §3, docs/stage7_plan.md §4+§10+§13
   all show Stage 7 complete. Optional git tag `stage-7-complete`.
 - [x] All compute-sanitizer runs clean (0 leaks, 0 memory-access errors
-      post-Commit-1 verification on remote; re-check at M5 and M7).
+      post-Commit-1 verification on remote; single expected error from
+      the deliberate `expectError` on missing kernel name).
 - [x] CPU test count unchanged at 267/267 across every commit (no CPU
   regressions during the CUDA work).
 
@@ -441,23 +456,30 @@ Three commits pushed, remote green.
 | `61b9b7b` | M2 part 1 | +5 (55 → 60) | 267 CPU + 60 CUDA pass |
 | `74eef4a` | M2 part 2 | +2 (60 → 62) | 267 CPU + 62 CUDA pass |
 
-What landed:
-- CE fused CUDA kernel (`ce_fused`) + `.ce_cuda_grad` SavedData
-  variant + backward DtoD clone.
-- Unary CUDA kernels: `unary_gelu_exact`,
-  `unary_gelu_exact_backward`, `unary_sqrt`, `unary_exp`,
-  `unary_log` + dispatch routing.
-- `ops_reduce.mean` CUDA branch (sumAxis + mulScalar composition).
-- Oracle parity tests: `cross_entropy_3d` (fwd+bwd), `gelu_2d`
-  (fwd+bwd).
-- `backwardGelu` CUDA branch (fused kernel call instead of host
-  loop).
+### Sessions 2-5 landed (2026-05-11, same day)
 
-What is NOT done (Session 2 work):
-- LayerNorm oracle parity on CUDA — composition audit of
-  mean/sub/mul/sqrt/div on GPU.
-- Linear / MLP / TransformerBlock forward smoke tests on CUDA.
-- `model.toCuda(ctx)` method — Milestone 3 prep.
+| Commit | Session | Delivery | Remote result |
+|---|---|---|---|
+| `29bce9f` | 2 | `accumulateGrad` CUDA fix (the critical multi-path grad bug) | |
+| `4354135` | 2 | Shape-op CUDA branches (reshape/transpose2d/transposeInner2d) + LayerNorm oracle + Linear smoke | 267 CPU + 67 CUDA |
+| `73441ce` | 2 | MLP/Attention/Block CUDA forward parity + attention mask upload | 267 CPU + 70 CUDA |
+| `b817a05` | 3 | `model.moveToCuda` + full-model forward parity test (M3) | 267 CPU + 71 CUDA |
+| `47e463d` | 4a | Full-model backward parity test (M4) | |
+| `84aca00` | 4a | `backwardMatmulBatch` transpose-materialise fix | 267 CPU + 72 CUDA |
+| `6358351` | 4b | Full-model one training step parity (M5) | 267 CPU + 73 CUDA |
+| `fea5a5e` | 5 | Examples `08_cuda_vs_cpu.zig` + `09_cuda_benchmark.zig` | |
+| `584160b` | 5 | `tape.deinit` nulls leaf.grad pointers (use-after-free fix) | example 09 runs end-to-end |
+
+### Headline results on RTX 4060 Ti
+
+- Forward: max `abs=1e-6`, max `rel=3e-5` at V=32, D=8, T=5.
+- Backward (sumAll): per-param `worst_abs=4e-6`.
+- One training step: CPU loss = GPU loss to 6 decimals; per-param
+  `worst_abs=1.5e-4` (well inside 2e-3 budget).
+- Shakespeare config (V=2000, D=32, T=16, B=4): **30.59× speedup**
+  over CPU, final losses match.
+- compute-sanitizer clean (single documented expectError).
+- CPU test count unchanged at 267 throughout.
 
 ---
 
