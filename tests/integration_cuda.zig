@@ -2367,6 +2367,14 @@ test "cuda LayerNorm: oracle layernorm_3d forward + backward parity" {
         const abs_diff = try oracle.maxAbsDiff(da_back, expect_da);
         const rel_err = try oracle.maxRelErr(da_back, expect_da, 1e-8);
         std.debug.print("  LN da  abs_diff={d:.6} rel_err={d:.6}\n", .{ abs_diff, rel_err });
+        std.debug.print("  da[0..6] expect={d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4}\n", .{
+            expect_da.data[0], expect_da.data[1], expect_da.data[2],
+            expect_da.data[3], expect_da.data[4], expect_da.data[5],
+        });
+        std.debug.print("  da[0..6] got   ={d:.4} {d:.4} {d:.4} {d:.4} {d:.4} {d:.4}\n", .{
+            da_back.data[0], da_back.data[1], da_back.data[2],
+            da_back.data[3], da_back.data[4], da_back.data[5],
+        });
         try oracle.expectClose(da_back, expect_da, .{ .rel_tol = 1e-3, .abs_tol = 1e-4 });
     }
     {
