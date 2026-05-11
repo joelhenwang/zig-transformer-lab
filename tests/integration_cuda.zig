@@ -2446,6 +2446,58 @@ test "cuda Linear.forward: 2D input matches CPU reference" {
     try oracle.expectClose(y_back, y_cpu, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
 }
 
+test "cuda isolated: mean backward matches CPU" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+
+    const alloc = testing.allocator;
+    var rng = lab.rng.Rng.init(101);
+
+    // y = mean(a, axis=last); loss = sumAll(y).
+    // CPU: d(sum(mean))/da[i,j,k] = 1/D for all.
+    var a_cpu = try lab.ops.create.randn(alloc, Shape.init3D(2, 3, 4), &rng, 0.0, 1.0);
+    defer a_cpu.deinit(alloc);
+    a_cpu.requires_grad = true;
+    a_cpu.param_id = 301;
+
+    var tape_cpu = Tape.init(alloc);
+    defer tape_cpu.deinit();
+    _ = try tape_cpu.trackLeaf(&a_cpu);
+    var mu = try ops_reduce.mean(alloc, a_cpu, 2, &tape_cpu);
+    defer mu.deinit(alloc);
+    var loss_cpu = try ops_reduce.sumAll(alloc, mu, &tape_cpu);
+    defer loss_cpu.deinit(alloc);
+    try tape_cpu.backward(&loss_cpu);
+
+    var a_gpu = try a_cpu.toCuda(&ctx);
+    defer a_gpu.storage.deinit(alloc);
+    a_gpu.requires_grad = true;
+    a_gpu.param_id = 301;
+
+    var tape_gpu = Tape.init(alloc);
+    defer tape_gpu.deinit();
+    _ = try tape_gpu.trackLeaf(&a_gpu);
+    var mu_gpu = try ops_reduce.mean(alloc, a_gpu, 2, &tape_gpu);
+    defer mu_gpu.storage.deinit(alloc);
+    var loss_gpu = try ops_reduce.sumAll(alloc, mu_gpu, &tape_gpu);
+    defer loss_gpu.storage.deinit(alloc);
+    try tape_gpu.backward(&loss_gpu);
+    try ctx.synchronize();
+
+    var da_back = try a_gpu.grad.?.*.toCpu(alloc);
+    defer da_back.deinit(alloc);
+    std.debug.print("  mean-only: cpu da[0..4]={d:.4} {d:.4} {d:.4} {d:.4}  gpu da[0..4]={d:.4} {d:.4} {d:.4} {d:.4}\n", .{
+        a_cpu.grad.?.*.data[0], a_cpu.grad.?.*.data[1],
+        a_cpu.grad.?.*.data[2], a_cpu.grad.?.*.data[3],
+        da_back.data[0], da_back.data[1], da_back.data[2], da_back.data[3],
+    });
+    try oracle.expectClose(da_back, a_cpu.grad.?.*, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
+}
+
 test "cuda isolated: sub-mean backward matches CPU" {
     if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
     var ctx = try CudaContext.init(testing.allocator);
