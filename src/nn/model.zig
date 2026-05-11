@@ -61,7 +61,14 @@ pub const NamedParam = struct { name: []const u8, tensor: *Tensor };
 pub const TinyWordTransformer = struct {
     tok_embed: Embedding,
     pos_embed: Embedding,
-    block: TransformerBlock,
+    /// Stack of transformer blocks. Length = `cfg.n_layer`. Stages 2-7
+    /// always had exactly one block; Stage 8 Milestone 3 generalises
+    /// to an owned slice. `cfg.n_layer = 1` preserves the single-block
+    /// shape bit-for-bit.
+    ///
+    /// Owned by the model: `init` allocates via the caller's allocator
+    /// and `deinit` frees each block plus the slice itself.
+    blocks: []TransformerBlock,
     ln_f: LayerNorm,
     lm_head: Linear,
     allocator: std.mem.Allocator,
@@ -81,12 +88,28 @@ pub const TinyWordTransformer = struct {
         cfg: TransformerConfig,
         rng: *Rng,
     ) LabError!TinyWordTransformer {
+        if (cfg.n_layer == 0) return error.InvalidArgument;
+
         var tok_embed = try Embedding.init(allocator, cfg.vocab_size, cfg.d_model, rng);
         errdefer tok_embed.deinit();
         var pos_embed = try Embedding.init(allocator, cfg.max_seq_len, cfg.d_model, rng);
         errdefer pos_embed.deinit();
-        var block = try TransformerBlock.init(allocator, cfg, rng);
-        errdefer block.deinit();
+
+        // Allocate the block slice. Construct blocks in order, with
+        // errdefer logic that matches the "how many were
+        // successfully built" counter. This follows the pattern used
+        // elsewhere in the project for partial-init rollback.
+        const blocks = allocator.alloc(TransformerBlock, cfg.n_layer) catch return error.OutOfMemory;
+        errdefer allocator.free(blocks);
+        var blocks_built: usize = 0;
+        errdefer {
+            var i: usize = 0;
+            while (i < blocks_built) : (i += 1) blocks[i].deinit();
+        }
+        while (blocks_built < cfg.n_layer) : (blocks_built += 1) {
+            blocks[blocks_built] = try TransformerBlock.init(allocator, cfg, rng);
+        }
+
         var ln_f = try LayerNorm.init(allocator, cfg.d_model, cfg.ln_eps, rng);
         errdefer ln_f.deinit();
         var lm_head = try Linear.init(allocator, cfg.d_model, cfg.vocab_size, false, rng);
@@ -95,7 +118,7 @@ pub const TinyWordTransformer = struct {
         return TinyWordTransformer{
             .tok_embed = tok_embed,
             .pos_embed = pos_embed,
-            .block = block,
+            .blocks = blocks,
             .ln_f = ln_f,
             .lm_head = lm_head,
             .allocator = allocator,
@@ -150,9 +173,28 @@ pub const TinyWordTransformer = struct {
         var x = try ops_elementwise.add(self.allocator, tok, pos, tape);
         defer x.deinit(self.allocator);
 
-        // Transformer block
-        var block_out = try self.block.forward(x, tape);
-        defer block_out.deinit(self.allocator);
+        // Stack of transformer blocks. Milestone 3: generalised from
+        // a single block to a loop over `self.blocks`. We defer
+        // deinit of each intermediate with a single variable that we
+        // reassign after each block's forward; the defer runs at
+        // scope exit, so we track ownership with a captured pointer.
+        //
+        // Pattern: `x` is the current "live" activation. Each block
+        // produces a fresh tensor; we free the previous live one
+        // before overwriting, except for the very first `x` which
+        // was produced by `ops_elementwise.add` above and is already
+        // scope-defer'd via `defer x.deinit(...)` above.
+        var block_out = x;
+        var block_out_owned = false;
+        defer {
+            if (block_out_owned) block_out.deinit(self.allocator);
+        }
+        for (self.blocks) |blk| {
+            const next = try blk.forward(block_out, tape);
+            if (block_out_owned) block_out.deinit(self.allocator);
+            block_out = next;
+            block_out_owned = true;
+        }
 
         // Final LayerNorm
         var ln_out = try self.ln_f.forward(block_out, tape);
@@ -172,7 +214,7 @@ pub const TinyWordTransformer = struct {
     pub fn parameters(self: *TinyWordTransformer, list: *std.ArrayList(*Tensor)) void {
         self.tok_embed.parameters(list);
         self.pos_embed.parameters(list);
-        self.block.parameters(list);
+        for (self.blocks) |*blk| blk.parameters(list);
         self.ln_f.parameters(list);
         self.lm_head.parameters(list);
     }
@@ -307,6 +349,7 @@ pub const TinyWordTransformer = struct {
         var param_list: std.ArrayList(NamedParam) = .empty;
         defer param_list.deinit(self.allocator);
         try self.collectNamedParams(&param_list);
+        defer self.freeBlockNames(&param_list);
 
         try w.writeInt(u32, @intCast(param_list.items.len), .little);
 
@@ -397,6 +440,7 @@ pub const TinyWordTransformer = struct {
         var param_list: std.ArrayList(NamedParam) = .empty;
         defer param_list.deinit(self.allocator);
         try self.collectNamedParams(&param_list);
+        defer self.freeBlockNames(&param_list);
 
         if (param_count != param_list.items.len) return error.ShapeMismatch;
 
@@ -426,9 +470,22 @@ pub const TinyWordTransformer = struct {
             const data_len = try r.takeInt(u32, .little);
 
             // Locate the expected parameter with this name.
+            //
+            // v2 backward compatibility: Stage 7 checkpoints (version 2,
+            // written before Milestone 3) use the single-block name
+            // prefix `block.*`. After Milestone 3 every block is
+            // indexed, so our `collectNamedParams` emits `blocks[0].*`
+            // for a single-block model. Rewrite incoming v2 names on
+            // the fly so `shakespeare_ckpt.bin` (created Stage 6)
+            // continues to load.
             var matched_index: ?usize = null;
+            var rewritten_buf: [300]u8 = undefined;
+            const lookup_name: []const u8 = if (self.cfg.n_layer == 1 and std.mem.startsWith(u8, name, "block.")) blk: {
+                const suffix = name["block.".len..];
+                break :blk std.fmt.bufPrint(&rewritten_buf, "blocks[0].{s}", .{suffix}) catch return error.IoError;
+            } else name;
             for (param_list.items, 0..) |entry, idx| {
-                if (std.mem.eql(u8, name, entry.name)) {
+                if (std.mem.eql(u8, lookup_name, entry.name)) {
                     matched_index = idx;
                     break;
                 }
@@ -465,32 +522,85 @@ pub const TinyWordTransformer = struct {
     }
 
     /// Collect parameters with their names (for debugging / grad checking).
+    ///
+    /// For multi-block models (`cfg.n_layer > 1`), each block contributes
+    /// 10 parameters named `blocks[<i>].*`. The per-block prefix strings
+    /// are allocated via `self.allocator` and their lifetime is tied to
+    /// the list: callers are responsible for `list.deinit(self.allocator)`
+    /// AND for freeing each name slice via `self.allocator.free(entry.name)`
+    /// when the name was allocated (allocated names always start with the
+    /// "blocks[" prefix; fixed names like "tok_embed.weight" are static
+    /// literals and MUST NOT be freed).
+    ///
+    /// The `save` / `load` helpers below handle this discipline internally.
     pub fn collectNamedParams(
         self: *TinyWordTransformer,
         list: *std.ArrayList(NamedParam),
     ) !void {
         try list.append(self.allocator, .{ .name = "tok_embed.weight", .tensor = &self.tok_embed.weight });
         try list.append(self.allocator, .{ .name = "pos_embed.weight", .tensor = &self.pos_embed.weight });
-        try list.append(self.allocator, .{ .name = "block.ln1.gamma", .tensor = &self.block.ln1.gamma });
-        try list.append(self.allocator, .{ .name = "block.ln1.beta", .tensor = &self.block.ln1.beta });
-        try list.append(self.allocator, .{ .name = "block.attn.w_q.weight", .tensor = &self.block.attn.w_q.weight });
-        try list.append(self.allocator, .{ .name = "block.attn.w_k.weight", .tensor = &self.block.attn.w_k.weight });
-        try list.append(self.allocator, .{ .name = "block.attn.w_v.weight", .tensor = &self.block.attn.w_v.weight });
-        try list.append(self.allocator, .{ .name = "block.attn.w_o.weight", .tensor = &self.block.attn.w_o.weight });
-        try list.append(self.allocator, .{ .name = "block.ln2.gamma", .tensor = &self.block.ln2.gamma });
-        try list.append(self.allocator, .{ .name = "block.ln2.beta", .tensor = &self.block.ln2.beta });
-        try list.append(self.allocator, .{ .name = "block.mlp.fc1.weight", .tensor = &self.block.mlp.fc1.weight });
-        try list.append(self.allocator, .{ .name = "block.mlp.fc2.weight", .tensor = &self.block.mlp.fc2.weight });
+
+        // Per-block names: 10 parameters each, prefixed with
+        // "blocks[<i>]." so a 2-block model has 20 block params, a
+        // 6-block model has 60, etc. Stage 7 (single-block) used
+        // `block.*` names; the v2 loader below rewrites those on
+        // the fly when `cfg.n_layer == 1` for backward compatibility.
+        for (self.blocks, 0..) |*blk, i| {
+            try self.appendBlockNames(list, i, blk);
+        }
+
         try list.append(self.allocator, .{ .name = "ln_f.gamma", .tensor = &self.ln_f.gamma });
         try list.append(self.allocator, .{ .name = "ln_f.beta", .tensor = &self.ln_f.beta });
         try list.append(self.allocator, .{ .name = "lm_head.weight", .tensor = &self.lm_head.weight });
+    }
+
+    /// Internal: emit the 10 `blocks[<i>].<field>` entries for one
+    /// block. Each name is allocated via `self.allocator` and must be
+    /// freed by the caller of `collectNamedParams` when done with the
+    /// list. `freeBlockNames` below does the cleanup in one pass.
+    fn appendBlockNames(
+        self: *TinyWordTransformer,
+        list: *std.ArrayList(NamedParam),
+        i: usize,
+        blk: *TransformerBlock,
+    ) !void {
+        const alloc = self.allocator;
+        const fields = [_]struct { suffix: []const u8, tensor: *Tensor }{
+            .{ .suffix = "ln1.gamma", .tensor = &blk.ln1.gamma },
+            .{ .suffix = "ln1.beta", .tensor = &blk.ln1.beta },
+            .{ .suffix = "attn.w_q.weight", .tensor = &blk.attn.w_q.weight },
+            .{ .suffix = "attn.w_k.weight", .tensor = &blk.attn.w_k.weight },
+            .{ .suffix = "attn.w_v.weight", .tensor = &blk.attn.w_v.weight },
+            .{ .suffix = "attn.w_o.weight", .tensor = &blk.attn.w_o.weight },
+            .{ .suffix = "ln2.gamma", .tensor = &blk.ln2.gamma },
+            .{ .suffix = "ln2.beta", .tensor = &blk.ln2.beta },
+            .{ .suffix = "mlp.fc1.weight", .tensor = &blk.mlp.fc1.weight },
+            .{ .suffix = "mlp.fc2.weight", .tensor = &blk.mlp.fc2.weight },
+        };
+        for (fields) |f| {
+            const name = try std.fmt.allocPrint(alloc, "blocks[{d}].{s}", .{ i, f.suffix });
+            try list.append(alloc, .{ .name = name, .tensor = f.tensor });
+        }
+    }
+
+    /// Free all dynamically-allocated names in a `NamedParam` list.
+    /// Safe to call with lists that mix allocated and literal names
+    /// (identified by the "blocks[" prefix).
+    pub fn freeBlockNames(self: *TinyWordTransformer, list: *const std.ArrayList(NamedParam)) void {
+        const alloc = self.allocator;
+        for (list.items) |entry| {
+            if (std.mem.startsWith(u8, entry.name, "blocks[")) {
+                alloc.free(entry.name);
+            }
+        }
     }
 
     /// Free all sub-layers and embeddings.
     pub fn deinit(self: *TinyWordTransformer) void {
         self.tok_embed.deinit();
         self.pos_embed.deinit();
-        self.block.deinit();
+        for (self.blocks) |*blk| blk.deinit();
+        self.allocator.free(self.blocks);
         self.ln_f.deinit();
         self.lm_head.deinit();
     }
@@ -516,6 +626,164 @@ test "TinyWordTransformer init — creates all sub-layers" {
     // Check embedding shapes
     try std.testing.expectEqual(@as(usize, 16), model.tok_embed.weight.shape.dims[0]);
     try std.testing.expectEqual(@as(usize, 4), model.pos_embed.weight.shape.dims[0]);
+}
+
+test "TinyWordTransformer init — default n_layer=1 has single block" {
+    const alloc = std.testing.allocator;
+    var rng = Rng.init(42);
+    const cfg = TransformerConfig{
+        .vocab_size = 16,
+        .d_model = 8,
+        .max_seq_len = 4,
+        .d_ff = 32,
+    };
+
+    var model = try TinyWordTransformer.init(alloc, cfg, &rng);
+    defer model.deinit();
+    try std.testing.expectEqual(@as(usize, 1), model.blocks.len);
+}
+
+test "TinyWordTransformer init — n_layer=3 allocates 3 blocks" {
+    const alloc = std.testing.allocator;
+    var rng = Rng.init(42);
+    const cfg = TransformerConfig{
+        .vocab_size = 16,
+        .d_model = 8,
+        .max_seq_len = 4,
+        .d_ff = 32,
+        .n_layer = 3,
+    };
+
+    var model = try TinyWordTransformer.init(alloc, cfg, &rng);
+    defer model.deinit();
+    try std.testing.expectEqual(@as(usize, 3), model.blocks.len);
+
+    // Each block's attention has its own causal mask; verify they
+    // are independent allocations.
+    const m0 = model.blocks[0].attn.causal_mask.data.ptr;
+    const m1 = model.blocks[1].attn.causal_mask.data.ptr;
+    const m2 = model.blocks[2].attn.causal_mask.data.ptr;
+    try std.testing.expect(m0 != m1);
+    try std.testing.expect(m1 != m2);
+    try std.testing.expect(m0 != m2);
+}
+
+test "TinyWordTransformer init — n_layer=0 returns InvalidArgument" {
+    const alloc = std.testing.allocator;
+    var rng = Rng.init(42);
+    const cfg = TransformerConfig{
+        .vocab_size = 16,
+        .d_model = 8,
+        .max_seq_len = 4,
+        .d_ff = 32,
+        .n_layer = 0,
+    };
+    try std.testing.expectError(error.InvalidArgument, TinyWordTransformer.init(alloc, cfg, &rng));
+}
+
+test "TinyWordTransformer forward — 2-block model produces finite logits" {
+    const alloc = std.testing.allocator;
+    var rng = Rng.init(42);
+    const cfg = TransformerConfig{
+        .vocab_size = 16,
+        .d_model = 8,
+        .max_seq_len = 4,
+        .d_ff = 32,
+        .n_layer = 2,
+    };
+
+    var model = try TinyWordTransformer.init(alloc, cfg, &rng);
+    defer model.deinit();
+
+    var ids = try Tensor.init(alloc, Shape.init2D(2, 3));
+    defer ids.deinit(alloc);
+    for (0..6) |i| ids.data[i] = @floatFromInt(i % 16);
+
+    var logits = try model.forward(ids, null);
+    defer logits.deinit(alloc);
+
+    try std.testing.expectEqual(@as(usize, 2), logits.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 3), logits.shape.dims[1]);
+    try std.testing.expectEqual(@as(usize, 16), logits.shape.dims[2]);
+
+    for (0..logits.data.len) |i| {
+        try std.testing.expect(std.math.isFinite(logits.data[i]));
+    }
+}
+
+test "TinyWordTransformer parameters — 2-block list has twice as many block-scoped entries" {
+    const alloc = std.testing.allocator;
+    var rng = Rng.init(42);
+    const cfg = TransformerConfig{
+        .vocab_size = 16,
+        .d_model = 8,
+        .max_seq_len = 4,
+        .d_ff = 32,
+    };
+
+    var model1 = try TinyWordTransformer.init(alloc, cfg, &rng);
+    defer model1.deinit();
+    var p1: std.ArrayList(*Tensor) = .empty;
+    defer p1.deinit(alloc);
+    try p1.ensureTotalCapacity(alloc, 64);
+    model1.parameters(&p1);
+    const count1 = p1.items.len;
+
+    const cfg2 = TransformerConfig{
+        .vocab_size = 16,
+        .d_model = 8,
+        .max_seq_len = 4,
+        .d_ff = 32,
+        .n_layer = 2,
+    };
+    var rng2 = Rng.init(42);
+    var model2 = try TinyWordTransformer.init(alloc, cfg2, &rng2);
+    defer model2.deinit();
+    var p2: std.ArrayList(*Tensor) = .empty;
+    defer p2.deinit(alloc);
+    try p2.ensureTotalCapacity(alloc, 64);
+    model2.parameters(&p2);
+    const count2 = p2.items.len;
+
+    // Each extra block adds exactly 10 learnable params:
+    //   LN1 (gamma, beta) + 4 attn Linears (w+b = 8) + LN2 (2) +
+    //   MLP fc1 (w+b = 2) + MLP fc2 (w+b = 2) = 16 params per block.
+    //   Wait — Linear uses bias=true by default here so each Linear
+    //   contributes 2 params. 4 attn linears = 8, 2 mlp linears = 4,
+    //   2 LNs = 4. Total per block = 16. Test verifies delta matches.
+    try std.testing.expectEqual(count1 + 16, count2);
+}
+
+test "TinyWordTransformer collectNamedParams — 2-block names include blocks[0] and blocks[1]" {
+    const alloc = std.testing.allocator;
+    var rng = Rng.init(42);
+    const cfg = TransformerConfig{
+        .vocab_size = 16,
+        .d_model = 8,
+        .max_seq_len = 4,
+        .d_ff = 32,
+        .n_layer = 2,
+    };
+
+    var model = try TinyWordTransformer.init(alloc, cfg, &rng);
+    defer model.deinit();
+
+    var named: std.ArrayList(NamedParam) = .empty;
+    defer named.deinit(alloc);
+    try model.collectNamedParams(&named);
+    defer model.freeBlockNames(&named);
+
+    var has_blocks0 = false;
+    var has_blocks1 = false;
+    var has_tok_embed = false;
+    for (named.items) |entry| {
+        if (std.mem.startsWith(u8, entry.name, "blocks[0].")) has_blocks0 = true;
+        if (std.mem.startsWith(u8, entry.name, "blocks[1].")) has_blocks1 = true;
+        if (std.mem.eql(u8, entry.name, "tok_embed.weight")) has_tok_embed = true;
+    }
+    try std.testing.expect(has_blocks0);
+    try std.testing.expect(has_blocks1);
+    try std.testing.expect(has_tok_embed);
 }
 
 test "TinyWordTransformer forward — produces (B, T, V) logits" {

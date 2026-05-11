@@ -650,6 +650,7 @@ test "gradCheck — full TinyWordTransformer model (sumAll loss)" {
     var named: std.ArrayList(NamedParam) = .empty;
     defer named.deinit(allocator);
     try model.collectNamedParams(&named);
+    defer model.freeBlockNames(&named);
     for (named.items) |entry| {
         for (entry.tensor.data) |*v| v.* *= 0.1;
     }
@@ -659,7 +660,10 @@ test "gradCheck — full TinyWordTransformer model (sumAll loss)" {
     // making numerical gradients unreliable. With -1, softmax is
     // smooth enough for accurate finite differences while still
     // enforcing the causal pattern (exp(-1) ≈ 0.368).
-    for (model.block.attn.causal_mask.data) |*v| {
+    //
+    // Stage 8 M3: model.block became model.blocks[]; this grad check
+    // operates on the first (and, for its default config, only) block.
+    for (model.blocks[0].attn.causal_mask.data) |*v| {
         if (v.* < 0.0) v.* = -1.0;
     }
 
