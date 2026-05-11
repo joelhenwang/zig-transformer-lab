@@ -56,14 +56,16 @@ Recommended order:
 10. **04_nn.md** — Module protocol, parameter iteration, initialization strategies
 11. **04b_from_nn_to_training.md** — bridges Stage 4 nn/optim to ML/DL, full training step trace, optimizer math
 12. **05_transformer_math.md** — full shape trace for one transformer block
-13. **06_tokenizer_data.md** — word-level tokenizer, windowing, batching
-14. **07_cpu_training.md** — end-to-end CPU training loop, generation
-15. **07b_learning_guide_training.md** — bridges Stage 6 code to ML/DL concepts
-16. **07c_optimizer_state.md** — ParamId-keyed optimizer state (Stage 6.5 / PR-ζ)
-17. **07d_checkpoint_format.md** — the ZTLC v2 binary format (Stage 6.5 / PR-η)
-18. **08_backends_cuda.md** — cuBLAS, PTX loading, kernel walk-throughs (Stage 7)
-19. **09_debugging.md** — NaN hunting, compute-sanitizer, shape-assert workflow
-20. **10_pytorch_parallels.md** — mapping every concept back to PyTorch
+13. **05b_from_tokenizer_to_training.md** — bridges Stages 5-6 data pipeline to ML/DL concepts, shift-by-1 supervision, end-to-end integration checklist (Stage 9)
+14. **06_tokenizer_data.md** — word-level tokenizer, windowing, batching
+15. **07_cpu_training.md** — end-to-end CPU training loop, generation, three silent bugs we fixed
+16. **07b_learning_guide_training.md** — bridges Stage 6 code to ML/DL concepts
+17. **07c_optimizer_state.md** — ParamId-keyed optimizer state (Stage 6.5 / PR-ζ)
+18. **07d_checkpoint_format.md** — the ZTLC binary format (Stages 6.5 + 8)
+19. **08_backends_cuda.md** — cuBLAS, PTX loading, kernel walk-throughs, row-major worksheet (Stage 7)
+20. **08b_from_cuda_to_training.md** — bridges Stages 7-8 CUDA backend to what it means to train on GPU, per-step device residency walk, Trainer CUDA path (Stage 9)
+21. **09_debugging.md** — NaN hunting, compute-sanitizer, Nsight Compute, shape-assert workflow
+22. **10_pytorch_parallels.md** — mapping every concept back to PyTorch, bridging exercise (Stage 9)
 
 Each chapter ends with a "Common mistakes" section. Read it before you hit the bug.
 
