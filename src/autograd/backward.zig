@@ -343,15 +343,33 @@ fn backwardMatmulBatch(
 ) LabError!void {
     switch (node.saved) {
         .tensor_pair => |tp| {
-            // B is (B_batch, K, N) → Bᵀ is (B_batch, N, K)
+            // B is (B_batch, K, N) → Bᵀ is (B_batch, N, K). For CUDA
+            // we must materialise the transpose view into a contiguous
+            // buffer because cuBLAS matmulBatch rejects non-contig
+            // inputs. For CPU the view is fine — the CPU matmul walks
+            // via strides.
             const bt = try ops_shape.transposeInner2d(tp.b);
-            const da_val = try ops_matmul.matmulBatch(allocator, grad_output.*, bt, null);
-            result[0] = try heapAlloc(allocator, da_val);
+            if (bt.device == .cuda) {
+                var bt_c = try cuda_dispatch.broadcastTo(bt, bt.shape);
+                defer bt_c.storage.deinit(allocator);
+                const da_val = try ops_matmul.matmulBatch(allocator, grad_output.*, bt_c, null);
+                result[0] = try heapAlloc(allocator, da_val);
+            } else {
+                const da_val = try ops_matmul.matmulBatch(allocator, grad_output.*, bt, null);
+                result[0] = try heapAlloc(allocator, da_val);
+            }
 
-            // A is (B_batch, M, K) → Aᵀ is (B_batch, K, M)
+            // A is (B_batch, M, K) → Aᵀ is (B_batch, K, M). Same fix.
             const at = try ops_shape.transposeInner2d(tp.a);
-            const db_val = try ops_matmul.matmulBatch(allocator, at, grad_output.*, null);
-            result[1] = try heapAlloc(allocator, db_val);
+            if (at.device == .cuda) {
+                var at_c = try cuda_dispatch.broadcastTo(at, at.shape);
+                defer at_c.storage.deinit(allocator);
+                const db_val = try ops_matmul.matmulBatch(allocator, at_c, grad_output.*, null);
+                result[1] = try heapAlloc(allocator, db_val);
+            } else {
+                const db_val = try ops_matmul.matmulBatch(allocator, at, grad_output.*, null);
+                result[1] = try heapAlloc(allocator, db_val);
+            }
         },
         else => return error.InvalidArgument,
     }
