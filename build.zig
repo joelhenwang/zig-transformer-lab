@@ -203,9 +203,9 @@ const kernel_names = [_][]const u8{
     "embedding",
     "adamw",
     "ce_loss",
+    "unary",
     // Future PRs will add:
     // "layernorm",
-    // "gelu",
     // "causal_mask",
 };
 

@@ -2010,3 +2010,167 @@ test "cuda ops_loss.crossEntropy via tape: oracle cross_entropy_3d forward+backw
     expect_grad_3d.strides = computeStrides(expect_grad_3d.shape);
     try oracle.expectClose(grad_cpu_flat, expect_grad_3d, .{ .rel_tol = 1e-4, .abs_tol = 1e-4 });
 }
+
+// ---------------------------------------------------------------------------
+// Milestone 2: Unary CUDA kernels (GELU, sqrt, exp, log)
+// ---------------------------------------------------------------------------
+
+const ops_unary = lab.ops.unary;
+
+test "cuda dispatch geluExact: random input matches CPU reference within 1e-5" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "unary");
+
+    const alloc = testing.allocator;
+
+    // Handpicked values that span the sensitive region around 0 and
+    // the saturating tails. CPU uses an A&S polynomial erf; CUDA uses
+    // the `erff` intrinsic. Drift is typically <= 2 ULP per element,
+    // well inside the 1e-5 absolute tolerance.
+    const x_host = [_]f32{ -2.5, -1.0, -0.3, 0.0, 0.3, 1.0, 2.5, 4.0 };
+    var x_gpu = try cudaFromSlice(&ctx, Shape.init1D(x_host.len), &x_host);
+    defer x_gpu.storage.deinit(alloc);
+
+    var y_gpu = try dispatch.geluExact(x_gpu);
+    defer y_gpu.storage.deinit(alloc);
+    try ctx.synchronize();
+    var y_cpu = try y_gpu.toCpu(alloc);
+    defer y_cpu.deinit(alloc);
+
+    // Reference: our own CPU geluExact (which uses the A&S polynomial).
+    var x_ref = try Tensor.init(alloc, Shape.init1D(x_host.len));
+    defer x_ref.deinit(alloc);
+    @memcpy(x_ref.data, &x_host);
+    var y_ref = try ops_unary.geluExact(alloc, x_ref, null);
+    defer y_ref.deinit(alloc);
+
+    try oracle.expectClose(y_cpu, y_ref, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
+}
+
+test "cuda dispatch geluExact: tape records and backward matches CPU within 1e-4" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "unary");
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+
+    const alloc = testing.allocator;
+
+    const x_host = [_]f32{ -2.5, -1.0, -0.3, 0.0, 0.3, 1.0, 2.5, 4.0 };
+    var x_gpu = try cudaFromSlice(&ctx, Shape.init1D(x_host.len), &x_host);
+    defer x_gpu.storage.deinit(alloc);
+    x_gpu.requires_grad = true;
+    x_gpu.param_id = 11;
+
+    var tape = Tape.init(alloc);
+    defer tape.deinit();
+    _ = try tape.trackLeaf(&x_gpu);
+
+    var y = try ops_unary.geluExact(alloc, x_gpu, &tape);
+    defer y.storage.deinit(alloc);
+    // Loss = sumAll(y) so every element of y gets grad 1.0 — backward
+    // then reads gelu'(x) directly.
+    var loss = try ops_reduce.sumAll(alloc, y, &tape);
+    defer loss.storage.deinit(alloc);
+    try tape.backward(&loss);
+    try ctx.synchronize();
+
+    var dx_cpu = try x_gpu.grad.?.*.toCpu(alloc);
+    defer dx_cpu.deinit(alloc);
+
+    // Reference: compute CPU gelu backward via the same tape API.
+    var x_ref = try Tensor.init(alloc, Shape.init1D(x_host.len));
+    defer x_ref.deinit(alloc);
+    @memcpy(x_ref.data, &x_host);
+    x_ref.requires_grad = true;
+    x_ref.param_id = 11;
+    var tape_cpu = Tape.init(alloc);
+    defer tape_cpu.deinit();
+    _ = try tape_cpu.trackLeaf(&x_ref);
+    var y_ref = try ops_unary.geluExact(alloc, x_ref, &tape_cpu);
+    defer y_ref.deinit(alloc);
+    var loss_ref = try ops_reduce.sumAll(alloc, y_ref, &tape_cpu);
+    defer loss_ref.deinit(alloc);
+    try tape_cpu.backward(&loss_ref);
+
+    try oracle.expectClose(dx_cpu, x_ref.grad.?.*, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
+}
+
+test "cuda dispatch sqrt: positive random input matches CPU" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "unary");
+
+    const alloc = testing.allocator;
+    const x_host = [_]f32{ 0.01, 0.25, 1.0, 2.0, 9.0, 100.0 };
+    var x_gpu = try cudaFromSlice(&ctx, Shape.init1D(x_host.len), &x_host);
+    defer x_gpu.storage.deinit(alloc);
+
+    var y_gpu = try dispatch.sqrt(x_gpu);
+    defer y_gpu.storage.deinit(alloc);
+    try ctx.synchronize();
+    var y_cpu = try y_gpu.toCpu(alloc);
+    defer y_cpu.deinit(alloc);
+
+    // Expected: IEEE f32 sqrt.
+    for (0..x_host.len) |i| {
+        const expected: f32 = @sqrt(x_host[i]);
+        try testing.expectApproxEqRel(expected, y_cpu.data[i], 1e-6);
+    }
+}
+
+test "cuda dispatch exp: small-range input matches CPU" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "unary");
+
+    const alloc = testing.allocator;
+    // Keep inputs moderate so expf doesn't overflow f32 (e^88 ~ 1e38).
+    const x_host = [_]f32{ -3.0, -1.0, 0.0, 1.0, 2.0, 3.0 };
+    var x_gpu = try cudaFromSlice(&ctx, Shape.init1D(x_host.len), &x_host);
+    defer x_gpu.storage.deinit(alloc);
+
+    var y_gpu = try dispatch.exp(x_gpu);
+    defer y_gpu.storage.deinit(alloc);
+    try ctx.synchronize();
+    var y_cpu = try y_gpu.toCpu(alloc);
+    defer y_cpu.deinit(alloc);
+
+    for (0..x_host.len) |i| {
+        const expected: f32 = @exp(x_host[i]);
+        try testing.expectApproxEqRel(expected, y_cpu.data[i], 1e-5);
+    }
+}
+
+test "cuda dispatch log: positive input matches CPU" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "unary");
+
+    const alloc = testing.allocator;
+    const x_host = [_]f32{ 0.1, 0.5, 1.0, 2.718281828, 10.0, 100.0 };
+    var x_gpu = try cudaFromSlice(&ctx, Shape.init1D(x_host.len), &x_host);
+    defer x_gpu.storage.deinit(alloc);
+
+    var y_gpu = try dispatch.log(x_gpu);
+    defer y_gpu.storage.deinit(alloc);
+    try ctx.synchronize();
+    var y_cpu = try y_gpu.toCpu(alloc);
+    defer y_cpu.deinit(alloc);
+
+    for (0..x_host.len) |i| {
+        const expected: f32 = @log(x_host[i]);
+        try testing.expectApproxEqAbs(expected, y_cpu.data[i], 1e-5);
+    }
+}

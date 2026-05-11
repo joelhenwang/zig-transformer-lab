@@ -128,6 +128,23 @@ fn erfFloat(x: f64) f64 {
 ///
 /// Memory: caller owns the returned tensor; must call deinit(allocator).
 pub fn exp(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!Tensor {
+    if (tensor.device == .cuda) {
+        var out = try cuda_dispatch.exp(tensor);
+        if (tape) |t| {
+            if (tensor.requires_grad) {
+                const node_id = try t.record(Node{
+                    .id = undefined,
+                    .op = .exp,
+                    .parents = .{ tensor.tape_node, null },
+                    .n_parents = 1,
+                    .saved = .{ .tensor_ref = tensor },
+                });
+                out.requires_grad = true;
+                out.tape_node = node_id;
+            }
+        }
+        return out;
+    }
     const n = totalElements(tensor.shape);
     var out = try Tensor.init(allocator, tensor.shape);
     errdefer out.deinit(allocator);
@@ -193,6 +210,23 @@ pub fn exp(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!
 ///
 /// Memory: caller owns the returned tensor; must call deinit(allocator).
 pub fn log(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!Tensor {
+    if (tensor.device == .cuda) {
+        var out = try cuda_dispatch.log(tensor);
+        if (tape) |t| {
+            if (tensor.requires_grad) {
+                const node_id = try t.record(Node{
+                    .id = undefined,
+                    .op = .log,
+                    .parents = .{ tensor.tape_node, null },
+                    .n_parents = 1,
+                    .saved = .{ .tensor_ref = tensor },
+                });
+                out.requires_grad = true;
+                out.tape_node = node_id;
+            }
+        }
+        return out;
+    }
     const n = totalElements(tensor.shape);
     var out = try Tensor.init(allocator, tensor.shape);
     errdefer out.deinit(allocator);
@@ -377,6 +411,23 @@ pub fn relu(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError
 ///
 /// Memory: caller owns the returned tensor; must call deinit(allocator).
 pub fn geluExact(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!Tensor {
+    if (tensor.device == .cuda) {
+        var out = try cuda_dispatch.geluExact(tensor);
+        if (tape) |t| {
+            if (tensor.requires_grad) {
+                const node_id = try t.record(Node{
+                    .id = undefined,
+                    .op = .gelu,
+                    .parents = .{ tensor.tape_node, null },
+                    .n_parents = 1,
+                    .saved = .{ .tensor_ref = tensor },
+                });
+                out.requires_grad = true;
+                out.tape_node = node_id;
+            }
+        }
+        return out;
+    }
     const n = totalElements(tensor.shape);
     var out = try Tensor.init(allocator, tensor.shape);
     errdefer out.deinit(allocator);
@@ -442,6 +493,23 @@ pub fn geluExact(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) Lab
 ///
 /// Memory: caller owns the returned tensor; must call deinit(allocator).
 pub fn sqrt(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!Tensor {
+    if (tensor.device == .cuda) {
+        var out = try cuda_dispatch.sqrt(tensor);
+        if (tape) |t| {
+            if (tensor.requires_grad) {
+                const node_id = try t.record(Node{
+                    .id = undefined,
+                    .op = .sqrt,
+                    .parents = .{ tensor.tape_node, null },
+                    .n_parents = 1,
+                    .saved = .{ .tensor_ref = tensor },
+                });
+                out.requires_grad = true;
+                out.tape_node = node_id;
+            }
+        }
+        return out;
+    }
     const n = totalElements(tensor.shape);
     var out = try Tensor.init(allocator, tensor.shape);
     errdefer out.deinit(allocator);

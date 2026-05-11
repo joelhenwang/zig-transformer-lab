@@ -556,6 +556,15 @@ fn backwardGelu(
 ) LabError!void {
     switch (node.saved) {
         .tensor_ref => |a| {
+            // CUDA fast path (Milestone 2): one fused kernel computes
+            // grad_in = grad_out * (phi + x*pdf) using erff + expf
+            // intrinsics. This avoids the host-side loop over a.data
+            // (which is the empty compat alias on CUDA).
+            if (a.device == .cuda) {
+                const da = try cuda_dispatch.geluExactBackward(a, grad_output.*);
+                result[0] = try heapAlloc(allocator, da);
+                return;
+            }
             var gelu_grad = try Tensor.init(allocator, a.shape);
             defer gelu_grad.deinit(allocator);
             for (a.data, 0..) |v, i| {

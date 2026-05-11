@@ -976,6 +976,132 @@ pub fn embeddingBackward(ids: Tensor, grad_out: Tensor, V: usize) LabError!Tenso
 }
 
 // ---------------------------------------------------------------------------
+// Unary ops (Milestone 2 — GELU, sqrt, exp, log)
+// ---------------------------------------------------------------------------
+//
+// Same flat-index pattern as the existing unary `neg`: validate the
+// input is CUDA + contiguous, allocate a fresh output, launch the
+// matching kernel from the "unary" PTX module. Each dispatch caller
+// is expected to have pre-loaded the module via
+//   `module.loadPtxFromFile(ctx, io, "unary")`
+// (same convention the other modules follow).
+
+/// Shared launcher for a unary kernel with signature
+/// `(const float*, float*, unsigned int)`. The kernel_name is the
+/// symbol inside the "unary" PTX module.
+fn launchUnaryKernel(
+    ctx: *const CudaContext,
+    kernel_name: [:0]const u8,
+    a: DeviceBuffer,
+    out: DeviceBuffer,
+    n: usize,
+) LabError!void {
+    const mut_ctx: *CudaContext = @constCast(ctx);
+    const kfn = try module.getKernel(mut_ctx, "unary", kernel_name);
+    const n_arg: c_uint = @intCast(n);
+    const args = [_]?*anyopaque{
+        @constCast(@as(*const anyopaque, @ptrCast(&a.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&out.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&n_arg))),
+    };
+    const grid_x: c_uint = @intCast((n + BLOCK_X - 1) / BLOCK_X);
+    try module.launch(
+        mut_ctx,
+        kfn,
+        .{ grid_x, 1, 1 },
+        .{ BLOCK_X, 1, 1 },
+        0,
+        &args,
+    );
+}
+
+/// out = 0.5 * x * (1 + erf(x / sqrt(2))). Contiguous CUDA input.
+pub fn geluExact(x: Tensor) LabError!Tensor {
+    if (!shape_isContiguous(x.shape, x.strides)) return error.InvalidLayout;
+    const x_buf = try requireCudaBuffer(x);
+    const ctx = x_buf.ctx;
+    const n = totalElements(x.shape);
+    var out_buf = try DeviceBuffer.alloc(ctx, n);
+    errdefer out_buf.deinit();
+    try launchUnaryKernel(ctx, "unary_gelu_exact", x_buf, out_buf, n);
+    return wrapContiguousOutput(out_buf, x.shape, x.requires_grad);
+}
+
+/// grad_in = grad_out * gelu'(x), where x was the original input to
+/// geluExact and grad_out is the upstream gradient. All three tensors
+/// must be same-shape contiguous CUDA.
+pub fn geluExactBackward(x: Tensor, grad_out: Tensor) LabError!Tensor {
+    try requireSameDevice(x, grad_out);
+    if (!shape_equals(x.shape, grad_out.shape)) return error.ShapeMismatch;
+    if (!shape_isContiguous(x.shape, x.strides)) return error.InvalidLayout;
+    if (!shape_isContiguous(grad_out.shape, grad_out.strides)) return error.InvalidLayout;
+
+    const x_buf = try requireCudaBuffer(x);
+    const g_buf = try requireCudaBuffer(grad_out);
+    const ctx = x_buf.ctx;
+    const mut_ctx: *CudaContext = @constCast(ctx);
+    const n = totalElements(x.shape);
+
+    var out_buf = try DeviceBuffer.alloc(ctx, n);
+    errdefer out_buf.deinit();
+
+    const kfn = try module.getKernel(mut_ctx, "unary", "unary_gelu_exact_backward");
+    const n_arg: c_uint = @intCast(n);
+    const args = [_]?*anyopaque{
+        @constCast(@as(*const anyopaque, @ptrCast(&x_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&g_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&out_buf.ptr))),
+        @constCast(@as(*const anyopaque, @ptrCast(&n_arg))),
+    };
+    const grid_x: c_uint = @intCast((n + BLOCK_X - 1) / BLOCK_X);
+    try module.launch(
+        mut_ctx,
+        kfn,
+        .{ grid_x, 1, 1 },
+        .{ BLOCK_X, 1, 1 },
+        0,
+        &args,
+    );
+    return wrapContiguousOutput(out_buf, x.shape, false);
+}
+
+/// out = sqrtf(x). Negative inputs produce NaN (IEEE 754).
+pub fn sqrt(x: Tensor) LabError!Tensor {
+    if (!shape_isContiguous(x.shape, x.strides)) return error.InvalidLayout;
+    const x_buf = try requireCudaBuffer(x);
+    const ctx = x_buf.ctx;
+    const n = totalElements(x.shape);
+    var out_buf = try DeviceBuffer.alloc(ctx, n);
+    errdefer out_buf.deinit();
+    try launchUnaryKernel(ctx, "unary_sqrt", x_buf, out_buf, n);
+    return wrapContiguousOutput(out_buf, x.shape, x.requires_grad);
+}
+
+/// out = expf(x).
+pub fn exp(x: Tensor) LabError!Tensor {
+    if (!shape_isContiguous(x.shape, x.strides)) return error.InvalidLayout;
+    const x_buf = try requireCudaBuffer(x);
+    const ctx = x_buf.ctx;
+    const n = totalElements(x.shape);
+    var out_buf = try DeviceBuffer.alloc(ctx, n);
+    errdefer out_buf.deinit();
+    try launchUnaryKernel(ctx, "unary_exp", x_buf, out_buf, n);
+    return wrapContiguousOutput(out_buf, x.shape, x.requires_grad);
+}
+
+/// out = logf(x). Zero / negative inputs produce -inf / NaN.
+pub fn log(x: Tensor) LabError!Tensor {
+    if (!shape_isContiguous(x.shape, x.strides)) return error.InvalidLayout;
+    const x_buf = try requireCudaBuffer(x);
+    const ctx = x_buf.ctx;
+    const n = totalElements(x.shape);
+    var out_buf = try DeviceBuffer.alloc(ctx, n);
+    errdefer out_buf.deinit();
+    try launchUnaryKernel(ctx, "unary_log", x_buf, out_buf, n);
+    return wrapContiguousOutput(out_buf, x.shape, x.requires_grad);
+}
+
+// ---------------------------------------------------------------------------
 // Cross-entropy (Milestone 1 — completes PR-mu)
 // ---------------------------------------------------------------------------
 //
