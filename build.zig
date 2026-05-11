@@ -136,6 +136,11 @@ pub fn build(b: *std.Build) void {
 
         const run_step = b.step("run-example", "Run the named example");
         const run_cmd = b.addRunArtifact(example_exe);
+        // Forward any positional args after `--` on the build
+        // command line to the example binary. Needed by examples
+        // that accept runtime flags (e.g. `zig build
+        // run-example -Dexample=10_train_deep -- --sanitize`).
+        if (b.args) |args| run_cmd.addArgs(args);
         run_step.dependOn(&run_cmd.step);
     }
 
