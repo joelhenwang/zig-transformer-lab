@@ -88,6 +88,7 @@ pub const lab = @import("lab/train.zig");
 // are for example scripts, ad-hoc debugging, and new-op bring-up.
 pub const debug = struct {
     pub const shape = @import("debug/shape.zig");
+    pub const finite = @import("debug/finite.zig");
 };
 
 // Test-only utilities (PyTorch oracle parity, etc.):
@@ -161,6 +162,7 @@ test {
 
     // Stage 8: debug utilities.
     _ = debug.shape;
+    _ = debug.finite;
 
     // Oracle + testing utilities (PR post-6.5):
     _ = testing_utils.oracle;

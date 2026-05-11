@@ -3230,3 +3230,76 @@ test "cuda TinyWordTransformer one training step: CPU vs CUDA post-step param pa
     // Playbook: post-one-step abs < 2e-3.
     try testing.expect(worst_abs < 2e-3);
 }
+
+// ---------------------------------------------------------------------------
+// Stage 8 Milestone 1: debug utility CUDA smoke tests.
+// The debug helpers themselves are device-aware; here we confirm the
+// CUDA code paths work end-to-end against a real DtoH copy.
+// ---------------------------------------------------------------------------
+
+const debug = lab.debug;
+
+test "cuda debug.assertFinite: CUDA tensor with NaN injected fails" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    const alloc = testing.allocator;
+
+    // Build a CPU tensor with a NaN, upload to CUDA, then scan via
+    // debug.finite.assertFinite. The DtoH path in scanCuda should
+    // surface the NaN at index 2.
+    var host = try Tensor.init(alloc, Shape.init1D(4));
+    defer host.deinit(alloc);
+    host.data[0] = 1.0;
+    host.data[1] = 2.0;
+    host.data[2] = std.math.nan(f32);
+    host.data[3] = 4.0;
+
+    var dev = try host.toCuda(&ctx);
+    defer dev.storage.deinit(alloc);
+
+    try std.testing.expectError(
+        error.NumericalError,
+        debug.finite.assertFinite(alloc, dev),
+    );
+}
+
+test "cuda debug.assertFinite: clean CUDA tensor passes" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    const alloc = testing.allocator;
+    var host = try Tensor.init(alloc, Shape.init1D(4));
+    defer host.deinit(alloc);
+    host.data[0] = 1.0;
+    host.data[1] = -2.5;
+    host.data[2] = 0.0;
+    host.data[3] = 1e-10;
+
+    var dev = try host.toCuda(&ctx);
+    defer dev.storage.deinit(alloc);
+
+    try debug.finite.assertFinite(alloc, dev);
+}
+
+test "cuda debug.hasInf: CUDA tensor with +Inf returns true" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    const alloc = testing.allocator;
+    var host = try Tensor.init(alloc, Shape.init1D(3));
+    defer host.deinit(alloc);
+    host.data[0] = 1.0;
+    host.data[1] = std.math.inf(f32);
+    host.data[2] = 3.0;
+
+    var dev = try host.toCuda(&ctx);
+    defer dev.storage.deinit(alloc);
+
+    try std.testing.expect(try debug.finite.hasInf(alloc, dev));
+    // NaN check should return false for a pure-Inf tensor.
+    try std.testing.expect(!(try debug.finite.hasNaN(alloc, dev)));
+}
