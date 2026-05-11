@@ -2984,3 +2984,142 @@ test "cuda TinyWordTransformer.moveToCuda + forward: CPU vs CUDA parity" {
     // Playbook tolerance: fwd rel=1e-3, abs=5e-4.
     try oracle.expectClose(logits_back, logits_cpu, .{ .rel_tol = 1e-3, .abs_tol = 5e-4 });
 }
+
+// Session 4: TinyWordTransformer end-to-end backward parity.
+// We reuse the M3 test scaffold and add a tape.backward call with
+// `sumAll(logits)` as the scalar loss. Every parameter's gradient
+// is compared against the CPU-baseline gradient.
+
+test "cuda TinyWordTransformer backward (sumAll): CPU vs CUDA per-param parity" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+    _ = try module.loadPtxFromFile(&ctx, io, "softmax");
+    _ = try module.loadPtxFromFile(&ctx, io, "unary");
+    _ = try module.loadPtxFromFile(&ctx, io, "embedding");
+
+    const alloc = testing.allocator;
+    var rng = lab.rng.Rng.init(77);
+
+    const TransformerConfig = lab.nn.module.TransformerConfig;
+    const cfg = TransformerConfig{
+        .vocab_size = 16,
+        .d_model = 8,
+        .d_ff = 32,
+        .max_seq_len = 4,
+    };
+
+    var model_cpu = try TinyWordTransformer.init(alloc, cfg, &rng);
+    defer model_cpu.deinit();
+    var model_gpu = try TinyWordTransformer.init(alloc, cfg, &rng);
+    defer model_gpu.deinit();
+
+    // Mirror weights + mark all params as requires_grad.
+    {
+        var p_cpu: std.ArrayList(*Tensor) = .empty;
+        defer p_cpu.deinit(alloc);
+        try p_cpu.ensureTotalCapacity(alloc, 32);
+        model_cpu.parameters(&p_cpu);
+
+        var p_gpu: std.ArrayList(*Tensor) = .empty;
+        defer p_gpu.deinit(alloc);
+        try p_gpu.ensureTotalCapacity(alloc, 32);
+        model_gpu.parameters(&p_gpu);
+
+        for (0..p_cpu.items.len) |i| {
+            @memcpy(p_gpu.items[i].data, p_cpu.items[i].data);
+            p_cpu.items[i].requires_grad = true;
+            p_gpu.items[i].requires_grad = true;
+        }
+    }
+
+    try model_gpu.moveToCuda(&ctx);
+
+    var ids_cpu = try Tensor.init(alloc, Shape.init2D(2, 3));
+    defer ids_cpu.deinit(alloc);
+    const id_vals = [_]f32{ 0, 2, 5, 1, 7, 3 };
+    @memcpy(ids_cpu.data, &id_vals);
+    var ids_gpu = try ids_cpu.toCuda(&ctx);
+    defer ids_gpu.storage.deinit(alloc);
+
+    // CPU backward.
+    var tape_cpu = Tape.init(alloc);
+    defer tape_cpu.deinit();
+    {
+        var p_cpu: std.ArrayList(*Tensor) = .empty;
+        defer p_cpu.deinit(alloc);
+        try p_cpu.ensureTotalCapacity(alloc, 32);
+        model_cpu.parameters(&p_cpu);
+        for (p_cpu.items) |p| _ = try tape_cpu.trackLeaf(p);
+    }
+    var logits_cpu = try model_cpu.forward(ids_cpu, &tape_cpu);
+    defer logits_cpu.deinit(alloc);
+    var loss_cpu = try ops_reduce.sumAll(alloc, logits_cpu, &tape_cpu);
+    defer loss_cpu.deinit(alloc);
+    try tape_cpu.backward(&loss_cpu);
+
+    // CUDA backward.
+    var tape_gpu = Tape.init(alloc);
+    defer tape_gpu.deinit();
+    {
+        var p_gpu: std.ArrayList(*Tensor) = .empty;
+        defer p_gpu.deinit(alloc);
+        try p_gpu.ensureTotalCapacity(alloc, 32);
+        model_gpu.parameters(&p_gpu);
+        for (p_gpu.items) |p| _ = try tape_gpu.trackLeaf(p);
+    }
+    var logits_gpu = try model_gpu.forward(ids_gpu, &tape_gpu);
+    defer logits_gpu.storage.deinit(alloc);
+    var loss_gpu = try ops_reduce.sumAll(alloc, logits_gpu, &tape_gpu);
+    defer loss_gpu.storage.deinit(alloc);
+    try tape_gpu.backward(&loss_gpu);
+    try ctx.synchronize();
+
+    // Per-parameter gradient comparison. We collect both lists in
+    // the same order (`parameters` walks the sub-layer hierarchy
+    // deterministically) so index `i` refers to the same logical
+    // parameter on both devices.
+    var p_cpu_list: std.ArrayList(*Tensor) = .empty;
+    defer p_cpu_list.deinit(alloc);
+    try p_cpu_list.ensureTotalCapacity(alloc, 32);
+    model_cpu.parameters(&p_cpu_list);
+
+    var p_gpu_list: std.ArrayList(*Tensor) = .empty;
+    defer p_gpu_list.deinit(alloc);
+    try p_gpu_list.ensureTotalCapacity(alloc, 32);
+    model_gpu.parameters(&p_gpu_list);
+
+    var worst_abs: f32 = 0.0;
+    var worst_rel: f32 = 0.0;
+    var worst_idx: usize = 0;
+    for (0..p_cpu_list.items.len) |i| {
+        const g_cpu = p_cpu_list.items[i].grad orelse {
+            std.debug.print("  param {d}: CPU grad missing!\n", .{i});
+            return error.NumericalError;
+        };
+        const g_gpu_ptr = p_gpu_list.items[i].grad orelse {
+            std.debug.print("  param {d}: CUDA grad missing!\n", .{i});
+            return error.NumericalError;
+        };
+        var g_gpu_host = try g_gpu_ptr.*.toCpu(alloc);
+        defer g_gpu_host.deinit(alloc);
+        const abs_i = try oracle.maxAbsDiff(g_gpu_host, g_cpu.*);
+        const rel_i = try oracle.maxRelErr(g_gpu_host, g_cpu.*, 1e-8);
+        if (abs_i > worst_abs) {
+            worst_abs = abs_i;
+            worst_idx = i;
+        }
+        if (rel_i > worst_rel) worst_rel = rel_i;
+    }
+    std.debug.print(
+        "  backward per-param: worst_abs={d:.6} (param {d}) worst_rel={d:.6}\n",
+        .{ worst_abs, worst_idx, worst_rel },
+    );
+    // Playbook tolerance: backward rel=1e-3, abs=1e-3.
+    // We use rel OR abs composition as usual — per-param with
+    // near-zero grads would otherwise spike rel.
+    try testing.expect(worst_abs < 1e-3 or worst_rel < 1e-3);
+}
