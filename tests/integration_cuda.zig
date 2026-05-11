@@ -2609,3 +2609,291 @@ test "cuda Linear.forward: 3D input matches CPU reference" {
     defer y_back.deinit(alloc);
     try oracle.expectClose(y_back, y_cpu, .{ .rel_tol = 1e-4, .abs_tol = 1e-5 });
 }
+
+// Session 2: MLP / Attention / TransformerBlock CUDA smoke tests.
+// These exercise the full composed NN forward path end-to-end.
+// Backward parity is deferred to Session 4 (full-model backward).
+
+const MLP = lab.nn.mlp.MLP;
+const CausalSelfAttention = lab.nn.attention.CausalSelfAttention;
+const TransformerBlock = lab.nn.block.TransformerBlock;
+
+test "cuda MLP.forward: CPU vs CUDA parity" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+    _ = try module.loadPtxFromFile(&ctx, io, "unary");
+
+    const alloc = testing.allocator;
+    var rng = lab.rng.Rng.init(11);
+
+    // MLP: 8 -> 16 -> 8 with bias and GELU.
+    var mlp_cpu = try MLP.init(alloc, 8, 16, true, &rng);
+    defer mlp_cpu.deinit();
+
+    var x_cpu = try lab.ops.create.randn(alloc, Shape.init3D(2, 3, 8), &rng, 0.0, 1.0);
+    defer x_cpu.deinit(alloc);
+
+    // Clone MLP weights to CUDA. MLP has fc1(Linear), fc2(Linear), gelu (stateless).
+    var fc1_w_gpu = try mlp_cpu.fc1.weight.toCuda(&ctx);
+    defer fc1_w_gpu.storage.deinit(alloc);
+    fc1_w_gpu.param_id = mlp_cpu.fc1.weight.param_id;
+    var fc1_b_gpu = try mlp_cpu.fc1.bias.?.toCuda(&ctx);
+    defer fc1_b_gpu.storage.deinit(alloc);
+    fc1_b_gpu.param_id = mlp_cpu.fc1.bias.?.param_id;
+    var fc2_w_gpu = try mlp_cpu.fc2.weight.toCuda(&ctx);
+    defer fc2_w_gpu.storage.deinit(alloc);
+    fc2_w_gpu.param_id = mlp_cpu.fc2.weight.param_id;
+    var fc2_b_gpu = try mlp_cpu.fc2.bias.?.toCuda(&ctx);
+    defer fc2_b_gpu.storage.deinit(alloc);
+    fc2_b_gpu.param_id = mlp_cpu.fc2.bias.?.param_id;
+
+    const mlp_gpu = MLP{
+        .fc1 = Linear{
+            .weight = fc1_w_gpu,
+            .bias = fc1_b_gpu,
+            .allocator = alloc,
+            .d_in = 8,
+            .d_out = 16,
+            .use_bias = true,
+        },
+        .fc2 = Linear{
+            .weight = fc2_w_gpu,
+            .bias = fc2_b_gpu,
+            .allocator = alloc,
+            .d_in = 16,
+            .d_out = 8,
+            .use_bias = true,
+        },
+        .gelu = lab.nn.activations.GELU{ .allocator = alloc },
+        .allocator = alloc,
+    };
+
+    var x_gpu = try x_cpu.toCuda(&ctx);
+    defer x_gpu.storage.deinit(alloc);
+
+    var y_cpu = try mlp_cpu.forward(x_cpu, null);
+    defer y_cpu.deinit(alloc);
+    var y_gpu = try mlp_gpu.forward(x_gpu, null);
+    defer y_gpu.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    var y_back = try y_gpu.toCpu(alloc);
+    defer y_back.deinit(alloc);
+    // MLP composes 2 matmuls + 2 bias-adds + GELU. Compound drift
+    // is ~1e-4 range on our small shapes; rel=5e-4 / abs=1e-4 is
+    // comfortable.
+    try oracle.expectClose(y_back, y_cpu, .{ .rel_tol = 5e-4, .abs_tol = 1e-4 });
+}
+
+test "cuda CausalSelfAttention.forward: CPU vs CUDA parity" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+    _ = try module.loadPtxFromFile(&ctx, io, "softmax");
+
+    const alloc = testing.allocator;
+    var rng = lab.rng.Rng.init(22);
+
+    const D: usize = 8;
+    const T: usize = 4;
+    var attn_cpu = try CausalSelfAttention.init(alloc, D, T, true, &rng);
+    defer attn_cpu.deinit();
+
+    var x_cpu = try lab.ops.create.randn(alloc, Shape.init3D(2, T, D), &rng, 0.0, 1.0);
+    defer x_cpu.deinit(alloc);
+
+    // Helper: clone a Linear's weights to CUDA, returning a Linear
+    // whose weight/bias live on the device.
+    const cloneLinearToCuda = struct {
+        fn do(linear_cpu: Linear, c: *CudaContext, a: std.mem.Allocator) !Linear {
+            var w = try linear_cpu.weight.toCuda(c);
+            errdefer w.storage.deinit(a);
+            w.param_id = linear_cpu.weight.param_id;
+            var b = try linear_cpu.bias.?.toCuda(c);
+            errdefer b.storage.deinit(a);
+            b.param_id = linear_cpu.bias.?.param_id;
+            return Linear{
+                .weight = w,
+                .bias = b,
+                .allocator = a,
+                .d_in = linear_cpu.d_in,
+                .d_out = linear_cpu.d_out,
+                .use_bias = true,
+            };
+        }
+    }.do;
+
+    var w_q_gpu = try cloneLinearToCuda(attn_cpu.w_q, &ctx, alloc);
+    defer w_q_gpu.deinit();
+    var w_k_gpu = try cloneLinearToCuda(attn_cpu.w_k, &ctx, alloc);
+    defer w_k_gpu.deinit();
+    var w_v_gpu = try cloneLinearToCuda(attn_cpu.w_v, &ctx, alloc);
+    defer w_v_gpu.deinit();
+    var w_o_gpu = try cloneLinearToCuda(attn_cpu.w_o, &ctx, alloc);
+    defer w_o_gpu.deinit();
+    // Keep the mask on CPU — attn.forward uploads on-demand.
+    var mask_cpu_clone = try Tensor.init(alloc, attn_cpu.causal_mask.shape);
+    defer mask_cpu_clone.deinit(alloc);
+    @memcpy(mask_cpu_clone.data, attn_cpu.causal_mask.data);
+    const attn_gpu = CausalSelfAttention{
+        .w_q = w_q_gpu,
+        .w_k = w_k_gpu,
+        .w_v = w_v_gpu,
+        .w_o = w_o_gpu,
+        .allocator = alloc,
+        .d_model = D,
+        .causal_mask = mask_cpu_clone,
+    };
+
+    var x_gpu = try x_cpu.toCuda(&ctx);
+    defer x_gpu.storage.deinit(alloc);
+
+    var y_cpu = try attn_cpu.forward(x_cpu, null);
+    defer y_cpu.deinit(alloc);
+    var y_gpu = try attn_gpu.forward(x_gpu, null);
+    defer y_gpu.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    var y_back = try y_gpu.toCpu(alloc);
+    defer y_back.deinit(alloc);
+    // Attention composes 4 Linear + 2 matmulBatch + mulScalar + mask add + softmax.
+    // Softmax is the biggest drift source (exp + max reduction). rel=1e-3 / abs=5e-4
+    // is in line with the playbook full-model tolerance.
+    try oracle.expectClose(y_back, y_cpu, .{ .rel_tol = 1e-3, .abs_tol = 5e-4 });
+}
+
+test "cuda TransformerBlock.forward: CPU vs CUDA parity" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+    const io = try testIo();
+    _ = try module.loadPtxFromFile(&ctx, io, "elementwise");
+    _ = try module.loadPtxFromFile(&ctx, io, "reduce");
+    _ = try module.loadPtxFromFile(&ctx, io, "softmax");
+    _ = try module.loadPtxFromFile(&ctx, io, "unary");
+
+    const alloc = testing.allocator;
+    var rng = lab.rng.Rng.init(33);
+
+    const TransformerConfig = lab.nn.module.TransformerConfig;
+    const cfg = TransformerConfig{
+        .d_model = 8,
+        .d_ff = 32,
+        .max_seq_len = 4,
+        .vocab_size = 16,
+    };
+
+    var block_cpu = try TransformerBlock.init(alloc, cfg, &rng);
+    defer block_cpu.deinit();
+
+    var x_cpu = try lab.ops.create.randn(alloc, Shape.init3D(2, 3, 8), &rng, 0.0, 1.0);
+    defer x_cpu.deinit(alloc);
+
+    // Clone all sub-layer tensors to CUDA. 16 parameters total
+    // (2 per LN, 4 Linears with weight+bias in attn, 2 Linears in
+    // MLP). We do it inline for clarity.
+    var ln1_g = try block_cpu.ln1.gamma.toCuda(&ctx);
+    defer ln1_g.storage.deinit(alloc);
+    ln1_g.param_id = block_cpu.ln1.gamma.param_id;
+    var ln1_b = try block_cpu.ln1.beta.toCuda(&ctx);
+    defer ln1_b.storage.deinit(alloc);
+    ln1_b.param_id = block_cpu.ln1.beta.param_id;
+    var ln2_g = try block_cpu.ln2.gamma.toCuda(&ctx);
+    defer ln2_g.storage.deinit(alloc);
+    ln2_g.param_id = block_cpu.ln2.gamma.param_id;
+    var ln2_b = try block_cpu.ln2.beta.toCuda(&ctx);
+    defer ln2_b.storage.deinit(alloc);
+    ln2_b.param_id = block_cpu.ln2.beta.param_id;
+
+    const cloneLinearToCuda = struct {
+        fn do(linear_cpu: Linear, c: *CudaContext, a: std.mem.Allocator) !Linear {
+            var w = try linear_cpu.weight.toCuda(c);
+            errdefer w.storage.deinit(a);
+            w.param_id = linear_cpu.weight.param_id;
+            var b = try linear_cpu.bias.?.toCuda(c);
+            errdefer b.storage.deinit(a);
+            b.param_id = linear_cpu.bias.?.param_id;
+            return Linear{
+                .weight = w,
+                .bias = b,
+                .allocator = a,
+                .d_in = linear_cpu.d_in,
+                .d_out = linear_cpu.d_out,
+                .use_bias = true,
+            };
+        }
+    }.do;
+
+    var q_gpu = try cloneLinearToCuda(block_cpu.attn.w_q, &ctx, alloc);
+    defer q_gpu.deinit();
+    var k_gpu = try cloneLinearToCuda(block_cpu.attn.w_k, &ctx, alloc);
+    defer k_gpu.deinit();
+    var v_gpu = try cloneLinearToCuda(block_cpu.attn.w_v, &ctx, alloc);
+    defer v_gpu.deinit();
+    var o_gpu = try cloneLinearToCuda(block_cpu.attn.w_o, &ctx, alloc);
+    defer o_gpu.deinit();
+
+    var mask_cpu_clone = try Tensor.init(alloc, block_cpu.attn.causal_mask.shape);
+    defer mask_cpu_clone.deinit(alloc);
+    @memcpy(mask_cpu_clone.data, block_cpu.attn.causal_mask.data);
+
+    var fc1_gpu = try cloneLinearToCuda(block_cpu.mlp.fc1, &ctx, alloc);
+    defer fc1_gpu.deinit();
+    var fc2_gpu = try cloneLinearToCuda(block_cpu.mlp.fc2, &ctx, alloc);
+    defer fc2_gpu.deinit();
+
+    const block_gpu = TransformerBlock{
+        .ln1 = LayerNorm{
+            .gamma = ln1_g,
+            .beta = ln1_b,
+            .allocator = alloc,
+            .d_model = cfg.d_model,
+            .eps = cfg.ln_eps,
+        },
+        .attn = CausalSelfAttention{
+            .w_q = q_gpu,
+            .w_k = k_gpu,
+            .w_v = v_gpu,
+            .w_o = o_gpu,
+            .allocator = alloc,
+            .d_model = cfg.d_model,
+            .causal_mask = mask_cpu_clone,
+        },
+        .ln2 = LayerNorm{
+            .gamma = ln2_g,
+            .beta = ln2_b,
+            .allocator = alloc,
+            .d_model = cfg.d_model,
+            .eps = cfg.ln_eps,
+        },
+        .mlp = MLP{
+            .fc1 = fc1_gpu,
+            .fc2 = fc2_gpu,
+            .gelu = lab.nn.activations.GELU{ .allocator = alloc },
+            .allocator = alloc,
+        },
+        .allocator = alloc,
+    };
+
+    var x_gpu = try x_cpu.toCuda(&ctx);
+    defer x_gpu.storage.deinit(alloc);
+
+    var y_cpu = try block_cpu.forward(x_cpu, null);
+    defer y_cpu.deinit(alloc);
+    var y_gpu = try block_gpu.forward(x_gpu, null);
+    defer y_gpu.storage.deinit(alloc);
+    try ctx.synchronize();
+
+    var y_back = try y_gpu.toCpu(alloc);
+    defer y_back.deinit(alloc);
+    // TransformerBlock = LN1 + Attn + residual + LN2 + MLP + residual.
+    // ~20 composed kernels. Target the playbook forward tolerance.
+    try oracle.expectClose(y_back, y_cpu, .{ .rel_tol = 1e-3, .abs_tol = 5e-4 });
+}

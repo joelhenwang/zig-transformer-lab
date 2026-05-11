@@ -171,9 +171,30 @@ pub const CausalSelfAttention = struct {
             if (mask_needs_free) mask_slice.deinit(self.allocator);
         }
 
+        // Session 2: when input lives on CUDA, upload the mask
+        // on-demand. The causal mask is built on CPU in
+        // CausalSelfAttention.init (hand-computed), but the ops
+        // below need it to share a device with scaled_scores. We
+        // re-upload per-forward (tiny: at most max_seq_len^2
+        // floats) rather than caching — caching would require
+        // mut-self on forward, which the current pre-norm block
+        // doesn't thread through.
+        var mask_cuda: ?Tensor = null;
+        defer {
+            if (mask_cuda) |*mc| mc.storage.deinit(self.allocator);
+        }
+        const mask_for_ops: Tensor = if (input.device == .cuda) blk: {
+            const ctx = switch (input.storage) {
+                .cuda => |b| b.ctx,
+                .cpu => unreachable,
+            };
+            mask_cuda = try mask_slice.toCuda(ctx);
+            break :blk mask_cuda.?;
+        } else mask_slice;
+
         // Broadcast mask from (T,T) to (B,T,T) and add
         // We need to expand mask to (B, T, T) for elementwise add
-        var mask_3d = try ops_shape.reshapeTracked(self.allocator, mask_slice, Shape.init3D(1, T, T), null);
+        var mask_3d = try ops_shape.reshapeTracked(self.allocator, mask_for_ops, Shape.init3D(1, T, T), null);
         defer mask_3d.deinit(self.allocator);
 
         var masked_scores = try ops_elementwise.add(self.allocator, scaled_scores, mask_3d, tape);
