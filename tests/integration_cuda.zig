@@ -3352,3 +3352,36 @@ test "cuda debug.compare: CUDA tensor with perturbation reports worst index" {
     try std.testing.expectEqual(@as(usize, 2), r.worst_idx);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), r.max_abs_diff, 1e-6);
 }
+
+test "cuda debug.dump: CUDA tensor round-trips through .ztlt file" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    const alloc = testing.allocator;
+    const io = try testIo();
+
+    std.Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
+    const path = "zig-out/debug_dump_cuda.ztlt";
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    // Build a CPU tensor, upload to CUDA, dump via the debug helper,
+    // then load back to CPU and compare. The dump path exercises
+    // DeviceBuffer.copyToHost + the ZTLT writer; load uses the
+    // existing oracle loader.
+    var host = try Tensor.init(alloc, Shape.init2D(2, 3));
+    defer host.deinit(alloc);
+    for (0..6) |i| host.data[i] = @as(f32, @floatFromInt(i)) * 0.25 - 0.5;
+
+    var dev = try host.toCuda(&ctx);
+    defer dev.storage.deinit(alloc);
+
+    try debug.dump.dump(alloc, io, path, dev);
+
+    var loaded = try debug.dump.load(alloc, io, path);
+    defer loaded.deinit(alloc);
+
+    try testing.expectEqual(@as(usize, 2), loaded.shape.dims[0]);
+    try testing.expectEqual(@as(usize, 3), loaded.shape.dims[1]);
+    for (0..6) |i| try testing.expectEqual(host.data[i], loaded.data[i]);
+}

@@ -90,6 +90,7 @@ pub const debug = struct {
     pub const shape = @import("debug/shape.zig");
     pub const finite = @import("debug/finite.zig");
     pub const compare = @import("debug/compare.zig");
+    pub const dump = @import("debug/dump.zig");
 };
 
 // Test-only utilities (PyTorch oracle parity, etc.):
@@ -165,6 +166,7 @@ test {
     _ = debug.shape;
     _ = debug.finite;
     _ = debug.compare;
+    _ = debug.dump;
 
     // Oracle + testing utilities (PR post-6.5):
     _ = testing_utils.oracle;
