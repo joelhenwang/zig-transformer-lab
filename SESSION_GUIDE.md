@@ -72,9 +72,13 @@ it with CUDA. The project follows a hybrid approach: implementation-agent mode
 - `.gitattributes` enforces LF on `*.sh`/`*.py` so rsync doesn't break remote execution.
 - Toolchain verified: Ubuntu 24.04, RTX 4060 Ti 16 GB, CUDA 13.2, Zig 0.16.0. Both `zig build test` and `zig build test-oracle` pass on remote.
 
-### Stage 7 — CUDA Backend 🔲 NOT STARTED — **playbook ready**
-**Read:** `docs/stage7_plan.md` — 14-PR roadmap with full PR cards (API surfaces, acceptance criteria, commit templates, gotchas). A fresh session should open that file and start at PR-α.
-See also AGENTS.md "Stage 7: Next steps" for the higher-level sub-stage description.
+### Stage 7 — CUDA Backend ✅ COMPLETE
+**Commit range:** `07bd274` .. `584160b` + docs `f5ecf37`. 14 PRs (α–ξ) + two
+end-to-end examples landed. Final test count: 267 CPU + 73 CUDA on RTX 4060
+Ti, compute-sanitizer memory-clean. Speedup measured at the Shakespeare
+config: **30.59×** (CPU 143.7 ms/step, CUDA 4.7 ms/step). See
+`docs/stage7_plan.md` (playbook) and `docs/stage7_endgame_plan.md`
+(session-by-session landing log).
 
 ### Stage 8 — Debugging and N-block Refactor 🔲 NOT STARTED
 
