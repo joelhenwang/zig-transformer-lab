@@ -196,7 +196,8 @@ Monitor for:
 | 6.5 — CPU Hardening | **Done** | Commits `f9c1d3b`, `28e73e1`, `97b0aaa`, `3331801` (refactor + docs + oracle + oracle expansion) |
 | 7-setup — Remote RTX workflow | **Done** | Commit `1e3b540` — SSH scripts, `.gitattributes`, smoke test confirmed |
 | 7 — CUDA Backend | **Done** | PRs α–ξ landed (commits `07bd274`–`584160b`). 267 CPU + 73 CUDA tests pass on RTX 4060 Ti, compute-sanitizer memory-clean. Measured speedup at Shakespeare config: **30.59×** (CPU 143.7 ms/step, CUDA 4.7 ms/step). See `docs/stage7_plan.md` + `docs/stage7_endgame_plan.md`. |
-| 8–9 | Not started | |
+| 8 — Debugging + N-block | **In progress** | M1-M6 landed (commits `5c93fe2`..`8f57498`, 2026-05-11). 306 CPU + 79 CUDA + 15 oracle tests pass on RTX 4060 Ti. `src/debug/` utilities, multi-block `TinyWordTransformer`, multi-head attention, ZTLC v3 checkpoint all shipped. Remaining: M7 (`docs/09_debugging.md`) + M8 (2-block/2-head/D=64 acceptance sweep under compute-sanitizer). See `docs/stage8_plan.md` + `docs/stage8_handoff.md`. |
+| 9 | Not started | |
 
 **Stage 3 committed:** `stage(3): tape-based autograd`
 **Stage 4 committed:** `stage(4): nn layers and optimizers`

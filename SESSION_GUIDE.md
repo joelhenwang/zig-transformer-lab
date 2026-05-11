@@ -170,10 +170,11 @@ zig build docs
 
 ### To start Stage 8 (debugging discipline + N-block refactor):
 
-**First action:** open `docs/stage8_plan.md`. It is a self-contained
-8-milestone plan with per-commit file lists, acceptance criteria,
-and the session-by-session execution schedule. Execute Milestone 1
-first (four small commits under `src/debug/`).
+**First action:** open `docs/stage8_handoff.md`. Stage 8 Milestones
+1-6 have landed (commits `5c93fe2` .. `8f57498`, 2026-05-11) and
+the handoff doc captures all context for executing Milestones 7 +
+8 in a fresh session. Companion: `docs/stage8_plan.md` is the full
+spec; the handoff doc is the execution log + what-remains summary.
 
 Secondary reading: `docs/stage7_endgame_plan.md` for the style of
 milestone cards and the cadence that worked well in Stage 7.

@@ -410,18 +410,46 @@ the common CUDA-kernel bugs catalog from `plan.md` §854.
 
 ## Exit criteria — Stage 8 is Done when
 
-- [ ] M1: 4 commits; `src/debug/{shape,finite,compare,dump}.zig` + umbrella; 15 new tests pass.
-- [ ] M2: `TransformerConfig` has `n_layer`, `n_head`, `dropout` with defaults; all existing tests pass.
-- [ ] M3: `TinyWordTransformer` holds `blocks: []TransformerBlock`; 2-block forward parity test green.
-- [ ] M4: Multi-head attention; `n_head=1` regression within 1 ULP; `n_head=2/4` forward parity.
-- [ ] M5: `multihead_attention_3d` oracle fixture + CPU + CUDA parity tests.
-- [ ] M6: ZTLC v3 round-trip test; v2 compatibility test loads `shakespeare_ckpt.bin` unchanged.
+- [x] M1: 4 commits; `src/debug/{shape,finite,compare,dump}.zig` + umbrella; 15 new tests pass.
+      (commits `5c93fe2`, `149b2bd`, `280472a`, `1fb972e`, 2026-05-11)
+- [x] M2: `TransformerConfig` has `n_layer`, `n_head`, `dropout` with defaults; all existing tests pass.
+      (commit `7e964bf`, 2026-05-11)
+- [x] M3: `TinyWordTransformer` holds `blocks: []TransformerBlock`; 2-block forward parity test green.
+      (commit `ab794c0`, 2026-05-11)
+- [x] M4: Multi-head attention; `n_head=1` regression within 1 ULP; `n_head=2/4` forward parity.
+      (commit `9b814d9`, 2026-05-11)
+- [x] M5: `multihead_attention_3d` oracle fixture + CPU + CUDA parity tests.
+      (commits `8a7b971` + `7aef7e6`, 2026-05-11)
+- [x] M6: ZTLC v3 round-trip test; v2 compatibility test loads synthetic v2 file with name rewrite.
+      (commits `2382bd8` + `8f57498`, 2026-05-11)
 - [ ] M7: `docs/09_debugging.md` ≥ 500 lines.
 - [ ] M8: 2-block, 2-head, D=64 Shakespeare run on CUDA, `compute-sanitizer` clean, wall-clock <2× baseline.
 - [ ] AGENTS.md progress table updated: Stage 8 → **Done** with commit range.
 - [ ] SESSION_GUIDE.md §3 reflects Stage 8 completion.
 - [ ] Optional git tag `stage-8-complete`.
 - [ ] CPU test count stable at ≥ 282 (with the 15 debug tests added); CUDA tests ≥ 78 (with multi-head + oracle + 2-block tests added).
+      **Actual: 306 CPU + 79 CUDA + 15 oracle tests pass on remote RTX 4060 Ti at HEAD `8f57498`.**
+
+### Session 1 landed (2026-05-11)
+
+Six milestones landed end-to-end in one session. Companion document:
+`docs/stage8_handoff.md` captures every commit, landmine, and
+remaining-work item for the fresh session that will execute M7 + M8.
+
+| Commit | Milestone | CPU test delta | Remote verified |
+|---|---|---|---|
+| `5c93fe2` | M1-a | +9 | yes |
+| `149b2bd` | M1-b | +6 | yes (CUDA paths too) |
+| `280472a` | M1-c | +6 | yes |
+| `1fb972e` | M1-d | +3 | yes |
+| `7e964bf` | M2 | +2 | yes |
+| `ab794c0` | M3 | +6 | yes |
+| `9b814d9` | M4 | +4 | yes |
+| `8a7b971` + `7aef7e6` | M5 | +1 oracle | yes (PyTorch fixture generated on remote) |
+| `2382bd8` + `8f57498` | M6 | +3 | yes |
+
+Test counts moved from 267 CPU / 73 CUDA / 14 oracle (Stage 7
+complete) to **306 CPU / 79 CUDA / 15 oracle** (M1-M6 complete).
 
 ---
 
