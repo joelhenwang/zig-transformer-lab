@@ -168,44 +168,28 @@ zig build docs
 
 ## 7. How to Resume Implementation
 
-### To start Stage 7 (CUDA Backend):
+### To start Stage 8 (debugging discipline + N-block refactor):
 
-**First action:** open `docs/stage7_plan.md`. It is a self-contained
-14-PR roadmap with full PR cards (API surfaces, acceptance criteria,
-commit templates, per-PR gotchas, remote-invocation commands, and the
-CUDA-13.2-specific symbol versioning notes discovered during
-7-setup). Execute the next `[ ]` PR.
+**First action:** open `docs/stage8_plan.md`. It is a self-contained
+8-milestone plan with per-commit file lists, acceptance criteria,
+and the session-by-session execution schedule. Execute Milestone 1
+first (four small commits under `src/debug/`).
 
-Secondary reading: `plan.md` Stage 7 section and `AGENTS.md` "Stage 7:
-Next steps" for the higher-level sub-stage ordering. These are the
-original designs; the playbook supersedes where they differ (e.g.
-`libcublas.so.13` vs `.so.12`).
+Secondary reading: `docs/stage7_endgame_plan.md` for the style of
+milestone cards and the cadence that worked well in Stage 7.
 
-Key files to create across the Stage 7 PRs (condensed, see playbook
-for full cards):
-1. `src/backend/cuda/bindings.zig` — dlopen/dlsym for libcuda, libcudart, libcublas
-2. `src/backend/cuda/context.zig` — CudaContext (device, context, stream, cuBLAS handle)
-3. `src/backend/cuda/mem.zig` — DeviceBuffer (cuMemAlloc/cuFree, HtoD, DtoH)
-4. `src/backend/backend.zig` — Backend vtable + CPU naive dispatch
-5. `src/backend/cuda/gemm.zig` — Row-major cuBLAS GEMM wrapper (**most error-prone**)
-6. `src/backend/cuda/module.zig` — PTX loading via cuModuleLoadData
-7. `src/backend/cuda/kernels/*.cu` — 8 kernel files (elementwise, softmax, layernorm, gelu, embedding, causal_mask, ce_loss, adamw)
-8. `src/backend/cuda/dispatch.zig` — CUDA dispatcher implementing Backend.VTable
-9. `examples/08_cuda_vs_cpu.zig` — Cross-validation
-10. `docs/08_backends_cuda.md`
+### Stage 7 reference (already COMPLETE):
 
-**Critical Zig 0.16.0 patterns for CUDA work:**
-- Load `skills/modern-zig-0-16-tutor/references/09-c-interop-0-16.md` and
-  `references/17-zig-cuda-interop-notes.md` for C interop patterns
-- dlopen/dlsym: `extern fn dlopen(path: [*:0]const u8, mode: c_int) ?*anyopaque;`
-- C function pointers: `pub const CUresult = c_uint;` etc.
-- `callconv(.c)` for all CUDA callback signatures
-- Link `libc` + `dl`, never `libcuda` directly (D1)
+Tag `stage-7-complete` on origin. 267 CPU + 73 CUDA tests,
+compute-sanitizer clean, 30.59× speedup on Shakespeare config.
+Reference docs: `docs/stage7_plan.md` (14-PR playbook as executed)
+and `docs/stage7_endgame_plan.md` (session landing log).
 
-### Stages 8-9:
+### Stage 9:
 
-Follow plan.md precisely. Each stage has: files to create, design notes,
-acceptance criteria, commit message format.
+Follow `plan.md` §873 — documentation finalization. Starts after
+Stage 8 ships so the PyTorch parallels chapter can cover the real
+multi-head attention code.
 
 ---
 
@@ -340,17 +324,16 @@ Full table in `docs/00_overview.md` or `plan.md` Section 2.
 
 When starting a new session, do these in order:
 
-1. `cd /home/joelwang-rtx/Desktop/ai_lab/zig-transformer-lab` (or your local path on Windows)
-2. Read `AGENTS.md` (agent contract, progress, gotchas, next steps)
+1. `cd` into the repo (Windows: `C:\Users\...\zig-transformer-lab`; Linux: `/home/joelwang-rtx/Desktop/ai_lab/zig-transformer-lab`)
+2. Read `AGENTS.md` (agent contract, progress, gotchas, current gate)
 3. Read this file (`SESSION_GUIDE.md`) for current state
-4. **If Stage 7:** read `docs/stage7_plan.md` in full before touching code. It contains every Stage 7 PR card.
-5. Check `git log --oneline -15` for completed stages (expect stages 1–6.5 + 7-setup done).
-6. Run `zig build test` to verify baseline (263 tests).
-7. Run `zig build test-oracle` to verify oracle fixtures (14 tests).
-8. For Stage 7 CUDA work: verify remote access with `bash ./run_remote_example.sh "echo ok && zig version && nvcc --version | tail -1"`.
+4. **If Stage 8:** read `docs/stage8_plan.md` in full before touching code. Milestones 1–8 with commit plans.
+5. Check `git log --oneline -15` for completed stages (expect stages 1–7 done + tag `stage-7-complete`).
+6. Run `zig build test` to verify baseline (267+ tests after Stage 7; 282+ after Stage 8 M1).
+7. Run `zig build test-oracle` to verify oracle fixtures (14+ tests; 15+ after Stage 8 M5).
+8. For CUDA work: verify remote access with `bash ./run_remote_example.sh "echo ok && zig version && nvcc --version | tail -1"`.
 9. Load `skills/modern-zig-0-16-tutor/SKILL.md` for any Zig API questions.
-10. Load `skills/modern-zig-0-16-tutor/references/09-c-interop-0-16.md` and `references/17-zig-cuda-interop-notes.md` for CUDA interop.
-11. Pick up at the next `[ ]` PR in `docs/stage7_plan.md` Section 4.
+10. Pick up at the next unchecked milestone in `docs/stage8_plan.md`.
 
 ---
 
