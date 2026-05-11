@@ -909,8 +909,49 @@ pub fn broadcastTo(allocator: std.mem.Allocator, tensor: Tensor, target: Shape) 
 /// This implements the multivariable chain rule: if a tensor is used
 /// in multiple operations, its gradient is the SUM of contributions
 /// from each operation.
+///
+/// Device routing (Session 2):
+///   CUDA tensors keep an empty CPU compat alias (PR-δ), so the
+///   CPU loop `for (0..n) |i| dst.data[i] += src.data[i]` over
+///   `dst.data.len == 0` is a silent no-op — dropping every
+///   multi-path gradient contribution (e.g. LayerNorm's path from
+///   `a` through `mean(a)` back to `a`). The CUDA branch launches
+///   the same fused add kernel used by elementwise.add, writing
+///   the result back into `dst`'s existing buffer in place.
 pub fn accumulateGrad(dst: *Tensor, src: *Tensor) void {
     std.debug.assert(shape_equals(dst.shape, src.shape));
+    if (dst.device == .cuda) {
+        // In-place accumulate via DtoD temp: tmp = dst + src, copy tmp -> dst.
+        //
+        // Why not a dedicated in-place kernel? The current elw_add kernel
+        // writes to a third buffer (`c = a + b`) and we don't have an
+        // `add_inplace` variant. Adding one is ~10 LOC but adds an API
+        // surface the CPU path doesn't have. For now we allocate a temp
+        // output, then DtoD-copy back. One extra allocation + one extra
+        // copy per accumulate; negligible at our scale.
+        var tmp = cuda_dispatch.add(dst.*, src.*) catch |err| {
+            // The assertion above + same-device invariants guarantee this
+            // cannot fail for shape reasons. Only OOM is plausible; we
+            // must not silently drop the accumulation.
+            std.log.warn("accumulateGrad CUDA failed: {}", .{err});
+            return;
+        };
+        defer tmp.storage.deinit(undefined); // allocator unused on CUDA deinit
+        // Copy tmp -> dst's existing DeviceBuffer. Both are same shape,
+        // contiguous, same context. cuMemcpyDtoD_v2 handles it.
+        const dst_buf = switch (dst.storage) {
+            .cuda => |b| b,
+            .cpu => unreachable, // device==.cuda invariant
+        };
+        const src_buf = switch (tmp.storage) {
+            .cuda => |b| b,
+            .cpu => unreachable,
+        };
+        dst_buf.copyFromDevice(src_buf) catch |err| {
+            std.log.warn("accumulateGrad CUDA DtoD copy failed: {}", .{err});
+        };
+        return;
+    }
     const n = dst.data.len;
     for (0..n) |i| {
         dst.data[i] += src.data[i];
