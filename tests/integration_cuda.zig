@@ -3303,3 +3303,52 @@ test "cuda debug.hasInf: CUDA tensor with +Inf returns true" {
     // NaN check should return false for a pure-Inf tensor.
     try std.testing.expect(!(try debug.finite.hasNaN(alloc, dev)));
 }
+
+test "cuda debug.compare: CUDA vs CPU tensor identical reports zero" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    const alloc = testing.allocator;
+    var host = try Tensor.init(alloc, Shape.init1D(4));
+    defer host.deinit(alloc);
+    host.data[0] = 1.0;
+    host.data[1] = 2.0;
+    host.data[2] = 3.0;
+    host.data[3] = 4.0;
+
+    var dev = try host.toCuda(&ctx);
+    defer dev.storage.deinit(alloc);
+
+    const r = try debug.compare.compare(alloc, dev, host, .{});
+    try std.testing.expectEqual(@as(f32, 0.0), r.max_abs_diff);
+    try std.testing.expect(r.withinTolerance(1e-6, 1e-6));
+}
+
+test "cuda debug.compare: CUDA tensor with perturbation reports worst index" {
+    if (comptime builtin.os.tag != .linux) return error.SkipZigTest;
+    var ctx = try CudaContext.init(testing.allocator);
+    defer ctx.deinit();
+
+    const alloc = testing.allocator;
+    var host_a = try Tensor.init(alloc, Shape.init1D(4));
+    defer host_a.deinit(alloc);
+    host_a.data[0] = 1.0;
+    host_a.data[1] = 2.0;
+    host_a.data[2] = 3.0;
+    host_a.data[3] = 4.0;
+
+    var host_b = try Tensor.init(alloc, Shape.init1D(4));
+    defer host_b.deinit(alloc);
+    host_b.data[0] = 1.0;
+    host_b.data[1] = 2.0;
+    host_b.data[2] = 3.5; // 0.5 off
+    host_b.data[3] = 4.0;
+
+    var dev_a = try host_a.toCuda(&ctx);
+    defer dev_a.storage.deinit(alloc);
+
+    const r = try debug.compare.compare(alloc, dev_a, host_b, .{});
+    try std.testing.expectEqual(@as(usize, 2), r.worst_idx);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), r.max_abs_diff, 1e-6);
+}
