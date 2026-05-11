@@ -899,54 +899,167 @@ test "Checkpoint v2 backward compat — single-block load via name rewrite" {
     const io = try testIo();
     std.Io.Dir.cwd().createDirPath(io, "zig-out") catch {};
 
-    // Hand-write a minimal v2 file with one `block.ln1.gamma`
-    // parameter and verify load rewrites to `blocks[0].ln1.gamma`.
+    // Construct a synthetic v2 checkpoint in-memory: same header
+    // layout as Stage 7 save(), same "block.*" param naming. Write
+    // to a temp file, then load with the v3 loader and verify the
+    // name-rewrite path kicks in.
     //
-    // Simplest path: build a v3 checkpoint, then patch the version
-    // byte + the 3 extra header fields + rewrite every "blocks[0]."
-    // prefix to "block." in the on-disk name strings.
+    // We piggyback on the existing save() by first saving a v3
+    // file, then patching bytes [4..8] from 3 to 2 and rewriting
+    // every "blocks[0]." name prefix to "block." in the on-disk
+    // record name strings. The v3 file has 3 extra u32/u32/f32
+    // (12 bytes) right after the bias pad; we also need to delete
+    // those from the v2 shape.
     //
-    // Even simpler: just write a save() with version=2 by
-    // temporarily overriding the writer. To avoid reflection
-    // acrobatics we validate v2 compat via the existing
-    // shakespeare_ckpt.bin (created in Stage 6 / 7) which IS a
-    // real v2 file. That file lives at the repo root. The test
-    // skips when the file is absent (e.g. a fresh clone without
-    // the checkpoint).
-    const cwd = std.Io.Dir.cwd();
-    const ckpt_path = "shakespeare_ckpt.bin";
-    // Probe for existence; skip if missing.
-    const probe = cwd.openFile(io, ckpt_path, .{}) catch {
-        return error.SkipZigTest;
-    };
-    probe.close(io);
+    // Simpler path: hand-write the full v2 byte stream for a 1-
+    // parameter model. Keep it minimal to avoid re-deriving the
+    // full record format: we emit ONE parameter (lm_head.weight)
+    // which avoids the per-block naming altogether.
 
-    // The checkpoint was saved with the Shakespeare config
-    // (V=2000, D=32, T=16, D_ff=128, bias=true). Try to load
-    // into a matching-config n_layer=1 model.
+    const cwd = std.Io.Dir.cwd();
+    const path = tmpCheckpointPath("v2-synthetic");
+    defer cwd.deleteFile(io, path) catch {};
+
+    // Compute shape for lm_head.weight in our target cfg.
     var rng = Rng.init(0);
     const cfg = TransformerConfig{
-        .vocab_size = 2000,
-        .d_model = 32,
-        .max_seq_len = 16,
-        .d_ff = 128,
+        .vocab_size = 8,
+        .d_model = 4,
+        .max_seq_len = 4,
+        .d_ff = 8,
         .bias = true,
         // Defaults: n_layer=1, n_head=1, dropout=0
     };
+
+    // Build model to get lm_head.weight shape (D, V)-shape = (4, 8)
+    // wait: our Linear weight is (d_out, d_in) = (V, D) for lm_head
+    // with d_in=D, d_out=V. So shape = (8, 4).
     var model = try TinyWordTransformer.init(alloc, cfg, &rng);
     defer model.deinit();
 
-    try model.load(io, ckpt_path);
-    // If we got here without error, the v2 rewrite path worked.
-    // Smoke-check a parameter has non-zero data (it was trained).
-    var any_nonzero = false;
-    for (model.tok_embed.weight.data) |v| {
-        if (v != 0.0) {
-            any_nonzero = true;
-            break;
+    const lm_w = &model.lm_head.weight;
+    const dim0: u32 = @intCast(lm_w.shape.dims[0]);
+    const dim1: u32 = @intCast(lm_w.shape.dims[1]);
+    // Seed the weight with known values so the load can verify
+    // round-trip semantics.
+    for (lm_w.data, 0..) |*v, i| v.* = @floatFromInt(i);
+
+    // To exercise the v2 compat path we need the checkpoint to
+    // include a parameter named `block.*`. But our n_layer=1 model's
+    // param list AFTER M3 has "blocks[0].*" -- so emitting a param
+    // named "block.attn.w_q.weight" is the right fixture. We write
+    // just that one param to a minimal v2 file and check that load
+    // rewrites the name to "blocks[0].attn.w_q.weight" and matches
+    // the tensor on the loader side.
+    //
+    // For the loader to pass, the saved param_count must equal the
+    // number of params our model expects (16). Hand-writing 16
+    // param records is verbose but straightforward -- we'll just
+    // re-use the name rewrite: write all 16 names with the `block.*`
+    // prefix (substituting `blocks[0]` -> `block`), with the tensor
+    // data from a freshly-init'd model.
+    //
+    // To keep the test focused, we use the existing save() after
+    // temporarily patching the "blocks[0]." prefix out of the
+    // record names. The simplest way is: save() with a custom
+    // path, then post-process the file bytes to (a) set version=2
+    // (b) rewrite names (c) strip the n_layer/n_head/dropout 12 bytes.
+    try model.save(io, path);
+
+    // Read whole file into memory.
+    const bytes_read = cwd.readFileAlloc(io, path, alloc, .limited(1 * 1024 * 1024)) catch {
+        return error.IoError;
+    };
+    defer alloc.free(bytes_read);
+
+    // The v3 header is 32 bytes base + 12 new bytes =
+    //   [0..4)  "ZTLC"
+    //   [4..8)  u32 version = 3
+    //   [8..12) model_kind
+    //   [12..28) vocab/seq/d/ff (16 bytes)
+    //   [28..29) bias
+    //   [29..32) pad
+    //   [32..36) n_layer  <-- NEW
+    //   [36..40) n_head   <-- NEW
+    //   [40..44) dropout  <-- NEW
+    //   [44..48) param_count
+    //   [48..)   records + "END."
+    //
+    // v2 layout omits bytes [32..44) (12 bytes) and the magic
+    // version byte is 2. Build a new buffer with those edits.
+    var v2_buf: std.ArrayList(u8) = .empty;
+    defer v2_buf.deinit(alloc);
+    // Header up to bias+pad (first 32 bytes).
+    try v2_buf.appendSlice(alloc, bytes_read[0..32]);
+    // Patch version: bytes [4..8) -> 2 little-endian.
+    v2_buf.items[4] = 2;
+    v2_buf.items[5] = 0;
+    v2_buf.items[6] = 0;
+    v2_buf.items[7] = 0;
+    // Skip the 12 bytes of v3 extras, then append param_count
+    // through end-of-file (with name rewrites).
+    const v3_body = bytes_read[44..]; // after the 3 extra fields
+    // Now rewrite names in the record stream. Param records use
+    // a u32 name_len + [name_len]u8 name layout; each "blocks[0]."
+    // prefix in a name string gets rewritten to "block.".
+    // We scan: u32 param_count, then for each param read name_len
+    // and name, then rank+pad(4)+dims(16)+data_len(4)+data.
+    const pc_bytes = v3_body[0..4];
+    try v2_buf.appendSlice(alloc, pc_bytes);
+    const pc: u32 = std.mem.readInt(u32, v3_body[0..4], .little);
+    var cursor: usize = 4;
+    var p_i: u32 = 0;
+    while (p_i < pc) : (p_i += 1) {
+        const nlen = std.mem.readInt(u32, v3_body[cursor..][0..4], .little);
+        const name = v3_body[cursor + 4 .. cursor + 4 + nlen];
+        // Rewrite blocks[0]. -> block.
+        if (std.mem.startsWith(u8, name, "blocks[0].")) {
+            const suffix = name["blocks[0].".len..];
+            const new_name_len: u32 = @intCast("block.".len + suffix.len);
+            // Append new name_len as 4 LE bytes.
+            var nlen_bytes: [4]u8 = undefined;
+            std.mem.writeInt(u32, &nlen_bytes, new_name_len, .little);
+            try v2_buf.appendSlice(alloc, &nlen_bytes);
+            try v2_buf.appendSlice(alloc, "block.");
+            try v2_buf.appendSlice(alloc, suffix);
+        } else {
+            try v2_buf.appendSlice(alloc, v3_body[cursor..][0 .. 4 + nlen]);
         }
+        cursor += 4 + nlen;
+        // rank(1) + pad(3) + dims(16) + data_len(4)
+        try v2_buf.appendSlice(alloc, v3_body[cursor..][0..24]);
+        const data_len = std.mem.readInt(u32, v3_body[cursor + 20 ..][0..4], .little);
+        cursor += 24;
+        try v2_buf.appendSlice(alloc, v3_body[cursor..][0..data_len]);
+        cursor += data_len;
     }
-    try std.testing.expect(any_nonzero);
+    // End magic.
+    try v2_buf.appendSlice(alloc, v3_body[cursor..]);
+
+    // Write the synthetic v2 buffer back to disk (overwrite).
+    {
+        const f = try cwd.createFile(io, path, .{});
+        defer f.close(io);
+        var wbuf: [4096]u8 = undefined;
+        var w = f.writer(io, &wbuf);
+        try w.interface.writeAll(v2_buf.items);
+        try w.flush();
+    }
+
+    // Now load the v2 file into a fresh model. If the v2 rewrite
+    // path works, this succeeds and the lm_head weight matches
+    // what we seeded above.
+    var rng2 = Rng.init(99);
+    var loader = try TinyWordTransformer.init(alloc, cfg, &rng2);
+    defer loader.deinit();
+    try loader.load(io, path);
+
+    for (loader.lm_head.weight.data, 0..) |v, i| {
+        const expected: f32 = @floatFromInt(i);
+        try std.testing.expectEqual(expected, v);
+    }
+    _ = dim0;
+    _ = dim1;
 }
 
 test "TinyWordTransformer forward — produces (B, T, V) logits" {
