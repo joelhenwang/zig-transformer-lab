@@ -382,6 +382,81 @@ pub fn sumToShape(allocator: std.mem.Allocator, grad: Tensor, target: Shape) Lab
 }
 
 // ---------------------------------------------------------------------------
+// Device-agnostic gradient utilities (Phase 3a)
+// ---------------------------------------------------------------------------
+
+/// Compute the sum of squares of all elements in a tensor, regardless of
+/// device. Returns a scalar f64 for numerical stability during gradient
+/// clipping (where intermediate sums can exceed f32 range for large models).
+///
+/// CPU path: trivial loop with f64 accumulation.
+/// CUDA path: mul(t, t) -> sumAll -> DtoH of single scalar.
+///
+/// This is NOT a tape-recorded op (no gradient needed through grad clipping).
+///
+/// Worked example:
+///   t = [1.0, 2.0, 3.0]
+///   sumOfSquaresAll(t) = 1 + 4 + 9 = 14.0
+pub fn sumOfSquaresAll(allocator: std.mem.Allocator, tensor: Tensor) LabError!f64 {
+    if (tensor.device == .cuda) {
+        // On CUDA: mul(t, t) produces element-wise square, then sumAll
+        // reduces to a scalar. Finally we DtoH-copy the single f32 result.
+        var squared = try cuda_dispatch.mul(tensor, tensor);
+        defer squared.storage.deinit(allocator);
+        var scalar_tensor = try cuda_dispatch.sumAll(squared);
+        defer scalar_tensor.storage.deinit(allocator);
+        // DtoH the single scalar
+        var host_val: [1]f32 = undefined;
+        try scalar_tensor.storage.cuda.copyToHost(&host_val);
+        return @floatCast(host_val[0]);
+    }
+    // CPU path: single pass with f64 accumulator
+    const data = tensor.cpuData();
+    var acc: f64 = 0;
+    for (data) |v| {
+        const vf64: f64 = @floatCast(v);
+        acc += vf64 * vf64;
+    }
+    return acc;
+}
+
+/// Scale all elements of a tensor in-place by a scalar coefficient.
+/// Works on both CPU and CUDA tensors.
+///
+/// CPU path: simple loop over contiguous data.
+/// CUDA path: launches mulScalar kernel, frees old buffer, swaps in new.
+///
+/// This is NOT a tape-recorded op (used only in gradient clipping after
+/// backward has completed — gradients are leaf values, not graph nodes).
+///
+/// Worked example:
+///   t = [1.0, 2.0, 3.0], scaleInPlace(t, 0.5) -> t = [0.5, 1.0, 1.5]
+pub fn scaleInPlace(allocator: std.mem.Allocator, tensor: *Tensor, coeff: f32) LabError!void {
+    if (tensor.device == .cuda) {
+        // CUDA: mulScalar allocates a new output buffer. We swap it in
+        // and free the old buffer. This is one kernel launch + one free.
+        var scaled = try cuda_dispatch.mulScalar(tensor.*, coeff);
+        // Free the old device buffer
+        tensor.storage.deinit(allocator);
+        // Move the new buffer into the tensor
+        tensor.storage = scaled.storage;
+        // Prevent double-free: mark scaled as non-owning so it doesn't
+        // free when it goes out of scope (tensor now owns the buffer).
+        scaled.storage = .{ .cuda = .{
+            .ctx = scaled.storage.cuda.ctx,
+            .ptr = 0,
+            .len = 0,
+            .owned = false,
+        } };
+        return;
+    }
+    // CPU path: in-place multiply
+    for (tensor.cpuData()) |*v| {
+        v.* *= coeff;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -603,4 +678,30 @@ test "sumToShape — transposed (non-contiguous) view" {
     try std.testing.expectEqual(@as(f32, 5.0), result.cpuData()[3]);
     try std.testing.expectEqual(@as(f32, 3.0), result.cpuData()[4]);
     try std.testing.expectEqual(@as(f32, 6.0), result.cpuData()[5]);
+}
+
+test "sumOfSquaresAll on CPU" {
+    const allocator = std.testing.allocator;
+    var t = try Tensor.init(allocator, Shape.init1D(4));
+    defer t.deinit(allocator);
+    t.cpuData()[0] = 1.0;
+    t.cpuData()[1] = 2.0;
+    t.cpuData()[2] = 3.0;
+    t.cpuData()[3] = 4.0;
+    // 1 + 4 + 9 + 16 = 30
+    const result = try sumOfSquaresAll(allocator, t);
+    try std.testing.expectApproxEqAbs(@as(f64, 30.0), result, 1e-10);
+}
+
+test "scaleInPlace on CPU" {
+    const allocator = std.testing.allocator;
+    var t = try Tensor.init(allocator, Shape.init1D(3));
+    defer t.deinit(allocator);
+    t.cpuData()[0] = 2.0;
+    t.cpuData()[1] = 4.0;
+    t.cpuData()[2] = 6.0;
+    try scaleInPlace(allocator, &t, 0.5);
+    try std.testing.expectEqual(@as(f32, 1.0), t.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 2.0), t.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 3.0), t.cpuData()[2]);
 }
