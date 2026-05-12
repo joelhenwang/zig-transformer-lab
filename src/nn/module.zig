@@ -150,6 +150,12 @@ pub const TransformerConfig = struct {
     /// Default false preserves existing behavior. When true, the
     /// TransformerBlock uses SwiGLU (3 Linears + SiLU gating).
     use_swiglu: bool = false,
+
+    /// Use Rotary Position Embedding instead of learned positional
+    /// embedding (Session 7 addition). Default false preserves existing.
+    /// When true, model skips pos_embed and attention applies RoPE
+    /// rotation to Q and K before the dot product.
+    use_rope: bool = false,
 };
 
 /// Helper: collect parameters from a slice of layers that all have

@@ -61,6 +61,7 @@ pub const nn = struct {
     pub const attention = @import("nn/attention.zig");
     pub const mlp = @import("nn/mlp.zig");
     pub const swiglu = @import("nn/swiglu.zig");
+    pub const rope = @import("nn/rope.zig");
     pub const block = @import("nn/block.zig");
     pub const model = @import("nn/model.zig");
 };
@@ -153,6 +154,7 @@ test {
     _ = nn.mlp;
     _ = nn.swiglu;
     _ = nn.rmsnorm;
+    _ = nn.rope;
     _ = nn.block;
     _ = nn.model;
     _ = optim.optimizer;
