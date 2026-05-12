@@ -140,22 +140,17 @@ fn binaryPreamble(
 }
 
 /// Package an owning CUDA DeviceBuffer into a fresh CUDA Tensor with
-/// contiguous strides over the given shape. The `.owned` compat alias
-/// is false (PR-δ invariant: CUDA tensors never claim ownership on
-/// the top-level field), `.data` is intentionally empty, `.grad` and
-/// `.tape_node` reset.
+/// contiguous strides over the given shape. `.grad` and `.tape_node` reset.
 fn wrapContiguousOutput(
     out_buf: DeviceBuffer,
     s: Shape,
     requires_grad: bool,
 ) Tensor {
     const t = Tensor{
-        .data = &.{},
         .shape = s,
         .strides = computeStrides(s),
         .dtype = .f32,
         .device = .cuda,
-        .owned = false,
         .storage = .{ .cuda = out_buf },
         .offset = 0,
         .requires_grad = requires_grad,
@@ -771,7 +766,6 @@ fn reshapedView(x: Tensor, target: Shape) LabError!Tensor {
         } },
         .cpu => unreachable, // only called on CUDA tensors in sumToShape
     };
-    out.owned = false;
     return out;
 }
 

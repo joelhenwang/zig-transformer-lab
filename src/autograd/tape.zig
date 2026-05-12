@@ -402,10 +402,7 @@ pub const Tape = struct {
                     return error.OutOfMemory;
                 };
                 var c = t;
-                c.data = copy;
-                c.owned = false;
-                // Keep the Storage alias consistent: the snapshot
-                // should also claim to borrow (not own) the buffer.
+                // The snapshot borrows the buffer (tape owns it via kept_alive).
                 c.storage = .{ .cpu = .{ .data = copy, .owned = false } };
                 break :blk c;
             },
@@ -425,8 +422,6 @@ pub const Tape = struct {
                 // the stored pointer/len/ctx and set owned=false.
                 const stored = self.kept_alive_cuda.items[self.kept_alive_cuda.items.len - 1];
                 var c = t;
-                c.data = &.{}; // CUDA tensors keep an empty compat alias
-                c.owned = false;
                 c.storage = .{ .cuda = .{
                     .ctx = stored.ctx,
                     .ptr = stored.ptr,

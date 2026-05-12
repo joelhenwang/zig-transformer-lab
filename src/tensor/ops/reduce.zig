@@ -495,7 +495,7 @@ test "sumToShape — same shape returns owned copy" {
 
     var result = try sumToShape(allocator, t, Shape.init2D(2, 3));
     defer result.deinit(allocator);
-    try std.testing.expect(result.owned);
+    try std.testing.expect(result.isOwned());
     try std.testing.expect(result.cpuData().ptr != t.cpuData().ptr);
     try std.testing.expectEqual(@as(f32, 1.0), result.cpuData()[0]);
     try std.testing.expectEqual(@as(f32, 2.0), result.cpuData()[1]);

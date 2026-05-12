@@ -113,14 +113,14 @@ pub fn main(init: std.process.Init) !void {
         var ids = try Tensor.init(allocator, Shape.init2D(B, T));
         defer ids.deinit(allocator);
         for (0..B * T) |i| {
-            ids.data[i] = @floatFromInt(batch.input[i]);
+            ids.cpuData()[i] = @floatFromInt(batch.input[i]);
         }
 
         // Create target tensor (B*T,) from batch.target
         var targets = try Tensor.init(allocator, Shape.init1D(B * T));
         defer targets.deinit(allocator);
         for (0..B * T) |i| {
-            targets.data[i] = @floatFromInt(batch.target[i]);
+            targets.cpuData()[i] = @floatFromInt(batch.target[i]);
         }
 
         // Create fresh tape for this step
@@ -147,14 +147,14 @@ pub fn main(init: std.process.Init) !void {
 
         // Print loss periodically
         if (step % 10 == 0 or step == num_steps - 1) {
-            try w.print("Step {:3}: loss = {d:.4}\n", .{ step, loss.data[0] });
+            try w.print("Step {:3}: loss = {d:.4}\n", .{ step, loss.cpuData()[0] });
         }
 
         // Backward pass
         try tape.backward(&loss);
 
         // Save loss value before freeing
-        const loss_val = loss.data[0];
+        const loss_val = loss.cpuData()[0];
         loss.deinit(allocator);
         logits_3d.deinit(allocator);
 

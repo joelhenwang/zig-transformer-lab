@@ -274,13 +274,13 @@ pub fn main(init: std.process.Init) !void {
     try ztl.tensor_print.printValues(v, writer, 6);
     try writer.print("  transpose (3,2): ", .{});
     try ztl.tensor_print.printValues(vt, writer, 6);
-    try writer.print("  transposed owned={}\n", .{vt.owned});
+    try writer.print("  transposed owned={}\n", .{vt.isOwned()});
 
     // reshape: zero-copy view if contiguous and element count matches
     const vr = try v.reshape(Shape.init1D(6));
     try writer.print("  reshape (6,):   ", .{});
     try ztl.tensor_print.printValues(vr, writer, 6);
-    try writer.print("  reshaped owned={}\n", .{vr.owned});
+    try writer.print("  reshaped owned={}\n", .{vr.isOwned()});
 
     // ========================================================================
     // 11. Softmax and log-softmax
@@ -299,7 +299,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Verify probabilities sum to 1.0
     const prob_sum = try ztl.ops.reduce.sumAll(allocator, probs, null);
-    try writer.print("  sum(probs) = {d:.6} (should be ~1.0)\n", .{prob_sum.data[0]});
+    try writer.print("  sum(probs) = {d:.6} (should be ~1.0)\n", .{prob_sum.cpuData()[0]});
 
     // log_softmax is more numerically stable than log(softmax)
     const lse = try ztl.ops.softmax.logSoftmax(allocator, logits, null);
@@ -330,13 +330,13 @@ pub fn main(init: std.process.Init) !void {
     try ztl.tensor_print.printValues(ce_logits, writer, 6);
     try writer.print("  targets:       ", .{});
     try ztl.tensor_print.printValues(ce_targets, writer, 2);
-    try writer.print("  CE loss: {d:.4}\n", .{ce_loss.data[0]});
+    try writer.print("  CE loss: {d:.4}\n", .{ce_loss.cpuData()[0]});
 
     // When logits are uniform (all equal), CE loss = ln(C) = ln(3) ~ 1.099
     const uni = try ztl.ops.create.ones(allocator, Shape.init2D(1, 3));
     const uni_tgt = try ztl.ops.create.zeros(allocator, Shape.init1D(1));
     const uni_loss = try ztl.ops.loss.crossEntropy(allocator, uni, uni_tgt, null);
-    try writer.print("  uniform CE loss = {d:.4} (ln(3) ~ 1.099)\n", .{uni_loss.data[0]});
+    try writer.print("  uniform CE loss = {d:.4} (ln(3) ~ 1.099)\n", .{uni_loss.cpuData()[0]});
 
     // ========================================================================
     // 13. Squeeze (remove size-1 dimensions)

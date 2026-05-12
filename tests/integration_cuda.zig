@@ -329,12 +329,10 @@ test "cuda Tensor: Storage.cuda wraps a real DeviceBuffer and passes invariants"
 
     const s = Shape.init3D(2, 3, 2);
     var t = Tensor{
-        .data = &.{}, // CPU compat alias is intentionally empty on CUDA
         .shape = s,
         .strides = computeStrides(s),
         .dtype = .f32,
         .device = .cuda,
-        .owned = false, // ownership of CUDA memory is inside DeviceBuffer
         .storage = .{ .cuda = dbuf },
         .offset = 0,
         .requires_grad = false,
@@ -412,12 +410,10 @@ test "cuda Tensor.toCuda rejects a CUDA source" {
     const src = [_]f32{ 1, 2, 3, 4 };
     const dbuf = try DeviceBuffer.fromHost(&ctx, &src);
     var gpu = Tensor{
-        .data = &.{},
         .shape = Shape.init1D(4),
         .strides = computeStrides(Shape.init1D(4)),
         .dtype = .f32,
         .device = .cuda,
-        .owned = false,
         .storage = .{ .cuda = dbuf },
         .offset = 0,
         .requires_grad = false,
@@ -448,23 +444,22 @@ test "cuda Tensor.toCuda / toCpu round-trip is byte-identical for a contiguous t
     // patterns — any mismatch here is a hard bug, not f32 rounding).
     var cpu = try Tensor.init(testing.allocator, Shape.init2D(2, 3));
     defer cpu.deinit(testing.allocator);
-    for (cpu.data, 0..) |*v, i| v.* = @floatFromInt(i + 1);
+    for (cpu.cpuData(), 0..) |*v, i| v.* = @floatFromInt(i + 1);
 
     var gpu = try cpu.toCuda(&ctx);
     defer gpu.storage.deinit(testing.allocator);
 
-    // Top-level invariants on the GPU tensor: CPU compat alias empty,
-    // device tag cuda, storage.len matches the full source buffer.
-    try testing.expectEqual(@as(usize, 0), gpu.data.len);
+    // Top-level invariants on the GPU tensor: device tag cuda,
+    // storage.len matches the full source buffer.
     try testing.expect(gpu.device == .cuda);
-    try testing.expectEqual(cpu.data.len, gpu.storage.len());
+    try testing.expectEqual(cpu.cpuData().len, gpu.storage.len());
     try testing.expectEqual(cpu.offset, gpu.offset);
     try testing.expect(lab.shape.equals(cpu.shape, gpu.shape));
 
     var back = try gpu.toCpu(testing.allocator);
     defer back.deinit(testing.allocator);
 
-    try testing.expectEqualSlices(f32, cpu.data, back.data);
+    try testing.expectEqualSlices(f32, cpu.cpuData(), back.cpuData());
     try testing.expect(lab.shape.equals(cpu.shape, back.shape));
     try testing.expectEqual(cpu.strides.values[0], back.strides.values[0]);
     try testing.expectEqual(cpu.strides.values[1], back.strides.values[1]);
@@ -483,7 +478,7 @@ test "cuda Tensor.toCuda preserves transposed (non-contiguous) strides" {
     // CUDA-side stride walks go off the end.
     var parent = try Tensor.init(testing.allocator, Shape.init2D(3, 2));
     defer parent.deinit(testing.allocator);
-    for (parent.data, 0..) |*v, i| v.* = @floatFromInt(i + 1);
+    for (parent.cpuData(), 0..) |*v, i| v.* = @floatFromInt(i + 1);
 
     const transposed = try parent.transpose2d();
     // transposed: shape (2, 3), strides (1, 2), storage.len == 6,
@@ -516,7 +511,7 @@ test "cuda Tensor.toCuda preserves transposed (non-contiguous) strides" {
     }
 
     // Parent is untouched (transfer is a copy, not a move).
-    for (parent.data, 0..) |v, i| {
+    for (parent.cpuData(), 0..) |v, i| {
         try testing.expectEqual(@as(f32, @floatFromInt(i + 1)), v);
     }
 }
@@ -533,7 +528,7 @@ test "cuda Tensor.toCuda preserves requires_grad and param_id" {
     defer cpu.deinit(testing.allocator);
     cpu.requires_grad = true;
     cpu.param_id = 42;
-    for (cpu.data, 0..) |*v, i| v.* = @floatFromInt(i);
+    for (cpu.cpuData(), 0..) |*v, i| v.* = @floatFromInt(i);
 
     var gpu = try cpu.toCuda(&ctx);
     defer gpu.storage.deinit(testing.allocator);
@@ -754,8 +749,8 @@ fn cudaFromSlice(
 ) !Tensor {
     var cpu = try Tensor.init(testing.allocator, s);
     defer cpu.deinit(testing.allocator);
-    std.debug.assert(cpu.data.len == values.len);
-    @memcpy(cpu.data, values);
+    std.debug.assert(cpu.cpuData().len == values.len);
+    @memcpy(cpu.cpuData(), values);
     return try cpu.toCuda(ctx);
 }
 
@@ -822,7 +817,7 @@ test "cuda dispatch sub/mul/div: small fixed inputs match CPU reference" {
         var r_cpu = try r.toCpu(testing.allocator);
         defer r_cpu.deinit(testing.allocator);
         for (0..6) |i| {
-            try testing.expectEqual(a_vals[i] - b_vals[i], r_cpu.data[i]);
+            try testing.expectEqual(a_vals[i] - b_vals[i], r_cpu.cpuData()[i]);
         }
     }
     // mul: a * b
@@ -836,7 +831,7 @@ test "cuda dispatch sub/mul/div: small fixed inputs match CPU reference" {
         var r_cpu = try r.toCpu(testing.allocator);
         defer r_cpu.deinit(testing.allocator);
         for (0..6) |i| {
-            try testing.expectEqual(a_vals[i] * b_vals[i], r_cpu.data[i]);
+            try testing.expectEqual(a_vals[i] * b_vals[i], r_cpu.cpuData()[i]);
         }
     }
     // div: a / b
@@ -856,7 +851,7 @@ test "cuda dispatch sub/mul/div: small fixed inputs match CPU reference" {
             // round-trips the same on any IEEE implementation, but
             // we leave headroom for robustness.
             const expected = a_vals[i] / b_vals[i];
-            try testing.expectApproxEqAbs(expected, r_cpu.data[i], 1e-6);
+            try testing.expectApproxEqAbs(expected, r_cpu.cpuData()[i], 1e-6);
         }
     }
 }
@@ -878,7 +873,7 @@ test "cuda dispatch neg / addScalar / mulScalar: small fixed inputs" {
         defer r.storage.deinit(testing.allocator);
         var r_cpu = try r.toCpu(testing.allocator);
         defer r_cpu.deinit(testing.allocator);
-        for (0..5) |i| try testing.expectEqual(-a_vals[i], r_cpu.data[i]);
+        for (0..5) |i| try testing.expectEqual(-a_vals[i], r_cpu.cpuData()[i]);
     }
     {
         var a = try cudaFromSlice(&ctx, s, &a_vals);
@@ -887,7 +882,7 @@ test "cuda dispatch neg / addScalar / mulScalar: small fixed inputs" {
         defer r.storage.deinit(testing.allocator);
         var r_cpu = try r.toCpu(testing.allocator);
         defer r_cpu.deinit(testing.allocator);
-        for (0..5) |i| try testing.expectEqual(a_vals[i] + 3.5, r_cpu.data[i]);
+        for (0..5) |i| try testing.expectEqual(a_vals[i] + 3.5, r_cpu.cpuData()[i]);
     }
     {
         var a = try cudaFromSlice(&ctx, s, &a_vals);
@@ -896,7 +891,7 @@ test "cuda dispatch neg / addScalar / mulScalar: small fixed inputs" {
         defer r.storage.deinit(testing.allocator);
         var r_cpu = try r.toCpu(testing.allocator);
         defer r_cpu.deinit(testing.allocator);
-        for (0..5) |i| try testing.expectEqual(a_vals[i] * -0.5, r_cpu.data[i]);
+        for (0..5) |i| try testing.expectEqual(a_vals[i] * -0.5, r_cpu.cpuData()[i]);
     }
 }
 
@@ -992,7 +987,7 @@ test "cuda ops_elementwise.add: routes to CUDA and records on tape" {
     for (0..6) |i| {
         const a_vals = [_]f32{ 1, 2, 3, 4, 5, 6 };
         const b_vals = [_]f32{ 10, 20, 30, 40, 50, 60 };
-        try testing.expectEqual(a_vals[i] + b_vals[i], out_cpu.data[i]);
+        try testing.expectEqual(a_vals[i] + b_vals[i], out_cpu.cpuData()[i]);
     }
 
     // Tape state: 2 leaf nodes + 1 add node = 3 total.
@@ -1114,7 +1109,7 @@ test "cuda ops_elementwise.add: picks fast path vs broadcast path" {
         for (0..6) |i| {
             const a_vals = [_]f32{ 1, 2, 3, 4, 5, 6 };
             const b_vals = [_]f32{ 10, 20, 30, 40, 50, 60 };
-            try testing.expectEqual(a_vals[i] + b_vals[i], y_cpu.data[i]);
+            try testing.expectEqual(a_vals[i] + b_vals[i], y_cpu.cpuData()[i]);
         }
     }
 
@@ -1130,7 +1125,7 @@ test "cuda ops_elementwise.add: picks fast path vs broadcast path" {
         defer y_cpu.deinit(alloc);
         // Expected: [1+100, 2+200, 3+300, 4+100, 5+200, 6+300]
         const expected = [_]f32{ 101, 202, 303, 104, 205, 306 };
-        for (0..6) |i| try testing.expectEqual(expected[i], y_cpu.data[i]);
+        for (0..6) |i| try testing.expectEqual(expected[i], y_cpu.cpuData()[i]);
     }
 }
 
@@ -1155,7 +1150,7 @@ test "cuda dispatch mulBroadcast: (1,3) * (2,3) expands the size-1 axis" {
     defer y_cpu.deinit(alloc);
     // Expected: [2*1, 3*10, 5*100, 2*1000, 3*10000, 5*100000]
     const expected = [_]f32{ 2, 30, 500, 2000, 30000, 500000 };
-    for (0..6) |i| try testing.expectEqual(expected[i], y_cpu.data[i]);
+    for (0..6) |i| try testing.expectEqual(expected[i], y_cpu.cpuData()[i]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1177,7 +1172,7 @@ test "cuda dispatch sumAll: contiguous input sums to scalar (oracle add_2d input
 
     // CPU reference.
     var cpu_sum: f32 = 0;
-    for (x_cpu.data) |v| cpu_sum += v;
+    for (x_cpu.cpuData()) |v| cpu_sum += v;
 
     var x_gpu = try x_cpu.toCuda(&ctx);
     defer x_gpu.storage.deinit(alloc);
@@ -1189,7 +1184,7 @@ test "cuda dispatch sumAll: contiguous input sums to scalar (oracle add_2d input
     var s_cpu = try s_gpu.toCpu(alloc);
     defer s_cpu.deinit(alloc);
     // atomicAdd ordering means we accept a small relative error.
-    try testing.expectApproxEqRel(cpu_sum, s_cpu.data[0], 1e-4);
+    try testing.expectApproxEqRel(cpu_sum, s_cpu.cpuData()[0], 1e-4);
 }
 
 test "cuda dispatch sumAxis: (2,3) axis=0 gives (1,3)" {
@@ -1214,9 +1209,9 @@ test "cuda dispatch sumAxis: (2,3) axis=0 gives (1,3)" {
     var s_cpu = try s.toCpu(alloc);
     defer s_cpu.deinit(alloc);
     // columns: [1+4, 2+5, 3+6] = [5, 7, 9]
-    try testing.expectEqual(@as(f32, 5), s_cpu.data[0]);
-    try testing.expectEqual(@as(f32, 7), s_cpu.data[1]);
-    try testing.expectEqual(@as(f32, 9), s_cpu.data[2]);
+    try testing.expectEqual(@as(f32, 5), s_cpu.cpuData()[0]);
+    try testing.expectEqual(@as(f32, 7), s_cpu.cpuData()[1]);
+    try testing.expectEqual(@as(f32, 9), s_cpu.cpuData()[2]);
 }
 
 test "cuda dispatch sumAxis: (2,3) axis=1 gives (2,1)" {
@@ -1237,8 +1232,8 @@ test "cuda dispatch sumAxis: (2,3) axis=1 gives (2,1)" {
     var s_cpu = try s.toCpu(alloc);
     defer s_cpu.deinit(alloc);
     // rows: [1+2+3, 4+5+6] = [6, 15]
-    try testing.expectEqual(@as(f32, 6), s_cpu.data[0]);
-    try testing.expectEqual(@as(f32, 15), s_cpu.data[1]);
+    try testing.expectEqual(@as(f32, 6), s_cpu.cpuData()[0]);
+    try testing.expectEqual(@as(f32, 15), s_cpu.cpuData()[1]);
 }
 
 test "cuda dispatch broadcastTo: scalar -> (2,3) produces an all-ones tensor" {
@@ -1258,7 +1253,7 @@ test "cuda dispatch broadcastTo: scalar -> (2,3) produces an all-ones tensor" {
 
     var out_cpu = try out.toCpu(alloc);
     defer out_cpu.deinit(alloc);
-    for (0..6) |i| try testing.expectEqual(@as(f32, 7.5), out_cpu.data[i]);
+    for (0..6) |i| try testing.expectEqual(@as(f32, 7.5), out_cpu.cpuData()[i]);
 }
 
 test "cuda dispatch sumToShape: (2,3) -> (3,) collapses leading broadcasted dim" {
@@ -1278,11 +1273,11 @@ test "cuda dispatch sumToShape: (2,3) -> (3,) collapses leading broadcasted dim"
 
     var r_cpu = try r.toCpu(alloc);
     defer r_cpu.deinit(alloc);
-    try testing.expectEqual(@as(usize, 3), r_cpu.data.len);
+    try testing.expectEqual(@as(usize, 3), r_cpu.cpuData().len);
     // columns: [1+4, 2+5, 3+6] = [5, 7, 9]
-    try testing.expectEqual(@as(f32, 5), r_cpu.data[0]);
-    try testing.expectEqual(@as(f32, 7), r_cpu.data[1]);
-    try testing.expectEqual(@as(f32, 9), r_cpu.data[2]);
+    try testing.expectEqual(@as(f32, 5), r_cpu.cpuData()[0]);
+    try testing.expectEqual(@as(f32, 7), r_cpu.cpuData()[1]);
+    try testing.expectEqual(@as(f32, 9), r_cpu.cpuData()[2]);
 }
 
 test "cuda oracle add_2d: forward + backward parity via ops_elementwise.add" {
@@ -1632,7 +1627,7 @@ test "cuda dispatch softmaxLastAxis: large-C stress test (D=64) sums to 1.0 per 
     defer y_cpu.deinit(alloc);
     for (0..N) |row| {
         var row_sum: f32 = 0;
-        for (0..C) |c| row_sum += y_cpu.data[row * C + c];
+        for (0..C) |c| row_sum += y_cpu.cpuData()[row * C + c];
         try testing.expectApproxEqAbs(@as(f32, 1.0), row_sum, 1e-5);
     }
 }
@@ -1765,7 +1760,7 @@ test "cuda dispatch embeddingBackward: scatter-add with repeated ids" {
         101, 202, 303, 404,
         0, 0, 0, 0,
     };
-    for (0..V * D) |i| try testing.expectEqual(expected[i], gw_cpu.data[i]);
+    for (0..V * D) |i| try testing.expectEqual(expected[i], gw_cpu.cpuData()[i]);
 }
 
 test "cuda Embedding.forward: oracle embedding_3d forward + backward parity" {
@@ -1888,7 +1883,7 @@ test "cuda dispatch adamwStep: one update matches CPU reference" {
 
     var p_back = try p_gpu.toCpu(alloc);
     defer p_back.deinit(alloc);
-    for (0..N) |i| try testing.expectApproxEqAbs(p_ref[i], p_back.data[i], 1e-6);
+    for (0..N) |i| try testing.expectApproxEqAbs(p_ref[i], p_back.cpuData()[i], 1e-6);
 }
 
 // ---------------------------------------------------------------------------
@@ -2043,7 +2038,7 @@ test "cuda dispatch geluExact: random input matches CPU reference within 1e-5" {
     // Reference: our own CPU geluExact (which uses the A&S polynomial).
     var x_ref = try Tensor.init(alloc, Shape.init1D(x_host.len));
     defer x_ref.deinit(alloc);
-    @memcpy(x_ref.data, &x_host);
+    @memcpy(x_ref.cpuData(), &x_host);
     var y_ref = try ops_unary.geluExact(alloc, x_ref, null);
     defer y_ref.deinit(alloc);
 
@@ -2086,7 +2081,7 @@ test "cuda dispatch geluExact: tape records and backward matches CPU within 1e-4
     // Reference: compute CPU gelu backward via the same tape API.
     var x_ref = try Tensor.init(alloc, Shape.init1D(x_host.len));
     defer x_ref.deinit(alloc);
-    @memcpy(x_ref.data, &x_host);
+    @memcpy(x_ref.cpuData(), &x_host);
     x_ref.requires_grad = true;
     x_ref.param_id = 11;
     var tape_cpu = Tape.init(alloc);
@@ -2122,7 +2117,7 @@ test "cuda dispatch sqrt: positive random input matches CPU" {
     // Expected: IEEE f32 sqrt.
     for (0..x_host.len) |i| {
         const expected: f32 = @sqrt(x_host[i]);
-        try testing.expectApproxEqRel(expected, y_cpu.data[i], 1e-6);
+        try testing.expectApproxEqRel(expected, y_cpu.cpuData()[i], 1e-6);
     }
 }
 
@@ -2147,7 +2142,7 @@ test "cuda dispatch exp: small-range input matches CPU" {
 
     for (0..x_host.len) |i| {
         const expected: f32 = @exp(x_host[i]);
-        try testing.expectApproxEqRel(expected, y_cpu.data[i], 1e-5);
+        try testing.expectApproxEqRel(expected, y_cpu.cpuData()[i], 1e-5);
     }
 }
 
@@ -2171,7 +2166,7 @@ test "cuda dispatch log: positive input matches CPU" {
 
     for (0..x_host.len) |i| {
         const expected: f32 = @log(x_host[i]);
-        try testing.expectApproxEqAbs(expected, y_cpu.data[i], 1e-5);
+        try testing.expectApproxEqAbs(expected, y_cpu.cpuData()[i], 1e-5);
     }
 }
 
@@ -2195,7 +2190,7 @@ test "cuda ops_reduce.mean: (2,3,4) axis=1 matches CPU reference" {
 
     var x_cpu = try Tensor.init(alloc, Shape.init3D(2, 3, 4));
     defer x_cpu.deinit(alloc);
-    @memcpy(x_cpu.data, &x_host);
+    @memcpy(x_cpu.cpuData(), &x_host);
 
     var x_gpu = try x_cpu.toCuda(&ctx);
     defer x_gpu.storage.deinit(alloc);
@@ -2709,7 +2704,7 @@ test "cuda CausalSelfAttention.forward: CPU vs CUDA parity" {
     // Keep the mask on CPU — attn.forward uploads on-demand.
     var mask_cpu_clone = try Tensor.init(alloc, attn_cpu.causal_mask.shape);
     defer mask_cpu_clone.deinit(alloc);
-    @memcpy(mask_cpu_clone.data, attn_cpu.causal_mask.data);
+    @memcpy(mask_cpu_clone.cpuData(), attn_cpu.causal_mask.cpuData());
     const attn_gpu = CausalSelfAttention{
         .w_q = w_q_gpu,
         .w_k = w_k_gpu,
@@ -2811,7 +2806,7 @@ test "cuda TransformerBlock.forward: CPU vs CUDA parity" {
 
     var mask_cpu_clone = try Tensor.init(alloc, block_cpu.attn.causal_mask.shape);
     defer mask_cpu_clone.deinit(alloc);
-    @memcpy(mask_cpu_clone.data, block_cpu.attn.causal_mask.data);
+    @memcpy(mask_cpu_clone.cpuData(), block_cpu.attn.causal_mask.cpuData());
 
     var fc1_gpu = try cloneLinearToCuda(block_cpu.mlp.fc1, &ctx, alloc);
     defer fc1_gpu.deinit();
@@ -2917,8 +2912,8 @@ test "cuda TinyWordTransformer.moveToCuda + forward: CPU vs CUDA parity" {
 
         try testing.expectEqual(p_cpu.items.len, p_gpu.items.len);
         for (0..p_cpu.items.len) |i| {
-            try testing.expectEqual(p_cpu.items[i].data.len, p_gpu.items[i].data.len);
-            @memcpy(p_gpu.items[i].data, p_cpu.items[i].data);
+            try testing.expectEqual(p_cpu.items[i].cpuData().len, p_gpu.items[i].cpuData().len);
+            @memcpy(p_gpu.items[i].cpuData(), p_cpu.items[i].cpuData());
         }
     }
 
@@ -2929,7 +2924,7 @@ test "cuda TinyWordTransformer.moveToCuda + forward: CPU vs CUDA parity" {
     var ids_cpu = try Tensor.init(alloc, Shape.init2D(2, 5));
     defer ids_cpu.deinit(alloc);
     const id_vals = [_]f32{ 0, 3, 7, 2, 5, 1, 6, 4, 8, 0 };
-    @memcpy(ids_cpu.data, &id_vals);
+    @memcpy(ids_cpu.cpuData(), &id_vals);
 
     var ids_gpu = try ids_cpu.toCuda(&ctx);
     defer ids_gpu.storage.deinit(alloc);
@@ -2997,7 +2992,7 @@ test "cuda TinyWordTransformer backward (sumAll): CPU vs CUDA per-param parity" 
         model_gpu.parameters(&p_gpu);
 
         for (0..p_cpu.items.len) |i| {
-            @memcpy(p_gpu.items[i].data, p_cpu.items[i].data);
+            @memcpy(p_gpu.items[i].cpuData(), p_cpu.items[i].cpuData());
             p_cpu.items[i].requires_grad = true;
             p_gpu.items[i].requires_grad = true;
         }
@@ -3008,7 +3003,7 @@ test "cuda TinyWordTransformer backward (sumAll): CPU vs CUDA per-param parity" 
     var ids_cpu = try Tensor.init(alloc, Shape.init2D(2, 3));
     defer ids_cpu.deinit(alloc);
     const id_vals = [_]f32{ 0, 2, 5, 1, 7, 3 };
-    @memcpy(ids_cpu.data, &id_vals);
+    @memcpy(ids_cpu.cpuData(), &id_vals);
     var ids_gpu = try ids_cpu.toCuda(&ctx);
     defer ids_gpu.storage.deinit(alloc);
 
@@ -3130,7 +3125,7 @@ test "cuda TinyWordTransformer one training step: CPU vs CUDA post-step param pa
         model_gpu.parameters(&p_gpu);
 
         for (0..p_cpu.items.len) |i| {
-            @memcpy(p_gpu.items[i].data, p_cpu.items[i].data);
+            @memcpy(p_gpu.items[i].cpuData(), p_cpu.items[i].cpuData());
             p_cpu.items[i].requires_grad = true;
             p_gpu.items[i].requires_grad = true;
         }
@@ -3142,14 +3137,14 @@ test "cuda TinyWordTransformer one training step: CPU vs CUDA post-step param pa
     var ids_cpu = try Tensor.init(alloc, Shape.init2D(2, 3));
     defer ids_cpu.deinit(alloc);
     const id_vals = [_]f32{ 0, 2, 5, 1, 7, 3 };
-    @memcpy(ids_cpu.data, &id_vals);
+    @memcpy(ids_cpu.cpuData(), &id_vals);
     var ids_gpu = try ids_cpu.toCuda(&ctx);
     defer ids_gpu.storage.deinit(alloc);
 
     var targets_cpu = try Tensor.init(alloc, Shape.init1D(6));
     defer targets_cpu.deinit(alloc);
     const tgt_vals = [_]f32{ 5, 1, 0, 3, 2, 4 };
-    @memcpy(targets_cpu.data, &tgt_vals);
+    @memcpy(targets_cpu.cpuData(), &tgt_vals);
     var targets_gpu = try targets_cpu.toCuda(&ctx);
     defer targets_gpu.storage.deinit(alloc);
 
@@ -3253,10 +3248,10 @@ test "cuda debug.assertFinite: CUDA tensor with NaN injected fails" {
     // surface the NaN at index 2.
     var host = try Tensor.init(alloc, Shape.init1D(4));
     defer host.deinit(alloc);
-    host.data[0] = 1.0;
-    host.data[1] = 2.0;
-    host.data[2] = std.math.nan(f32);
-    host.data[3] = 4.0;
+    host.cpuData()[0] = 1.0;
+    host.cpuData()[1] = 2.0;
+    host.cpuData()[2] = std.math.nan(f32);
+    host.cpuData()[3] = 4.0;
 
     var dev = try host.toCuda(&ctx);
     defer dev.storage.deinit(alloc);
@@ -3275,10 +3270,10 @@ test "cuda debug.assertFinite: clean CUDA tensor passes" {
     const alloc = testing.allocator;
     var host = try Tensor.init(alloc, Shape.init1D(4));
     defer host.deinit(alloc);
-    host.data[0] = 1.0;
-    host.data[1] = -2.5;
-    host.data[2] = 0.0;
-    host.data[3] = 1e-10;
+    host.cpuData()[0] = 1.0;
+    host.cpuData()[1] = -2.5;
+    host.cpuData()[2] = 0.0;
+    host.cpuData()[3] = 1e-10;
 
     var dev = try host.toCuda(&ctx);
     defer dev.storage.deinit(alloc);
@@ -3294,9 +3289,9 @@ test "cuda debug.hasInf: CUDA tensor with +Inf returns true" {
     const alloc = testing.allocator;
     var host = try Tensor.init(alloc, Shape.init1D(3));
     defer host.deinit(alloc);
-    host.data[0] = 1.0;
-    host.data[1] = std.math.inf(f32);
-    host.data[2] = 3.0;
+    host.cpuData()[0] = 1.0;
+    host.cpuData()[1] = std.math.inf(f32);
+    host.cpuData()[2] = 3.0;
 
     var dev = try host.toCuda(&ctx);
     defer dev.storage.deinit(alloc);
@@ -3314,10 +3309,10 @@ test "cuda debug.compare: CUDA vs CPU tensor identical reports zero" {
     const alloc = testing.allocator;
     var host = try Tensor.init(alloc, Shape.init1D(4));
     defer host.deinit(alloc);
-    host.data[0] = 1.0;
-    host.data[1] = 2.0;
-    host.data[2] = 3.0;
-    host.data[3] = 4.0;
+    host.cpuData()[0] = 1.0;
+    host.cpuData()[1] = 2.0;
+    host.cpuData()[2] = 3.0;
+    host.cpuData()[3] = 4.0;
 
     var dev = try host.toCuda(&ctx);
     defer dev.storage.deinit(alloc);
@@ -3335,17 +3330,17 @@ test "cuda debug.compare: CUDA tensor with perturbation reports worst index" {
     const alloc = testing.allocator;
     var host_a = try Tensor.init(alloc, Shape.init1D(4));
     defer host_a.deinit(alloc);
-    host_a.data[0] = 1.0;
-    host_a.data[1] = 2.0;
-    host_a.data[2] = 3.0;
-    host_a.data[3] = 4.0;
+    host_a.cpuData()[0] = 1.0;
+    host_a.cpuData()[1] = 2.0;
+    host_a.cpuData()[2] = 3.0;
+    host_a.cpuData()[3] = 4.0;
 
     var host_b = try Tensor.init(alloc, Shape.init1D(4));
     defer host_b.deinit(alloc);
-    host_b.data[0] = 1.0;
-    host_b.data[1] = 2.0;
-    host_b.data[2] = 3.5; // 0.5 off
-    host_b.data[3] = 4.0;
+    host_b.cpuData()[0] = 1.0;
+    host_b.cpuData()[1] = 2.0;
+    host_b.cpuData()[2] = 3.5; // 0.5 off
+    host_b.cpuData()[3] = 4.0;
 
     var dev_a = try host_a.toCuda(&ctx);
     defer dev_a.storage.deinit(alloc);
@@ -3373,7 +3368,7 @@ test "cuda debug.dump: CUDA tensor round-trips through .ztlt file" {
     // existing oracle loader.
     var host = try Tensor.init(alloc, Shape.init2D(2, 3));
     defer host.deinit(alloc);
-    for (0..6) |i| host.data[i] = @as(f32, @floatFromInt(i)) * 0.25 - 0.5;
+    for (0..6) |i| host.cpuData()[i] = @as(f32, @floatFromInt(i)) * 0.25 - 0.5;
 
     var dev = try host.toCuda(&ctx);
     defer dev.storage.deinit(alloc);
@@ -3385,7 +3380,7 @@ test "cuda debug.dump: CUDA tensor round-trips through .ztlt file" {
 
     try testing.expectEqual(@as(usize, 2), loaded.shape.dims[0]);
     try testing.expectEqual(@as(usize, 3), loaded.shape.dims[1]);
-    for (0..6) |i| try testing.expectEqual(host.data[i], loaded.data[i]);
+    for (0..6) |i| try testing.expectEqual(host.cpuData()[i], loaded.cpuData()[i]);
 }
 
 // ---------------------------------------------------------------------------
@@ -3431,7 +3426,7 @@ test "cuda checkpoint: CUDA model save/load round-trip is byte-identical" {
         try params.ensureTotalCapacity(alloc, 32);
         model_gpu.parameters(&params);
         for (params.items) |p| {
-            const dup = try alloc.dupe(f32, p.data);
+            const dup = try alloc.dupe(f32, p.cpuData());
             try cpu_snapshot.append(alloc, dup);
         }
     }
@@ -3459,8 +3454,8 @@ test "cuda checkpoint: CUDA model save/load round-trip is byte-identical" {
 
     try testing.expectEqual(cpu_snapshot.items.len, loaded_params.items.len);
     for (cpu_snapshot.items, loaded_params.items) |expected, got| {
-        try testing.expectEqual(expected.len, got.data.len);
-        for (expected, got.data) |x, y| try testing.expectEqual(x, y);
+        try testing.expectEqual(expected.len, got.cpuData().len);
+        for (expected, got.cpuData()) |x, y| try testing.expectEqual(x, y);
     }
 }
 
@@ -3498,7 +3493,7 @@ test "cuda checkpoint: save from CUDA then load on a fresh CPU model" {
         try params.ensureTotalCapacity(alloc, 32);
         model_src.parameters(&params);
         for (params.items) |p| {
-            const dup = try alloc.dupe(f32, p.data);
+            const dup = try alloc.dupe(f32, p.cpuData());
             try expected.append(alloc, dup);
         }
     }
@@ -3521,8 +3516,8 @@ test "cuda checkpoint: save from CUDA then load on a fresh CPU model" {
     model_dst.parameters(&got);
     try testing.expectEqual(expected.items.len, got.items.len);
     for (expected.items, got.items) |e, g| {
-        try testing.expectEqual(e.len, g.data.len);
-        for (e, g.data) |x, y| try testing.expectEqual(x, y);
+        try testing.expectEqual(e.len, g.cpuData().len);
+        for (e, g.cpuData()) |x, y| try testing.expectEqual(x, y);
     }
 }
 

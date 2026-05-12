@@ -4,8 +4,9 @@
 //! Purpose:
 //!   The Tensor is the central data structure of the entire library. It
 //!   represents an n-dimensional array of f32 values in row-major order,
-//!   along with metadata (shape, strides, dtype, device) and an ownership
-//!   flag that determines who is responsible for freeing the data buffer.
+//!   along with metadata (shape, strides, dtype, device) and a Storage
+//!   union that owns the backing buffer (CPU heap allocation or CUDA
+//!   device allocation).
 //!
 //!   This file defines the Tensor struct and its basic operations:
 //!   creation, destruction, element access, view/reshape/transpose, and
@@ -23,15 +24,18 @@
 //!   Example: shape (2,3), strides [3,1], indices [1,2] => 1*3 + 2*1 = 5
 //!
 //! Memory ownership:
-//!   - `owned=true`: this Tensor allocated its data buffer and must free
-//!     it in deinit(). The allocator that created the buffer must be the
-//!     one passed to deinit().
-//!   - `owned=false`: this Tensor is a view (e.g., from .view() or
-//!     .transpose2d()) and shares data with another tensor. It must NOT
-//!     free the data. The owning tensor's lifetime must exceed the view's.
+//!   - `storage.cpu.owned=true`: this Tensor allocated its buffer and must
+//!     free it in deinit(). The allocator that created the buffer must be
+//!     the one passed to deinit().
+//!   - `storage.cpu.owned=false`: this Tensor is a view (e.g., from
+//!     .view() or .transpose2d()) and shares data with another tensor.
+//!     It must NOT free the data. The owning tensor's lifetime must
+//!     exceed the view's.
 //!   - Rule: only the original allocator can free the buffer. We do not
 //!     store the allocator inside the tensor to keep the struct small;
 //!     instead, the caller passes it at init and deinit time.
+//!   - Access CPU data via the `cpuData()` accessor (asserts device ==
+//!     .cpu in debug builds). CUDA tensors use `storage.cuda` directly.
 //!
 //! Errors:
 //!   - OutOfMemory: allocation of the data buffer failed in init().
@@ -81,26 +85,19 @@ const CudaContext = @import("../backend/cuda/context.zig").CudaContext;
 pub const NodeId = u32;
 
 // ---------------------------------------------------------------------------
-// Storage (PR-δ) — "who owns the bytes, and where do they live?"
+// Storage — "who owns the bytes, and where do they live?"
 // ---------------------------------------------------------------------------
 //
-// Pre-PR-δ the Tensor stored a single `data: []f32` slice and an `owned`
-// bool. That representation conflates three distinct ideas:
+// The `Storage` union encapsulates physical buffer ownership:
 //
 //   1. *The physical buffer* — a flat sequence of floats somewhere in
-//      memory. A given buffer is owned by exactly one object.
-//   2. *The logical view over that buffer* — a shape + strides + offset
-//      that projects a sub-rectangle of the buffer into a tensor.
-//   3. *The device* — for CUDA, the "bytes" are really a `CUdeviceptr`
+//      memory. A given buffer is owned by exactly one Storage instance.
+//   2. *The device* — for CUDA, the "bytes" are really a `CUdeviceptr`
 //      and no `[]f32` slice can legitimately refer to them.
 //
-// The `Storage` union here is concept (1): ownership + location. The
-// Tensor keeps its `data` / `owned` fields in sync as a convenience
-// accessor for existing CPU call sites; new code should prefer
-// `tensor.cpuData()` and `tensor.storageLen()`, which make the device
-// contract explicit. When PR-ι introduces the real `Storage.cuda`
-// variant, host code that indexes into `tensor.data[i]` on a CUDA
-// tensor will fail loudly (the slice is zero-length by construction).
+// Access to the CPU slice goes through `tensor.cpuData()` which asserts
+// `device == .cpu` in debug builds. CUDA tensors have no host-visible
+// slice — operations use kernel launches or explicit DtoH copies.
 
 /// CPU-backed storage: a heap-allocated `[]f32` and whether we own it.
 pub const CpuStorage = struct {
@@ -171,15 +168,6 @@ pub const Storage = union(Device) {
 /// directly. This avoids a large accessor-method surface that would just
 /// forward to the fields.
 pub const Tensor = struct {
-    /// Flat f32 buffer holding all tensor elements in row-major order.
-    /// For a view tensor, this may be a sub-slice of a larger allocation.
-    ///
-    /// PR-δ note: this field is a convenience alias for
-    /// `self.storage.cpu.data` and is only meaningful when
-    /// `self.device == .cpu`. New code should prefer `self.cpuData()`
-    /// which returns an explicit error for non-CPU tensors.
-    data: []f32,
-
     /// Logical dimensions, e.g. shape (2,3) for a 2-row, 3-column matrix.
     shape: Shape,
 
@@ -194,29 +182,18 @@ pub const Tensor = struct {
     dtype: DType,
 
     /// Device where the data lives: .cpu or .cuda.
-    /// Stage 2 only uses .cpu; .cuda is wired in Stage 7.
     device: Device,
 
-    /// Ownership flag. true = this tensor frees data in deinit().
-    /// false = this is a view sharing another tensor's buffer.
-    ///
-    /// PR-δ note: kept in sync with `self.storage.cpu.owned` so existing
-    /// code continues to compile. A cleanup PR after ε/ζ will remove this
-    /// alias and have all sites read `self.storage.cpu.owned`.
-    owned: bool,
-
-    /// Backing storage (PR-δ seam). For `device == .cpu` this carries the
-    /// real `[]f32` slice and its owned flag; the top-level `data` /
-    /// `owned` fields are kept in sync as a compatibility convenience.
-    /// For `device == .cuda` (not yet implemented) this holds the device
-    /// pointer instead of a host slice — host code that reads `self.data`
-    /// on a CUDA tensor will see a zero-length slice and fail loudly.
+    /// Backing storage. For `device == .cpu` this carries a `CpuStorage`
+    /// with the heap-allocated `[]f32` slice and its owned flag. For
+    /// `device == .cuda` this carries a `DeviceBuffer` wrapping the
+    /// CUdeviceptr. Access CPU data via the `cpuData()` accessor.
     storage: Storage,
 
     /// Starting offset into the backing storage (in f32 elements).
-    /// Always 0 in PR-δ because the current view API does not slice; it
-    /// only transposes. Future sub-view / slice operations will set this
-    /// to pick out a sub-region without allocating.
+    /// Always 0 in the current implementation because the view API does
+    /// not slice; it only transposes. Future sub-view / slice operations
+    /// will set this to pick out a sub-region without allocating.
     offset: usize,
 
     // --- Autograd fields (used in Stage 3, declared now) ---
@@ -274,12 +251,10 @@ pub const Tensor = struct {
         @memset(data, 0);
 
         const t = Tensor{
-            .data = data,
             .shape = shape,
             .strides = computeStrides(shape),
             .dtype = .f32,
             .device = .cpu,
-            .owned = true,
             .storage = .{ .cpu = .{ .data = data, .owned = true } },
             .offset = 0,
             .requires_grad = false,
@@ -458,12 +433,10 @@ pub const Tensor = struct {
     ///   // v.at(&.{1, 2}) reads the same element as t.at(&.{1, 2})
     pub fn view(self: Tensor) Tensor {
         const v = Tensor{
-            .data = self.data,
             .shape = self.shape,
             .strides = self.strides,
             .dtype = self.dtype,
             .device = self.device,
-            .owned = false,
             .storage = nonOwningStorage(self.storage),
             .offset = self.offset,
             .requires_grad = self.requires_grad,
@@ -519,12 +492,10 @@ pub const Tensor = struct {
         // The strides are always row-major for the new shape because the
         // underlying data is contiguous.
         const r = Tensor{
-            .data = self.data,
             .shape = new_shape,
             .strides = computeStrides(new_shape),
             .dtype = self.dtype,
             .device = self.device,
-            .owned = false,
             .storage = nonOwningStorage(self.storage),
             .offset = self.offset,
             .requires_grad = self.requires_grad,
@@ -579,12 +550,10 @@ pub const Tensor = struct {
         _ = &new_strides;
 
         const tr = Tensor{
-            .data = self.data,
             .shape = new_shape,
             .strides = new_strides,
             .dtype = self.dtype,
             .device = self.device,
-            .owned = false,
             .storage = nonOwningStorage(self.storage),
             .offset = self.offset,
             .requires_grad = self.requires_grad,
@@ -729,12 +698,10 @@ pub const Tensor = struct {
         // created in the first place.
 
         const t = Tensor{
-            .data = &.{}, // CPU compat alias intentionally empty on CUDA
             .shape = self.shape,
             .strides = self.strides,
             .dtype = self.dtype,
             .device = .cuda,
-            .owned = false, // top-level alias is always false for CUDA tensors
             .storage = .{ .cuda = buffer },
             .offset = self.offset,
             .requires_grad = self.requires_grad,
@@ -772,12 +739,10 @@ pub const Tensor = struct {
         try buf.copyToHost(host_data);
 
         const t = Tensor{
-            .data = host_data,
             .shape = self.shape,
             .strides = self.strides,
             .dtype = self.dtype,
             .device = .cpu,
-            .owned = true,
             .storage = .{ .cpu = .{ .data = host_data, .owned = true } },
             .offset = self.offset,
             .requires_grad = self.requires_grad,
@@ -830,29 +795,13 @@ pub const Tensor = struct {
         const max_off = maxLogicalOffset(self.shape, self.strides);
         if (self.offset + max_off >= self.storage.len()) return error.InvalidLayout;
 
-        // 5. CPU compat alias must agree with storage.
+        // 5. Device tag agrees with storage union tag.
         switch (self.storage) {
-            .cpu => |s| {
-                if (self.data.ptr != s.data.ptr or self.data.len != s.data.len) {
-                    return error.InvalidLayout;
-                }
-                if (self.owned != s.owned) return error.InvalidLayout;
+            .cpu => {
                 if (self.device != .cpu) return error.DeviceMismatch;
             },
             .cuda => |b| {
                 if (self.device != .cuda) return error.DeviceMismatch;
-                // The CPU compat alias is intentionally empty for a
-                // CUDA tensor. Any host code that walks `self.data[i]`
-                // iterates zero times — a loud failure (no output)
-                // rather than a silent wrong answer from reading past
-                // a non-host-addressable CUdeviceptr.
-                if (self.data.len != 0) return error.InvalidLayout;
-                // A CUDA tensor's top-level `owned` flag must stay
-                // false: deinit of Tensor.data would try
-                // `allocator.free(emptySlice)` (harmless) but more
-                // importantly, the *real* ownership lives inside the
-                // DeviceBuffer, not in the top-level alias.
-                if (self.owned) return error.InvalidLayout;
                 // The backing DeviceBuffer must be internally
                 // consistent: zero-length means zero pointer, and
                 // nonzero-length implies a real device pointer. This
@@ -924,7 +873,7 @@ test "Tensor init/deinit — no leak" {
     var t = try Tensor.init(std.testing.allocator, shape);
     // Verify the basic fields
     try std.testing.expectEqual(@as(usize, 6), t.cpuData().len);
-    try std.testing.expect(t.owned);
+    try std.testing.expect(t.isOwned());
     try std.testing.expectEqual(Device.cpu, t.device);
     try std.testing.expectEqual(DType.f32, t.dtype);
     try std.testing.expect(!t.requires_grad);
@@ -987,7 +936,7 @@ test "Tensor view does not own data" {
     const v = t.view();
 
     // View must not be owned
-    try std.testing.expect(!v.owned);
+    try std.testing.expect(!v.isOwned());
 
     // View shares the same data pointer
     try std.testing.expect(t.cpuData().ptr == v.cpuData().ptr);
@@ -1035,7 +984,7 @@ test "Tensor transpose2d shape and strides" {
     try std.testing.expectEqual(@as(usize, 3), tr.strides.values[1]);
 
     // Transpose is a view (no copy)
-    try std.testing.expect(!tr.owned);
+    try std.testing.expect(!tr.isOwned());
     try std.testing.expect(t.cpuData().ptr == tr.cpuData().ptr);
 
     // Verify element mapping: t[i][j] == tr[j][i]
@@ -1066,7 +1015,7 @@ test "Tensor reshape — contiguous view" {
     const r = try t.reshape(new_shape);
 
     // Result is a view (not owned)
-    try std.testing.expect(!r.owned);
+    try std.testing.expect(!r.isOwned());
 
     // Shape should be (3, 2)
     try std.testing.expectEqual(@as(usize, 3), r.shape.dims[0]);
@@ -1090,7 +1039,7 @@ test "Tensor reshape — same shape returns view" {
 
     const same_shape = Shape.init2D(2, 3);
     const r = try t.reshape(same_shape);
-    try std.testing.expect(!r.owned);
+    try std.testing.expect(!r.isOwned());
     try std.testing.expect(t.cpuData().ptr == r.cpuData().ptr);
 }
 
@@ -1288,13 +1237,11 @@ test "Tensor.checkInvariants rejects out-of-range stride" {
     // is constructed with the wrong strides.
     var data: [6]f32 = .{ 0, 0, 0, 0, 0, 0 };
     const bogus = Tensor{
-        .data = &data,
         .shape = Shape.init2D(2, 3),
         // strides (6, 2) would need offsets up to (1*6 + 2*2) = 10 > 6.
         .strides = Strides{ .values = .{ 6, 2, 0, 0 }, .rank = 1 },
         .dtype = .f32,
         .device = .cpu,
-        .owned = false,
         .storage = .{ .cpu = .{ .data = &data, .owned = false } },
         .offset = 0,
         .requires_grad = false,
@@ -1307,12 +1254,10 @@ test "Tensor.checkInvariants rejects out-of-range stride" {
 test "Tensor.checkInvariants rejects stride/shape rank mismatch" {
     var data: [6]f32 = .{ 0, 0, 0, 0, 0, 0 };
     const bogus = Tensor{
-        .data = &data,
         .shape = Shape.init2D(2, 3),
         .strides = Strides{ .values = .{ 3, 1, 1, 0 }, .rank = 2 }, // rank 2 vs shape rank 1
         .dtype = .f32,
         .device = .cpu,
-        .owned = false,
         .storage = .{ .cpu = .{ .data = &data, .owned = false } },
         .offset = 0,
         .requires_grad = false,
@@ -1342,12 +1287,10 @@ test "requireSameDevice rejects differing devices" {
     // migration of this test to a real-GPU fixture.
     var data: [1]f32 = .{0};
     const cpu_t = Tensor{
-        .data = &data,
         .shape = Shape.init1D(1),
         .strides = computeStrides(Shape.init1D(1)),
         .dtype = .f32,
         .device = .cpu,
-        .owned = false,
         .storage = .{ .cpu = .{ .data = &data, .owned = false } },
         .offset = 0,
         .requires_grad = false,
@@ -1355,12 +1298,10 @@ test "requireSameDevice rejects differing devices" {
         .tape_node = null,
     };
     const cuda_t = Tensor{
-        .data = &.{},
         .shape = Shape.init1D(1),
         .strides = computeStrides(Shape.init1D(1)),
         .dtype = .f32,
         .device = .cuda,
-        .owned = false,
         .storage = stubCudaStorage(1),
         .offset = 0,
         .requires_grad = false,
@@ -1393,8 +1334,8 @@ test "Tensor view marks storage as not owned" {
         .cpu => |s| try std.testing.expect(!s.owned),
         .cuda => unreachable,
     }
-    // Top-level `owned` alias agrees with storage.
-    try std.testing.expect(!v.owned);
+    // isOwned() accessor agrees with storage.
+    try std.testing.expect(!v.isOwned());
 }
 
 // -- PR-δ Storage.cuda invariants ------------------------------------------
@@ -1430,12 +1371,10 @@ fn stubCudaStorage(n: usize) Storage {
 test "Tensor.checkInvariants accepts a hand-built CUDA stub" {
     const s = Shape.init2D(3, 4);
     const t = Tensor{
-        .data = &.{},
         .shape = s,
         .strides = computeStrides(s),
         .dtype = .f32,
         .device = .cuda,
-        .owned = false,
         .storage = stubCudaStorage(12),
         .offset = 0,
         .requires_grad = false,
@@ -1445,52 +1384,11 @@ test "Tensor.checkInvariants accepts a hand-built CUDA stub" {
     try t.checkInvariants();
 }
 
-test "Tensor.checkInvariants rejects CUDA tensor with nonzero data.len alias" {
-    // A CUDA tensor must keep the top-level `data` compat alias empty.
-    // Any non-empty slice here means host code would silently walk a
-    // slice that is *not* the actual CUDA payload — the exact silent-
-    // wrong-answer bug Storage was designed to prevent.
-    var bogus_host: [4]f32 = .{ 0, 0, 0, 0 };
-    const s = Shape.init1D(4);
-    const t = Tensor{
-        .data = &bogus_host, // INVALID — CUDA tensors must have data.len == 0
-        .shape = s,
-        .strides = computeStrides(s),
-        .dtype = .f32,
-        .device = .cuda,
-        .owned = false,
-        .storage = stubCudaStorage(4),
-        .offset = 0,
-        .requires_grad = false,
-        .grad = null,
-        .tape_node = null,
-    };
-    try std.testing.expectError(error.InvalidLayout, t.checkInvariants());
-}
-
-test "Tensor.checkInvariants rejects CUDA tensor whose top-level owned=true" {
-    // Ownership of CUDA memory lives inside the DeviceBuffer, not in
-    // the top-level `owned` compat alias. If a tensor claims to own
-    // host memory while living on CUDA, Tensor.deinit would try to
-    // free a host-side empty slice (harmless) but more importantly it
-    // signals a structural confusion about who is responsible for
-    // cuMemFree_v2 — refuse to trust such a tensor.
-    const s = Shape.init1D(4);
-    const t = Tensor{
-        .data = &.{},
-        .shape = s,
-        .strides = computeStrides(s),
-        .dtype = .f32,
-        .device = .cuda,
-        .owned = true, // INVALID for a CUDA tensor
-        .storage = stubCudaStorage(4),
-        .offset = 0,
-        .requires_grad = false,
-        .grad = null,
-        .tape_node = null,
-    };
-    try std.testing.expectError(error.InvalidLayout, t.checkInvariants());
-}
+// Note: the old "rejects CUDA tensor with nonzero data.len alias" and
+// "rejects CUDA tensor whose top-level owned=true" tests were removed
+// in the Phase 1b field-removal commit. Those tested compat-alias
+// invariants that no longer exist — the .data and .owned fields have
+// been eliminated in favour of Storage-only access via cpuData().
 
 test "Tensor.checkInvariants rejects device/storage tag disagreement" {
     // A tensor with device = .cpu but storage = .cuda is internally
@@ -1498,12 +1396,10 @@ test "Tensor.checkInvariants rejects device/storage tag disagreement" {
     // the `device` field is a convenience alias. Drift is a bug.
     const s = Shape.init1D(4);
     const t = Tensor{
-        .data = &.{},
         .shape = s,
         .strides = computeStrides(s),
         .dtype = .f32,
         .device = .cpu, // disagrees with storage tag below
-        .owned = false,
         .storage = stubCudaStorage(4),
         .offset = 0,
         .requires_grad = false,

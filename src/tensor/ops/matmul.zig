@@ -433,7 +433,7 @@ test "transpose2d returns transposed view" {
     try std.testing.expectEqual(@as(usize, 2), tr.shape.dims[1]);
 
     // View — does not own data
-    try std.testing.expect(!tr.owned);
+    try std.testing.expect(!tr.isOwned());
 }
 
 test "transpose2d rejects non-rank-2" {

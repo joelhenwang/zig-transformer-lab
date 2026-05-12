@@ -77,7 +77,7 @@ pub fn main(init: std.process.Init) !void {
     {
         var data_rng = Rng.init(123);
         for (0..B * T) |i| {
-            ids.data[i] = @floatFromInt(data_rng.random().intRangeLessThan(usize, 0, V));
+            ids.cpuData()[i] = @floatFromInt(data_rng.random().intRangeLessThan(usize, 0, V));
         }
     }
 
@@ -87,7 +87,7 @@ pub fn main(init: std.process.Init) !void {
     {
         var target_rng = Rng.init(456);
         for (0..B * T) |i| {
-            targets.data[i] = @floatFromInt(target_rng.random().intRangeLessThan(usize, 0, V));
+            targets.cpuData()[i] = @floatFromInt(target_rng.random().intRangeLessThan(usize, 0, V));
         }
     }
 
@@ -133,12 +133,12 @@ pub fn main(init: std.process.Init) !void {
 
         // Print loss periodically
         if (step % 10 == 0 or step == num_steps - 1) {
-            try w.print("Step {:3}: loss = {d:.6}\n", .{ step, loss.data[0] });
+            try w.print("Step {:3}: loss = {d:.6}\n", .{ step, loss.cpuData()[0] });
         }
 
         // Verify loss decreases (after warmup)
         if (step > 0 and step % 10 == 0) {
-            if (loss.data[0] < prev_loss) {
+            if (loss.cpuData()[0] < prev_loss) {
                 try w.print("  Loss decreased!\n", .{});
             } else {
                 try w.print("  WARNING: Loss did not decrease\n", .{});
@@ -149,7 +149,7 @@ pub fn main(init: std.process.Init) !void {
         try tape.backward(&loss);
 
         // Save loss value before freeing
-        const loss_val = loss.data[0];
+        const loss_val = loss.cpuData()[0];
 
         // Free loss tensor — its data is not referenced by any SavedData.
         loss.deinit(allocator);

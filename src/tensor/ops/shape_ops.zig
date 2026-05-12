@@ -247,7 +247,6 @@ pub fn transposeInner2d(tensor: Tensor) LabError!Tensor {
     const K = tensor.shape.dims[2];
 
     return Tensor{
-        .data = tensor.data,
         .shape = Shape.init3D(B, K, M),
         .strides = .{
             .values = .{
@@ -260,7 +259,6 @@ pub fn transposeInner2d(tensor: Tensor) LabError!Tensor {
         },
         .dtype = tensor.dtype,
         .device = tensor.device,
-        .owned = false,
         // Share the parent's storage but mark this as non-owning so
         // `deinit` on the view is a no-op. PR-δ seam.
         .storage = tensor_mod.nonOwningStorage(tensor.storage),
@@ -372,7 +370,6 @@ pub fn transposeAxes12_4d(tensor: Tensor) LabError!Tensor {
 
     const new_shape = Shape.init4D(d0, d2, d1, d3);
     return Tensor{
-        .data = tensor.data,
         .shape = new_shape,
         .strides = .{
             .values = .{
@@ -385,7 +382,6 @@ pub fn transposeAxes12_4d(tensor: Tensor) LabError!Tensor {
         },
         .dtype = tensor.dtype,
         .device = tensor.device,
-        .owned = false,
         .storage = tensor_mod.nonOwningStorage(tensor.storage),
         .offset = tensor.offset,
         .requires_grad = tensor.requires_grad,
@@ -494,7 +490,7 @@ test "reshapeTracked (2,3) → (6,)" {
     defer out.deinit(alloc);
 
     try std.testing.expectEqual(@as(usize, 6), out.shape.dims[0]);
-    try std.testing.expect(out.owned);
+    try std.testing.expect(out.isOwned());
     for (0..6) |i| {
         try std.testing.expectEqual(@as(f32, @floatFromInt(i + 1)), out.cpuData()[i]);
     }
@@ -517,7 +513,7 @@ test "transpose2dTracked (2,3) → (3,2)" {
 
     try std.testing.expectEqual(@as(usize, 3), out.shape.dims[0]);
     try std.testing.expectEqual(@as(usize, 2), out.shape.dims[1]);
-    try std.testing.expect(out.owned);
+    try std.testing.expect(out.isOwned());
     // out[0,0] = t[0,0] = 1, out[0,1] = t[1,0] = 4
     try std.testing.expectEqual(@as(f32, 1.0), out.cpuData()[0]);
     try std.testing.expectEqual(@as(f32, 4.0), out.cpuData()[1]);
@@ -541,7 +537,7 @@ test "transposeInner2d (2,3,4) → (2,4,3) view" {
     try std.testing.expectEqual(@as(usize, 3), tr.shape.dims[2]);
 
     // View — does not own data
-    try std.testing.expect(!tr.owned);
+    try std.testing.expect(!tr.isOwned());
     try std.testing.expect(tr.cpuData().ptr == t.cpuData().ptr);
 
     // Verify element: tr[0, 2, 1] = t[0, 1, 2]

@@ -185,7 +185,7 @@ pub fn crossEntropy(allocator: std.mem.Allocator, logits: Tensor, targets: Tenso
                 .op = .cross_entropy,
                 .parents = .{ logits.tape_node, null },
                 .n_parents = 1,
-                .saved = .{ .ce_info = .{ .logits = logits, .targets = targets.data } },
+                .saved = .{ .ce_info = .{ .logits = logits, .targets = targets.cpuData() } },
             });
             out.requires_grad = true;
             out.tape_node = node_id;

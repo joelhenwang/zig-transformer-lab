@@ -69,9 +69,9 @@ fn runOnce(
     if (loss.device == .cuda) {
         var loss_cpu = try loss.toCpu(allocator);
         defer loss_cpu.deinit(allocator);
-        return loss_cpu.data[0];
+        return loss_cpu.cpuData()[0];
     }
-    return loss.data[0];
+    return loss.cpuData()[0];
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -131,14 +131,14 @@ pub fn main(init: std.process.Init) !void {
     var ids_cpu = try Tensor.init(allocator, Shape.init2D(B, T));
     defer ids_cpu.deinit(allocator);
     var id_rng = Rng.init(123);
-    for (0..BT) |i| ids_cpu.data[i] = @floatFromInt(id_rng.random().intRangeLessThan(usize, 0, cfg.vocab_size));
+    for (0..BT) |i| ids_cpu.cpuData()[i] = @floatFromInt(id_rng.random().intRangeLessThan(usize, 0, cfg.vocab_size));
     var ids_gpu = try ids_cpu.toCuda(&ctx);
     defer ids_gpu.storage.deinit(allocator);
 
     var targets_cpu = try Tensor.init(allocator, Shape.init1D(BT));
     defer targets_cpu.deinit(allocator);
     var tgt_rng = Rng.init(456);
-    for (0..BT) |i| targets_cpu.data[i] = @floatFromInt(tgt_rng.random().intRangeLessThan(usize, 0, cfg.vocab_size));
+    for (0..BT) |i| targets_cpu.cpuData()[i] = @floatFromInt(tgt_rng.random().intRangeLessThan(usize, 0, cfg.vocab_size));
     var targets_gpu = try targets_cpu.toCuda(&ctx);
     defer targets_gpu.storage.deinit(allocator);
 

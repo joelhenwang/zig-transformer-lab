@@ -84,7 +84,7 @@ pub fn debugSummary(tensor: Tensor, writer: *std.Io.Writer) !void {
     try writer.print("] dtype={s} device={s} owned={}\n", .{
         tensor.dtype.label(),
         tensor.device.label(),
-        tensor.owned,
+        tensor.isOwned(),
     });
 
     // --- Compute stats in a single pass ---

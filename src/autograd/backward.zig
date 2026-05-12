@@ -1317,7 +1317,7 @@ test "broadcastTo — same shape returns owned copy" {
 
     var result = try broadcastTo(allocator, t, Shape.init2D(2, 3));
     defer result.deinit(allocator);
-    try std.testing.expect(result.owned);
+    try std.testing.expect(result.isOwned());
     try std.testing.expect(result.cpuData().ptr != t.cpuData().ptr);
     try std.testing.expectEqual(@as(f32, 0.0), result.cpuData()[0]);
 }

@@ -92,7 +92,7 @@ pub fn main(init: std.process.Init) !void {
     defer ids_cpu.deinit(allocator);
     var id_rng = Rng.init(123);
     for (0..B * T) |i| {
-        ids_cpu.data[i] = @floatFromInt(id_rng.random().intRangeLessThan(usize, 0, cfg.vocab_size));
+        ids_cpu.cpuData()[i] = @floatFromInt(id_rng.random().intRangeLessThan(usize, 0, cfg.vocab_size));
     }
     var ids_gpu = try ids_cpu.toCuda(&ctx);
     defer ids_gpu.storage.deinit(allocator);
@@ -101,7 +101,7 @@ pub fn main(init: std.process.Init) !void {
     defer targets_cpu.deinit(allocator);
     var tgt_rng = Rng.init(456);
     for (0..B * T) |i| {
-        targets_cpu.data[i] = @floatFromInt(tgt_rng.random().intRangeLessThan(usize, 0, cfg.vocab_size));
+        targets_cpu.cpuData()[i] = @floatFromInt(tgt_rng.random().intRangeLessThan(usize, 0, cfg.vocab_size));
     }
     var targets_gpu = try targets_cpu.toCuda(&ctx);
     defer targets_gpu.storage.deinit(allocator);
@@ -178,9 +178,9 @@ pub fn main(init: std.process.Init) !void {
     var loss_back = try loss_gpu.toCpu(allocator);
     defer loss_back.deinit(allocator);
     try w.print("\nLoss    cpu={d:.6}  cuda={d:.6}  diff={d:.6}\n", .{
-        loss_cpu.data[0],
-        loss_back.data[0],
-        @abs(loss_cpu.data[0] - loss_back.data[0]),
+        loss_cpu.cpuData()[0],
+        loss_back.cpuData()[0],
+        @abs(loss_cpu.cpuData()[0] - loss_back.cpuData()[0]),
     });
 
     var worst_abs: f32 = 0.0;
@@ -188,10 +188,10 @@ pub fn main(init: std.process.Init) !void {
     for (0..params_cpu.items.len) |i| {
         var p_gpu_host = try params_gpu.items[i].*.toCpu(allocator);
         defer p_gpu_host.deinit(allocator);
-        const n = params_cpu.items[i].data.len;
+        const n = params_cpu.items[i].cpuData().len;
         var local: f32 = 0.0;
         for (0..n) |k| {
-            const d = @abs(params_cpu.items[i].data[k] - p_gpu_host.data[k]);
+            const d = @abs(params_cpu.items[i].cpuData()[k] - p_gpu_host.cpuData()[k]);
             if (d > local) local = d;
         }
         if (local > worst_abs) {

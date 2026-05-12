@@ -370,8 +370,8 @@ test "oracle layernorm_3d: composed LayerNorm forward and backward parity" {
     // values. `ln.gamma.param_id` (assigned in LayerNorm.init) stays
     // the same, so the optimizer-state invariant from PR-ζ is
     // preserved.
-    @memcpy(ln.gamma.data, gamma.data);
-    @memcpy(ln.beta.data, beta.data);
+    @memcpy(ln.gamma.cpuData(), gamma.cpuData());
+    @memcpy(ln.beta.cpuData(), beta.cpuData());
 
     // Track the oracle's x on the tape. We do NOT track the loaded
     // `gamma`/`beta` because `ln.gamma`/`ln.beta` are what the op
@@ -431,7 +431,7 @@ test "oracle embedding_3d: forward gather + scatter-add backward parity" {
     const D = weight.shape.dims[1];
     var emb = try Embedding.init(alloc, V, D, &rng);
     defer emb.deinit();
-    @memcpy(emb.weight.data, weight.data);
+    @memcpy(emb.weight.cpuData(), weight.cpuData());
     emb.weight.requires_grad = true;
 
     var tape = Tape.init(alloc);
@@ -643,13 +643,13 @@ test "oracle full_model_forward: end-to-end TinyWordTransformer logits parity" {
         var loaded = try oracle.loadTensor(alloc, io, path);
         defer loaded.deinit(alloc);
 
-        if (loaded.data.len != entry.tensor.data.len) {
+        if (loaded.cpuData().len != entry.tensor.cpuData().len) {
             std.debug.print("  param {s} size mismatch: loaded={d}, model={d}\n", .{
-                entry.name, loaded.data.len, entry.tensor.data.len,
+                entry.name, loaded.cpuData().len, entry.tensor.cpuData().len,
             });
             return error.ShapeMismatch;
         }
-        @memcpy(entry.tensor.data, loaded.data);
+        @memcpy(entry.tensor.cpuData(), loaded.cpuData());
     }
 
     // Load the token ids and run forward.
@@ -737,14 +737,14 @@ test "oracle multihead_attention_3d: forward and backward parity" {
     var attn = try CausalSelfAttention.init(alloc, D, H, T, true, &rng);
     defer attn.deinit();
 
-    @memcpy(attn.w_q.weight.data, w_q.data);
-    @memcpy(attn.w_q.bias.?.data, b_q.data);
-    @memcpy(attn.w_k.weight.data, w_k.data);
-    @memcpy(attn.w_k.bias.?.data, b_k.data);
-    @memcpy(attn.w_v.weight.data, w_v.data);
-    @memcpy(attn.w_v.bias.?.data, b_v.data);
-    @memcpy(attn.w_o.weight.data, w_o.data);
-    @memcpy(attn.w_o.bias.?.data, b_o.data);
+    @memcpy(attn.w_q.weight.cpuData(), w_q.cpuData());
+    @memcpy(attn.w_q.bias.?.cpuData(), b_q.cpuData());
+    @memcpy(attn.w_k.weight.cpuData(), w_k.cpuData());
+    @memcpy(attn.w_k.bias.?.cpuData(), b_k.cpuData());
+    @memcpy(attn.w_v.weight.cpuData(), w_v.cpuData());
+    @memcpy(attn.w_v.bias.?.cpuData(), b_v.cpuData());
+    @memcpy(attn.w_o.weight.cpuData(), w_o.cpuData());
+    @memcpy(attn.w_o.bias.?.cpuData(), b_o.cpuData());
 
     x.requires_grad = true;
     attn.w_q.weight.requires_grad = true;

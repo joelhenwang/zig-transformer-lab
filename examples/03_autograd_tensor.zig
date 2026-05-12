@@ -28,27 +28,27 @@ pub fn main(init: std.process.Init) !void {
     // --- Create tensors ---
     var X = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer X.deinit(allocator);
-    X.data[0] = 0.1;
-    X.data[1] = 0.2;
-    X.data[2] = 0.3;
-    X.data[3] = 0.4;
-    X.data[4] = 0.5;
-    X.data[5] = 0.6;
+    X.cpuData()[0] = 0.1;
+    X.cpuData()[1] = 0.2;
+    X.cpuData()[2] = 0.3;
+    X.cpuData()[3] = 0.4;
+    X.cpuData()[4] = 0.5;
+    X.cpuData()[5] = 0.6;
 
     var W = try Tensor.init(allocator, Shape.init2D(3, 4));
     defer W.deinit(allocator);
-    W.data[0] = 0.1;
-    W.data[1] = 0.2;
-    W.data[2] = 0.3;
-    W.data[3] = 0.4;
-    W.data[4] = 0.5;
-    W.data[5] = 0.6;
-    W.data[6] = 0.7;
-    W.data[7] = 0.8;
-    W.data[8] = 0.9;
-    W.data[9] = 1.0;
-    W.data[10] = 1.1;
-    W.data[11] = 1.2;
+    W.cpuData()[0] = 0.1;
+    W.cpuData()[1] = 0.2;
+    W.cpuData()[2] = 0.3;
+    W.cpuData()[3] = 0.4;
+    W.cpuData()[4] = 0.5;
+    W.cpuData()[5] = 0.6;
+    W.cpuData()[6] = 0.7;
+    W.cpuData()[7] = 0.8;
+    W.cpuData()[8] = 0.9;
+    W.cpuData()[9] = 1.0;
+    W.cpuData()[10] = 1.1;
+    W.cpuData()[11] = 1.2;
     W.requires_grad = true;
 
     // --- Forward + backward ---
@@ -65,7 +65,7 @@ pub fn main(init: std.process.Init) !void {
     try w.print("  X shape: (2, 3), W shape: (3, 4)\n", .{});
     try w.print("  logits shape: ({d}, {d})\n", .{ logits.shape.dims[0], logits.shape.dims[1] });
     try w.print("  probs shape:  ({d}, {d})\n", .{ probs.shape.dims[0], probs.shape.dims[1] });
-    try w.print("  loss = {d:.6}\n\n", .{loss.data[0]});
+    try w.print("  loss = {d:.6}\n\n", .{loss.cpuData()[0]});
 
     try tape.backward(&loss);
 
@@ -73,7 +73,7 @@ pub fn main(init: std.process.Init) !void {
     if (W.grad) |g| {
         try w.print("dL/dW (first row): ", .{});
         for (0..4) |j| {
-            try w.print("{d:.4} ", .{g.data[j]});
+            try w.print("{d:.4} ", .{g.cpuData()[j]});
         }
         try w.print("\n", .{});
     }
@@ -111,12 +111,12 @@ pub fn main(init: std.process.Init) !void {
 fn lossFn(allocator: std.mem.Allocator, params: []*Tensor, tape: *Tape) ztl.errors.LabError!*Tensor {
     var X = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer X.deinit(allocator);
-    X.data[0] = 0.1;
-    X.data[1] = 0.2;
-    X.data[2] = 0.3;
-    X.data[3] = 0.4;
-    X.data[4] = 0.5;
-    X.data[5] = 0.6;
+    X.cpuData()[0] = 0.1;
+    X.cpuData()[1] = 0.2;
+    X.cpuData()[2] = 0.3;
+    X.cpuData()[3] = 0.4;
+    X.cpuData()[4] = 0.5;
+    X.cpuData()[5] = 0.6;
 
     const W_param = params[0];
     var logits = try ztl.ops.matmul.matmul(allocator, X, W_param.*, tape);

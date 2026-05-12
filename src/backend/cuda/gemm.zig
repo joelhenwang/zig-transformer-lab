@@ -75,12 +75,10 @@ fn requireCudaBuffer(t: Tensor) LabError!DeviceBuffer {
 /// Wrap an owning output DeviceBuffer + shape into a Tensor.
 fn wrapOut(buf: DeviceBuffer, s: Shape, requires_grad: bool) Tensor {
     const t = Tensor{
-        .data = &.{},
         .shape = s,
         .strides = computeStrides(s),
         .dtype = .f32,
         .device = .cuda,
-        .owned = false,
         .storage = .{ .cuda = buf },
         .offset = 0,
         .requires_grad = requires_grad,
