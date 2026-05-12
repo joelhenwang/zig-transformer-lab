@@ -229,9 +229,9 @@ const kernel_names = [_][]const u8{
     "adamw",
     "ce_loss",
     "unary",
-    // Future PRs will add:
-    // "layernorm",
-    // "causal_mask",
+    // Pedagogical kernels (docs/cuda_depth.md):
+    "tiled_gemm",
+    "wmma_demo",
 };
 
 /// Creates nvcc compile commands for each kernel in kernel_names,
