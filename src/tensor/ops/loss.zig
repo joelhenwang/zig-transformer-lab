@@ -141,7 +141,7 @@ pub fn crossEntropy(allocator: std.mem.Allocator, logits: Tensor, targets: Tenso
     // out-of-bounds reads into the log_probs tensor, which would
     // silently produce wrong results (or segfault in ReleaseSafe).
     for (0..B) |i| {
-        const class_idx = @as(usize, @intFromFloat(@round(targets.data[i])));
+        const class_idx = @as(usize, @intFromFloat(@round(targets.cpuData()[i])));
         if (class_idx >= C) return LabError.InvalidArgument;
     }
 
@@ -157,11 +157,11 @@ pub fn crossEntropy(allocator: std.mem.Allocator, logits: Tensor, targets: Tenso
         // Round the f32 target to the nearest integer. This handles
         // the case where class indices are stored as f32 with tiny
         // floating-point imprecision (e.g., 1.9999999 instead of 2).
-        const class_idx = @as(usize, @intFromFloat(@round(targets.data[i])));
+        const class_idx = @as(usize, @intFromFloat(@round(targets.cpuData()[i])));
 
         // log_probs is contiguous (newly allocated by logSoftmax),
         // so the offset for (i, class_idx) is i * C + class_idx.
-        const log_p = log_probs.data[i * C + class_idx];
+        const log_p = log_probs.cpuData()[i * C + class_idx];
 
         // Cross-entropy = -log(P(target)). We negate because
         // log_probs stores log-probabilities (negative or zero) and
@@ -176,7 +176,7 @@ pub fn crossEntropy(allocator: std.mem.Allocator, logits: Tensor, targets: Tenso
     // --- Allocate scalar output ---
     var out = try Tensor.init(allocator, Shape.init1D(1));
     errdefer out.deinit(allocator);
-    out.data[0] = mean_loss;
+    out.cpuData()[0] = mean_loss;
 
     if (tape) |t| {
         if (logits.requires_grad) {
@@ -210,18 +210,18 @@ test "crossEntropy known 3-class example" {
     // loss = -(-0.4173)/1 = 0.4173
     var logits = try Tensor.init(alloc, Shape.init2D(1, 3));
     defer logits.deinit(alloc);
-    logits.data[0] = 2.0;
-    logits.data[1] = 1.0;
-    logits.data[2] = 0.1;
+    logits.cpuData()[0] = 2.0;
+    logits.cpuData()[1] = 1.0;
+    logits.cpuData()[2] = 0.1;
 
     var targets = try Tensor.init(alloc, Shape.init1D(1));
     defer targets.deinit(alloc);
-    targets.data[0] = 0.0;
+    targets.cpuData()[0] = 0.0;
 
     var loss = try crossEntropy(alloc, logits, targets, null);
     defer loss.deinit(alloc);
 
-    try std.testing.expectApproxEqAbs(@as(f32, 0.4173), loss.data[0], 1e-2);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4173), loss.cpuData()[0], 1e-2);
 }
 
 test "crossEntropy uniform logits gives loss = log(C)" {
@@ -232,20 +232,20 @@ test "crossEntropy uniform logits gives loss = log(C)" {
     // For C=3: loss = ln(3) ~ 1.0986
     var logits = try Tensor.init(alloc, Shape.init2D(1, 3));
     defer logits.deinit(alloc);
-    logits.data[0] = 1.0;
-    logits.data[1] = 1.0;
-    logits.data[2] = 1.0;
+    logits.cpuData()[0] = 1.0;
+    logits.cpuData()[1] = 1.0;
+    logits.cpuData()[2] = 1.0;
 
     var targets = try Tensor.init(alloc, Shape.init1D(1));
     defer targets.deinit(alloc);
-    targets.data[0] = 0.0;
+    targets.cpuData()[0] = 0.0;
 
     var loss = try crossEntropy(alloc, logits, targets, null);
     defer loss.deinit(alloc);
 
     // ln(3) ~ 1.0986  — use @log builtin for natural log
     const ln3: f32 = @log(@as(f32, 3.0));
-    try std.testing.expectApproxEqAbs(ln3, loss.data[0], 1e-3);
+    try std.testing.expectApproxEqAbs(ln3, loss.cpuData()[0], 1e-3);
 }
 
 test "crossEntropy rejects mismatched batch sizes" {
@@ -268,7 +268,7 @@ test "crossEntropy rejects out-of-range target" {
     var targets = try Tensor.init(alloc, Shape.init1D(1));
     defer targets.deinit(alloc);
     // C=3, but target index is 5 (out of range)
-    targets.data[0] = 5.0;
+    targets.cpuData()[0] = 5.0;
 
     try std.testing.expectError(LabError.InvalidArgument, crossEntropy(alloc, logits, targets, null));
 }

@@ -79,7 +79,7 @@ test "GELU forward — output shape matches input" {
 
     var x = try Tensor.init(alloc, @import("../tensor/shape.zig").Shape.init2D(2, 4));
     defer x.deinit(alloc);
-    for (0..8) |i| x.data[i] = @floatFromInt(i);
+    for (0..8) |i| x.cpuData()[i] = @floatFromInt(i);
 
     var y = try gelu.forward(x, null);
     defer y.deinit(alloc);
@@ -88,5 +88,5 @@ test "GELU forward — output shape matches input" {
     try std.testing.expectEqual(@as(usize, 4), y.shape.dims[1]);
 
     // GELU(0) = 0
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), y.data[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), y.cpuData()[0], 1e-4);
 }

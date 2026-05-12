@@ -577,8 +577,8 @@ fn backwardRelu(
     switch (node.saved) {
         .tensor_ref => |a| {
             var mask = try Tensor.init(allocator, a.shape);
-            for (a.data, 0..) |v, i| {
-                mask.data[i] = if (v > 0.0) 1.0 else 0.0;
+            for (a.cpuData(), 0..) |v, i| {
+                mask.cpuData()[i] = if (v > 0.0) 1.0 else 0.0;
             }
             defer mask.deinit(allocator);
             const da = try ops_elementwise.mul(allocator, grad_output.*, mask, null);
@@ -609,8 +609,8 @@ fn backwardGelu(
             }
             var gelu_grad = try Tensor.init(allocator, a.shape);
             defer gelu_grad.deinit(allocator);
-            for (a.data, 0..) |v, i| {
-                gelu_grad.data[i] = geluDerivative(v);
+            for (a.cpuData(), 0..) |v, i| {
+                gelu_grad.cpuData()[i] = geluDerivative(v);
             }
             const da = try ops_elementwise.mul(allocator, grad_output.*, gelu_grad, null);
             result[0] = try heapAlloc(allocator, da);
@@ -747,15 +747,15 @@ fn backwardCrossEntropy(
                     const one_hot_val: f32 = if (c == target_idx) 1.0 else 0.0;
                     // dL/dlogits[i,j] = (1/B) * (softmax[i,j] - one_hot[i,j])
                     // The (1/B) comes from the mean reduction in cross_entropy
-                    grad_logits.data[idx] = (s.data[idx] - one_hot_val) / @as(f32, @floatFromInt(B));
+                    grad_logits.cpuData()[idx] = (s.cpuData()[idx] - one_hot_val) / @as(f32, @floatFromInt(B));
                 }
             }
 
             // Scale by the upstream gradient (which is 1.0 for scalar loss)
             // For a scalar loss, grad_output = [1.0], so just multiply by 1.0
-            const grad_scale = grad_output.data[0];
-            for (0..grad_logits.data.len) |i| {
-                grad_logits.data[i] *= grad_scale;
+            const grad_scale = grad_output.cpuData()[0];
+            for (0..grad_logits.cpuData().len) |i| {
+                grad_logits.cpuData()[i] *= grad_scale;
             }
 
             result[0] = try heapAlloc(allocator, grad_logits);
@@ -766,7 +766,7 @@ fn backwardCrossEntropy(
             // `softmax - one_hot` subtraction into `saved_grad`, so
             // backward just returns a DtoD clone.
             //
-            // We intentionally do NOT read grad_output.data[0] here —
+            // We intentionally do NOT read grad_output.cpuData()[0] here —
             // CUDA tensors keep an empty CPU compat alias. The tape's
             // `backward` seeds the loss gradient with 1.0 via
             // ops_create.onesLike, and cross-entropy output is always
@@ -820,7 +820,7 @@ fn backwardEmbedding(
                 }
                 // grad_weight[idx, :] += grad_output[i, :]
                 for (0..d_model) |d| {
-                    grad_weight.data[idx * d_model + d] += grad_output.data[i * d_model + d];
+                    grad_weight.cpuData()[idx * d_model + d] += grad_output.cpuData()[i * d_model + d];
                 }
             }
 
@@ -887,7 +887,7 @@ pub fn broadcastTo(allocator: std.mem.Allocator, tensor: Tensor, target: Shape) 
     if (shape_equals(tensor.shape, target)) {
         const out = try Tensor.init(allocator, target);
         if (isContiguous(tensor.shape, tensor.strides)) {
-            @memcpy(out.data, tensor.data[0..out.data.len]);
+            @memcpy(out.cpuData(), tensor.cpuData()[0..out.cpuData().len]);
         } else {
             const n = totalElements(target);
             const ndim = tensor.shape.ndim();
@@ -904,7 +904,7 @@ pub fn broadcastTo(allocator: std.mem.Allocator, tensor: Tensor, target: Shape) 
                     offset += idx * tensor.strides.values[axis];
                 }
                 offset += remaining * tensor.strides.values[axis];
-                out.data[flat] = tensor.data[offset];
+                out.cpuData()[flat] = tensor.cpuData()[offset];
             }
         }
         return out;
@@ -936,7 +936,7 @@ pub fn broadcastTo(allocator: std.mem.Allocator, tensor: Tensor, target: Shape) 
             in_flat += coord * tensor.strides.values[d];
         }
 
-        result.data[out_i] = tensor.data[in_flat];
+        result.cpuData()[out_i] = tensor.cpuData()[in_flat];
     }
 
     return result;
@@ -954,8 +954,8 @@ pub fn broadcastTo(allocator: std.mem.Allocator, tensor: Tensor, target: Shape) 
 ///
 /// Device routing (Session 2):
 ///   CUDA tensors keep an empty CPU compat alias (PR-δ), so the
-///   CPU loop `for (0..n) |i| dst.data[i] += src.data[i]` over
-///   `dst.data.len == 0` is a silent no-op — dropping every
+///   CPU loop `for (0..n) |i| dst.cpuData()[i] += src.cpuData()[i]` over
+///   `dst.cpuData().len == 0` is a silent no-op — dropping every
 ///   multi-path gradient contribution (e.g. LayerNorm's path from
 ///   `a` through `mean(a)` back to `a`). The CUDA branch launches
 ///   the same fused add kernel used by elementwise.add, writing
@@ -994,9 +994,9 @@ pub fn accumulateGrad(dst: *Tensor, src: *Tensor) void {
         };
         return;
     }
-    const n = dst.data.len;
+    const n = dst.cpuData().len;
     for (0..n) |i| {
-        dst.data[i] += src.data[i];
+        dst.cpuData()[i] += src.cpuData()[i];
     }
 }
 
@@ -1043,15 +1043,15 @@ test "backward neg — dL/da = -dL/dc" {
     const allocator = std.testing.allocator;
     var a = try Tensor.init(allocator, Shape.init1D(3));
     defer a.deinit(allocator);
-    a.data[0] = 1.0;
-    a.data[1] = 2.0;
-    a.data[2] = 3.0;
+    a.cpuData()[0] = 1.0;
+    a.cpuData()[1] = 2.0;
+    a.cpuData()[2] = 3.0;
 
     var grad_out = try Tensor.init(allocator, Shape.init1D(3));
     defer grad_out.deinit(allocator);
-    grad_out.data[0] = 1.0;
-    grad_out.data[1] = 1.0;
-    grad_out.data[2] = 1.0;
+    grad_out.cpuData()[0] = 1.0;
+    grad_out.cpuData()[1] = 1.0;
+    grad_out.cpuData()[2] = 1.0;
 
     const node = Node{
         .id = 0,
@@ -1068,19 +1068,19 @@ test "backward neg — dL/da = -dL/dc" {
         allocator.destroy(da);
     }
 
-    try std.testing.expectEqual(@as(f32, -1.0), da.data[0]);
-    try std.testing.expectEqual(@as(f32, -1.0), da.data[1]);
-    try std.testing.expectEqual(@as(f32, -1.0), da.data[2]);
+    try std.testing.expectEqual(@as(f32, -1.0), da.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, -1.0), da.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, -1.0), da.cpuData()[2]);
 }
 
 test "backward relu — dL/da = dL/dc * (a > 0)" {
     const allocator = std.testing.allocator;
     var a = try Tensor.init(allocator, Shape.init1D(4));
     defer a.deinit(allocator);
-    a.data[0] = 2.0; // positive
-    a.data[1] = -1.0; // negative
-    a.data[2] = 0.0; // zero
-    a.data[3] = 5.0; // positive
+    a.cpuData()[0] = 2.0; // positive
+    a.cpuData()[1] = -1.0; // negative
+    a.cpuData()[2] = 0.0; // zero
+    a.cpuData()[3] = 5.0; // positive
 
     var grad_out = try Tensor.init(allocator, Shape.init1D(4));
     defer grad_out.deinit(allocator);
@@ -1101,10 +1101,10 @@ test "backward relu — dL/da = dL/dc * (a > 0)" {
         allocator.destroy(da);
     }
 
-    try std.testing.expectEqual(@as(f32, 1.0), da.data[0]); // a > 0 → grad passes
-    try std.testing.expectEqual(@as(f32, 0.0), da.data[1]); // a < 0 → grad blocked
-    try std.testing.expectEqual(@as(f32, 0.0), da.data[2]); // a == 0 → grad blocked
-    try std.testing.expectEqual(@as(f32, 1.0), da.data[3]); // a > 0 → grad passes
+    try std.testing.expectEqual(@as(f32, 1.0), da.cpuData()[0]); // a > 0 → grad passes
+    try std.testing.expectEqual(@as(f32, 0.0), da.cpuData()[1]); // a < 0 → grad blocked
+    try std.testing.expectEqual(@as(f32, 0.0), da.cpuData()[2]); // a == 0 → grad blocked
+    try std.testing.expectEqual(@as(f32, 1.0), da.cpuData()[3]); // a > 0 → grad passes
 }
 
 test "backward add — dL/da = sumToShape(dL/dc, a.shape)" {
@@ -1117,12 +1117,12 @@ test "backward add — dL/da = sumToShape(dL/dc, a.shape)" {
 
     var grad_out = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer grad_out.deinit(allocator);
-    grad_out.data[0] = 1.0;
-    grad_out.data[1] = 2.0;
-    grad_out.data[2] = 3.0;
-    grad_out.data[3] = 4.0;
-    grad_out.data[4] = 5.0;
-    grad_out.data[5] = 6.0;
+    grad_out.cpuData()[0] = 1.0;
+    grad_out.cpuData()[1] = 2.0;
+    grad_out.cpuData()[2] = 3.0;
+    grad_out.cpuData()[3] = 4.0;
+    grad_out.cpuData()[4] = 5.0;
+    grad_out.cpuData()[5] = 6.0;
 
     const node = Node{
         .id = 0,
@@ -1145,13 +1145,13 @@ test "backward add — dL/da = sumToShape(dL/dc, a.shape)" {
     }
 
     // dL/da = sumToShape(grad, (1,3)) → sum along axis 0: [1+4, 2+5, 3+6] = [5, 7, 9]
-    try std.testing.expectEqual(@as(f32, 5.0), da.data[0]);
-    try std.testing.expectEqual(@as(f32, 7.0), da.data[1]);
-    try std.testing.expectEqual(@as(f32, 9.0), da.data[2]);
+    try std.testing.expectEqual(@as(f32, 5.0), da.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 7.0), da.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 9.0), da.cpuData()[2]);
 
     // dL/db = sumToShape(grad, (2,3)) → same shape, no reduction: [1, 2, 3, 4, 5, 6]
-    try std.testing.expectEqual(@as(f32, 1.0), db.data[0]);
-    try std.testing.expectEqual(@as(f32, 6.0), db.data[5]);
+    try std.testing.expectEqual(@as(f32, 1.0), db.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 6.0), db.cpuData()[5]);
 }
 
 test "backward matmul — dL/dA = dL/dC @ Bᵀ, dL/dB = Aᵀ @ dL/dC" {
@@ -1163,24 +1163,24 @@ test "backward matmul — dL/dA = dL/dC @ Bᵀ, dL/dB = Aᵀ @ dL/dC" {
     defer B.deinit(allocator);
 
     // Fill with small values
-    A.data[0] = 1.0;
-    A.data[1] = 2.0;
-    A.data[2] = 3.0;
-    A.data[3] = 4.0;
-    A.data[4] = 5.0;
-    A.data[5] = 6.0;
-    B.data[0] = 0.1;
-    B.data[1] = 0.2;
-    B.data[2] = 0.3;
-    B.data[3] = 0.4;
-    B.data[4] = 0.5;
-    B.data[5] = 0.6;
-    B.data[6] = 0.7;
-    B.data[7] = 0.8;
-    B.data[8] = 0.9;
-    B.data[9] = 1.0;
-    B.data[10] = 1.1;
-    B.data[11] = 1.2;
+    A.cpuData()[0] = 1.0;
+    A.cpuData()[1] = 2.0;
+    A.cpuData()[2] = 3.0;
+    A.cpuData()[3] = 4.0;
+    A.cpuData()[4] = 5.0;
+    A.cpuData()[5] = 6.0;
+    B.cpuData()[0] = 0.1;
+    B.cpuData()[1] = 0.2;
+    B.cpuData()[2] = 0.3;
+    B.cpuData()[3] = 0.4;
+    B.cpuData()[4] = 0.5;
+    B.cpuData()[5] = 0.6;
+    B.cpuData()[6] = 0.7;
+    B.cpuData()[7] = 0.8;
+    B.cpuData()[8] = 0.9;
+    B.cpuData()[9] = 1.0;
+    B.cpuData()[10] = 1.1;
+    B.cpuData()[11] = 1.2;
 
     var grad_out = try Tensor.init(allocator, Shape.init2D(2, 4));
     defer grad_out.deinit(allocator);
@@ -1219,9 +1219,9 @@ test "backward exp — dL/da = dL/dc * exp(a)" {
     const allocator = std.testing.allocator;
     var a = try Tensor.init(allocator, Shape.init1D(3));
     defer a.deinit(allocator);
-    a.data[0] = 0.0; // exp(0) = 1
-    a.data[1] = 1.0; // exp(1) = e
-    a.data[2] = 2.0; // exp(2) = e²
+    a.cpuData()[0] = 0.0; // exp(0) = 1
+    a.cpuData()[1] = 1.0; // exp(1) = e
+    a.cpuData()[2] = 2.0; // exp(2) = e²
 
     var grad_out = try Tensor.init(allocator, Shape.init1D(3));
     defer grad_out.deinit(allocator);
@@ -1242,72 +1242,72 @@ test "backward exp — dL/da = dL/dc * exp(a)" {
         allocator.destroy(da);
     }
 
-    try std.testing.expect(std.math.approxEqAbs(f32, da.data[0], 1.0, 1e-5));
-    try std.testing.expect(std.math.approxEqAbs(f32, da.data[1], std.math.e, 1e-4));
-    try std.testing.expect(std.math.approxEqAbs(f32, da.data[2], std.math.e * std.math.e, 1e-3));
+    try std.testing.expect(std.math.approxEqAbs(f32, da.cpuData()[0], 1.0, 1e-5));
+    try std.testing.expect(std.math.approxEqAbs(f32, da.cpuData()[1], std.math.e, 1e-4));
+    try std.testing.expect(std.math.approxEqAbs(f32, da.cpuData()[2], std.math.e * std.math.e, 1e-3));
 }
 
 test "accumulateGrad — dst += src" {
     const allocator = std.testing.allocator;
     var dst = try Tensor.init(allocator, Shape.init1D(3));
     defer dst.deinit(allocator);
-    dst.data[0] = 1.0;
-    dst.data[1] = 2.0;
-    dst.data[2] = 3.0;
+    dst.cpuData()[0] = 1.0;
+    dst.cpuData()[1] = 2.0;
+    dst.cpuData()[2] = 3.0;
 
     var src = try Tensor.init(allocator, Shape.init1D(3));
     defer src.deinit(allocator);
-    src.data[0] = 10.0;
-    src.data[1] = 20.0;
-    src.data[2] = 30.0;
+    src.cpuData()[0] = 10.0;
+    src.cpuData()[1] = 20.0;
+    src.cpuData()[2] = 30.0;
 
     accumulateGrad(&dst, &src);
 
-    try std.testing.expectEqual(@as(f32, 11.0), dst.data[0]);
-    try std.testing.expectEqual(@as(f32, 22.0), dst.data[1]);
-    try std.testing.expectEqual(@as(f32, 33.0), dst.data[2]);
+    try std.testing.expectEqual(@as(f32, 11.0), dst.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 22.0), dst.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 33.0), dst.cpuData()[2]);
 }
 
 test "broadcastTo — (1,3) → (2,3)" {
     const allocator = std.testing.allocator;
     var t = try Tensor.init(allocator, Shape.init2D(1, 3));
     defer t.deinit(allocator);
-    t.data[0] = 1.0;
-    t.data[1] = 2.0;
-    t.data[2] = 3.0;
+    t.cpuData()[0] = 1.0;
+    t.cpuData()[1] = 2.0;
+    t.cpuData()[2] = 3.0;
 
     var result = try broadcastTo(allocator, t, Shape.init2D(2, 3));
     defer result.deinit(allocator);
 
     // Row 0: [1, 2, 3]
-    try std.testing.expectEqual(@as(f32, 1.0), result.data[0]);
-    try std.testing.expectEqual(@as(f32, 2.0), result.data[1]);
-    try std.testing.expectEqual(@as(f32, 3.0), result.data[2]);
+    try std.testing.expectEqual(@as(f32, 1.0), result.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 2.0), result.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 3.0), result.cpuData()[2]);
     // Row 1: [1, 2, 3] (repeated)
-    try std.testing.expectEqual(@as(f32, 1.0), result.data[3]);
-    try std.testing.expectEqual(@as(f32, 2.0), result.data[4]);
-    try std.testing.expectEqual(@as(f32, 3.0), result.data[5]);
+    try std.testing.expectEqual(@as(f32, 1.0), result.cpuData()[3]);
+    try std.testing.expectEqual(@as(f32, 2.0), result.cpuData()[4]);
+    try std.testing.expectEqual(@as(f32, 3.0), result.cpuData()[5]);
 }
 
 test "broadcastTo — (3,) → (2,3)" {
     const allocator = std.testing.allocator;
     var t = try Tensor.init(allocator, Shape.init1D(3));
     defer t.deinit(allocator);
-    t.data[0] = 4.0;
-    t.data[1] = 5.0;
-    t.data[2] = 6.0;
+    t.cpuData()[0] = 4.0;
+    t.cpuData()[1] = 5.0;
+    t.cpuData()[2] = 6.0;
 
     var result = try broadcastTo(allocator, t, Shape.init2D(2, 3));
     defer result.deinit(allocator);
 
     // Row 0: [4, 5, 6]
-    try std.testing.expectEqual(@as(f32, 4.0), result.data[0]);
-    try std.testing.expectEqual(@as(f32, 5.0), result.data[1]);
-    try std.testing.expectEqual(@as(f32, 6.0), result.data[2]);
+    try std.testing.expectEqual(@as(f32, 4.0), result.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 5.0), result.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 6.0), result.cpuData()[2]);
     // Row 1: [4, 5, 6]
-    try std.testing.expectEqual(@as(f32, 4.0), result.data[3]);
-    try std.testing.expectEqual(@as(f32, 5.0), result.data[4]);
-    try std.testing.expectEqual(@as(f32, 6.0), result.data[5]);
+    try std.testing.expectEqual(@as(f32, 4.0), result.cpuData()[3]);
+    try std.testing.expectEqual(@as(f32, 5.0), result.cpuData()[4]);
+    try std.testing.expectEqual(@as(f32, 6.0), result.cpuData()[5]);
 }
 
 test "broadcastTo — same shape returns owned copy" {
@@ -1318,8 +1318,8 @@ test "broadcastTo — same shape returns owned copy" {
     var result = try broadcastTo(allocator, t, Shape.init2D(2, 3));
     defer result.deinit(allocator);
     try std.testing.expect(result.owned);
-    try std.testing.expect(result.data.ptr != t.data.ptr);
-    try std.testing.expectEqual(@as(f32, 0.0), result.data[0]);
+    try std.testing.expect(result.cpuData().ptr != t.cpuData().ptr);
+    try std.testing.expectEqual(@as(f32, 0.0), result.cpuData()[0]);
 }
 
 test "broadcastTo — non-contiguous (transposed) view same shape" {
@@ -1331,12 +1331,12 @@ test "broadcastTo — non-contiguous (transposed) view same shape" {
     var t = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer t.deinit(allocator);
     // t = [[1, 2, 3], [4, 5, 6]]
-    t.data[0] = 1.0;
-    t.data[1] = 2.0;
-    t.data[2] = 3.0;
-    t.data[3] = 4.0;
-    t.data[4] = 5.0;
-    t.data[5] = 6.0;
+    t.cpuData()[0] = 1.0;
+    t.cpuData()[1] = 2.0;
+    t.cpuData()[2] = 3.0;
+    t.cpuData()[3] = 4.0;
+    t.cpuData()[4] = 5.0;
+    t.cpuData()[5] = 6.0;
 
     // transpose2d returns a non-contiguous VIEW: shape (3,2), strides [1,3]
     // Logically: [[1,4], [2,5], [3,6]]
@@ -1348,12 +1348,12 @@ test "broadcastTo — non-contiguous (transposed) view same shape" {
 
     // result must reflect the transposed (logical) ordering, not the
     // raw memory layout of the original tensor.
-    try std.testing.expectEqual(@as(f32, 1.0), result.data[0]);
-    try std.testing.expectEqual(@as(f32, 4.0), result.data[1]);
-    try std.testing.expectEqual(@as(f32, 2.0), result.data[2]);
-    try std.testing.expectEqual(@as(f32, 5.0), result.data[3]);
-    try std.testing.expectEqual(@as(f32, 3.0), result.data[4]);
-    try std.testing.expectEqual(@as(f32, 6.0), result.data[5]);
+    try std.testing.expectEqual(@as(f32, 1.0), result.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 4.0), result.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 2.0), result.cpuData()[2]);
+    try std.testing.expectEqual(@as(f32, 5.0), result.cpuData()[3]);
+    try std.testing.expectEqual(@as(f32, 3.0), result.cpuData()[4]);
+    try std.testing.expectEqual(@as(f32, 6.0), result.cpuData()[5]);
 }
 
 test "backward transpose2d — correct gradient through non-contiguous view" {
@@ -1367,23 +1367,23 @@ test "backward transpose2d — correct gradient through non-contiguous view" {
     var w = try Tensor.init(allocator, Shape.init2D(3, 2));
     defer w.deinit(allocator);
     // w = [[1, 2], [3, 4], [5, 6]]  shape (3, 2)
-    w.data[0] = 1.0;
-    w.data[1] = 2.0;
-    w.data[2] = 3.0;
-    w.data[3] = 4.0;
-    w.data[4] = 5.0;
-    w.data[5] = 6.0;
+    w.cpuData()[0] = 1.0;
+    w.cpuData()[1] = 2.0;
+    w.cpuData()[2] = 3.0;
+    w.cpuData()[3] = 4.0;
+    w.cpuData()[4] = 5.0;
+    w.cpuData()[5] = 6.0;
 
     // Upstream gradient for w^T has shape (2, 3)
     var grad_wt = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer grad_wt.deinit(allocator);
     // grad_wt = [[10, 20, 30], [40, 50, 60]]
-    grad_wt.data[0] = 10.0;
-    grad_wt.data[1] = 20.0;
-    grad_wt.data[2] = 30.0;
-    grad_wt.data[3] = 40.0;
-    grad_wt.data[4] = 50.0;
-    grad_wt.data[5] = 60.0;
+    grad_wt.cpuData()[0] = 10.0;
+    grad_wt.cpuData()[1] = 20.0;
+    grad_wt.cpuData()[2] = 30.0;
+    grad_wt.cpuData()[3] = 40.0;
+    grad_wt.cpuData()[4] = 50.0;
+    grad_wt.cpuData()[5] = 60.0;
 
     const node = Node{
         .id = 0,
@@ -1404,10 +1404,10 @@ test "backward transpose2d — correct gradient through non-contiguous view" {
     // da = transpose(grad_wt) = [[10, 40], [20, 50], [30, 60]]
     try std.testing.expectEqual(@as(usize, 3), da.shape.dims[0]);
     try std.testing.expectEqual(@as(usize, 2), da.shape.dims[1]);
-    try std.testing.expectEqual(@as(f32, 10.0), da.data[0]);
-    try std.testing.expectEqual(@as(f32, 40.0), da.data[1]);
-    try std.testing.expectEqual(@as(f32, 20.0), da.data[2]);
-    try std.testing.expectEqual(@as(f32, 50.0), da.data[3]);
-    try std.testing.expectEqual(@as(f32, 30.0), da.data[4]);
-    try std.testing.expectEqual(@as(f32, 60.0), da.data[5]);
+    try std.testing.expectEqual(@as(f32, 10.0), da.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 40.0), da.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 20.0), da.cpuData()[2]);
+    try std.testing.expectEqual(@as(f32, 50.0), da.cpuData()[3]);
+    try std.testing.expectEqual(@as(f32, 30.0), da.cpuData()[4]);
+    try std.testing.expectEqual(@as(f32, 60.0), da.cpuData()[5]);
 }

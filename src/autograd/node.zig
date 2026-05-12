@@ -359,7 +359,7 @@ test "Node construction — unary op with saved tensor" {
     // Verify the saved data snapshot shares the same data buffer
     switch (node.saved) {
         .tensor_ref => |t| {
-            try std.testing.expect(t.data.ptr == x.data.ptr);
+            try std.testing.expect(t.cpuData().ptr == x.cpuData().ptr);
         },
         else => unreachable,
     }

@@ -84,9 +84,9 @@ fn tensorToHost(allocator: std.mem.Allocator, t: Tensor) LabError![]f32 {
     const n = totalElements(t.shape);
     return switch (t.storage) {
         .cpu => blk: {
-            if (t.data.len < n) return error.ShapeMismatch;
+            if (t.cpuData().len < n) return error.ShapeMismatch;
             const out = allocator.alloc(f32, n) catch return error.OutOfMemory;
-            @memcpy(out, t.data[0..n]);
+            @memcpy(out, t.cpuData()[0..n]);
             break :blk out;
         },
         .cuda => |buf| blk: {
@@ -184,11 +184,11 @@ test "dump/load round-trip preserves 1D tensor values" {
 
     var a = try Tensor.init(alloc, Shape.init1D(5));
     defer a.deinit(alloc);
-    a.data[0] = 1.5;
-    a.data[1] = -2.75;
-    a.data[2] = 0.0;
-    a.data[3] = 3.14159;
-    a.data[4] = 100.0;
+    a.cpuData()[0] = 1.5;
+    a.cpuData()[1] = -2.75;
+    a.cpuData()[2] = 0.0;
+    a.cpuData()[3] = 3.14159;
+    a.cpuData()[4] = 100.0;
 
     try dump(alloc, io, path, a);
 
@@ -198,7 +198,7 @@ test "dump/load round-trip preserves 1D tensor values" {
     try std.testing.expectEqual(@as(usize, 5), b.shape.dims[0]);
     try std.testing.expectEqual(@as(u2, 0), b.shape.rank); // rank field encodes ndim-1
     for (0..5) |i| {
-        try std.testing.expectEqual(a.data[i], b.data[i]);
+        try std.testing.expectEqual(a.cpuData()[i], b.cpuData()[i]);
     }
 }
 
@@ -212,7 +212,7 @@ test "dump/load round-trip preserves 3D tensor shape and values" {
 
     var a = try Tensor.init(alloc, Shape.init3D(2, 3, 4));
     defer a.deinit(alloc);
-    for (0..24) |i| a.data[i] = @floatFromInt(i);
+    for (0..24) |i| a.cpuData()[i] = @floatFromInt(i);
 
     try dump(alloc, io, path, a);
 
@@ -223,7 +223,7 @@ test "dump/load round-trip preserves 3D tensor shape and values" {
     try std.testing.expectEqual(@as(usize, 3), b.shape.dims[1]);
     try std.testing.expectEqual(@as(usize, 4), b.shape.dims[2]);
     for (0..24) |i| {
-        try std.testing.expectEqual(a.data[i], b.data[i]);
+        try std.testing.expectEqual(a.cpuData()[i], b.cpuData()[i]);
     }
 }
 
@@ -237,7 +237,7 @@ test "dump/load round-trip preserves 4D tensor" {
 
     var a = try Tensor.init(alloc, Shape.init4D(1, 2, 3, 4));
     defer a.deinit(alloc);
-    for (0..24) |i| a.data[i] = @as(f32, @floatFromInt(i)) * 0.5;
+    for (0..24) |i| a.cpuData()[i] = @as(f32, @floatFromInt(i)) * 0.5;
 
     try dump(alloc, io, path, a);
 
@@ -248,5 +248,5 @@ test "dump/load round-trip preserves 4D tensor" {
     try std.testing.expectEqual(@as(usize, 2), b.shape.dims[1]);
     try std.testing.expectEqual(@as(usize, 3), b.shape.dims[2]);
     try std.testing.expectEqual(@as(usize, 4), b.shape.dims[3]);
-    for (0..24) |i| try std.testing.expectEqual(a.data[i], b.data[i]);
+    for (0..24) |i| try std.testing.expectEqual(a.cpuData()[i], b.cpuData()[i]);
 }

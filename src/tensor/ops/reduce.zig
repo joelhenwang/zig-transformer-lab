@@ -106,9 +106,9 @@ pub fn sum(allocator: std.mem.Allocator, tensor: Tensor, axis: u2, tape: ?*Tape)
             for (0..ndim) |d| {
                 in_i += coords[d] * tensor.strides.values[d];
             }
-            acc += tensor.data[in_i];
+            acc += tensor.cpuData()[in_i];
         }
-        out.data[out_i] = acc;
+        out.cpuData()[out_i] = acc;
     }
 
     if (tape) |t| {
@@ -169,7 +169,7 @@ pub fn mean(allocator: std.mem.Allocator, tensor: Tensor, axis: u2, tape: ?*Tape
 
     var out = try sum(allocator, tensor, axis, null);
     const axis_size = @as(f32, @floatFromInt(tensor.shape.dims[axis]));
-    for (out.data) |*v| {
+    for (out.cpuData()) |*v| {
         v.* /= axis_size;
     }
 
@@ -218,9 +218,9 @@ pub fn max(allocator: std.mem.Allocator, tensor: Tensor, axis: u2) !Tensor {
             for (0..ndim) |d| {
                 in_i += coords[d] * tensor.strides.values[d];
             }
-            if (tensor.data[in_i] > max_val) max_val = tensor.data[in_i];
+            if (tensor.cpuData()[in_i] > max_val) max_val = tensor.cpuData()[in_i];
         }
-        out.data[out_i] = max_val;
+        out.cpuData()[out_i] = max_val;
     }
     return out;
 }
@@ -250,8 +250,8 @@ pub fn sumAll(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) !Tenso
     const out_shape = Shape.init1D(1);
     var out = try Tensor.init(allocator, out_shape);
     var acc: f32 = 0.0;
-    for (tensor.data) |v| acc += v;
-    out.data[0] = acc;
+    for (tensor.cpuData()) |v| acc += v;
+    out.cpuData()[0] = acc;
 
     if (tape) |t| {
         if (tensor.requires_grad) {
@@ -318,7 +318,7 @@ pub fn sumToShape(allocator: std.mem.Allocator, grad: Tensor, target: Shape) Lab
     if (shape_equals(grad.shape, target)) {
         if (isContiguous(grad.shape, grad.strides)) {
             const out = try Tensor.init(allocator, target);
-            @memcpy(out.data, grad.data[0..out.data.len]);
+            @memcpy(out.cpuData(), grad.cpuData()[0..out.cpuData().len]);
             return out;
         } else {
             return ops_shape.reshapeTracked(allocator, grad, target, null);
@@ -391,92 +391,92 @@ test "sum along axis 0 of (2,3)" {
     defer t.deinit(allocator);
     // [[1, 2, 3],
     //  [4, 5, 6]]
-    t.data[0] = 1;
-    t.data[1] = 2;
-    t.data[2] = 3;
-    t.data[3] = 4;
-    t.data[4] = 5;
-    t.data[5] = 6;
+    t.cpuData()[0] = 1;
+    t.cpuData()[1] = 2;
+    t.cpuData()[2] = 3;
+    t.cpuData()[3] = 4;
+    t.cpuData()[4] = 5;
+    t.cpuData()[5] = 6;
 
     var out = try sum(allocator, t, 0, null);
     defer out.deinit(allocator);
     // axis 0: sum each column -> [1+4, 2+5, 3+6] = [5, 7, 9]
-    try std.testing.expectEqual(@as(f32, 5.0), out.data[0]);
-    try std.testing.expectEqual(@as(f32, 7.0), out.data[1]);
-    try std.testing.expectEqual(@as(f32, 9.0), out.data[2]);
+    try std.testing.expectEqual(@as(f32, 5.0), out.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 7.0), out.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 9.0), out.cpuData()[2]);
 }
 
 test "sum along axis 1 of (2,3)" {
     const allocator = std.testing.allocator;
     var t = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer t.deinit(allocator);
-    t.data[0] = 1;
-    t.data[1] = 2;
-    t.data[2] = 3;
-    t.data[3] = 4;
-    t.data[4] = 5;
-    t.data[5] = 6;
+    t.cpuData()[0] = 1;
+    t.cpuData()[1] = 2;
+    t.cpuData()[2] = 3;
+    t.cpuData()[3] = 4;
+    t.cpuData()[4] = 5;
+    t.cpuData()[5] = 6;
 
     var out = try sum(allocator, t, 1, null);
     defer out.deinit(allocator);
     // axis 1: sum each row -> [1+2+3, 4+5+6] = [6, 15]
-    try std.testing.expectEqual(@as(f32, 6.0), out.data[0]);
-    try std.testing.expectEqual(@as(f32, 15.0), out.data[1]);
+    try std.testing.expectEqual(@as(f32, 6.0), out.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 15.0), out.cpuData()[1]);
 }
 
 test "mean along axis 0" {
     const allocator = std.testing.allocator;
     var t = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer t.deinit(allocator);
-    t.data[0] = 2;
-    t.data[1] = 4;
-    t.data[2] = 6;
-    t.data[3] = 8;
-    t.data[4] = 10;
-    t.data[5] = 12;
+    t.cpuData()[0] = 2;
+    t.cpuData()[1] = 4;
+    t.cpuData()[2] = 6;
+    t.cpuData()[3] = 8;
+    t.cpuData()[4] = 10;
+    t.cpuData()[5] = 12;
 
     var out = try mean(allocator, t, 0, null);
     defer out.deinit(allocator);
     // mean of each column: [(2+8)/2, (4+10)/2, (6+12)/2] = [5, 7, 9]
-    try std.testing.expectEqual(@as(f32, 5.0), out.data[0]);
-    try std.testing.expectEqual(@as(f32, 7.0), out.data[1]);
-    try std.testing.expectEqual(@as(f32, 9.0), out.data[2]);
+    try std.testing.expectEqual(@as(f32, 5.0), out.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 7.0), out.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 9.0), out.cpuData()[2]);
 }
 
 test "max along axis 0" {
     const allocator = std.testing.allocator;
     var t = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer t.deinit(allocator);
-    t.data[0] = 1;
-    t.data[1] = 5;
-    t.data[2] = 3;
-    t.data[3] = 4;
-    t.data[4] = 2;
-    t.data[5] = 6;
+    t.cpuData()[0] = 1;
+    t.cpuData()[1] = 5;
+    t.cpuData()[2] = 3;
+    t.cpuData()[3] = 4;
+    t.cpuData()[4] = 2;
+    t.cpuData()[5] = 6;
 
     var out = try max(allocator, t, 0);
     defer out.deinit(allocator);
     // max of each column: [max(1,4), max(5,2), max(3,6)] = [4, 5, 6]
-    try std.testing.expectEqual(@as(f32, 4.0), out.data[0]);
-    try std.testing.expectEqual(@as(f32, 5.0), out.data[1]);
-    try std.testing.expectEqual(@as(f32, 6.0), out.data[2]);
+    try std.testing.expectEqual(@as(f32, 4.0), out.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 5.0), out.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 6.0), out.cpuData()[2]);
 }
 
 test "sumAll reduces to scalar" {
     const allocator = std.testing.allocator;
     var t = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer t.deinit(allocator);
-    t.data[0] = 1;
-    t.data[1] = 2;
-    t.data[2] = 3;
-    t.data[3] = 4;
-    t.data[4] = 5;
-    t.data[5] = 6;
+    t.cpuData()[0] = 1;
+    t.cpuData()[1] = 2;
+    t.cpuData()[2] = 3;
+    t.cpuData()[3] = 4;
+    t.cpuData()[4] = 5;
+    t.cpuData()[5] = 6;
 
     var out = try sumAll(allocator, t, null);
     defer out.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), out.shape.dims[0]);
-    try std.testing.expectEqual(@as(f32, 21.0), out.data[0]);
+    try std.testing.expectEqual(@as(f32, 21.0), out.cpuData()[0]);
 }
 
 test "reduce rejects invalid axis" {
@@ -490,15 +490,15 @@ test "sumToShape — same shape returns owned copy" {
     const allocator = std.testing.allocator;
     var t = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer t.deinit(allocator);
-    t.data[0] = 1;
-    t.data[1] = 2;
+    t.cpuData()[0] = 1;
+    t.cpuData()[1] = 2;
 
     var result = try sumToShape(allocator, t, Shape.init2D(2, 3));
     defer result.deinit(allocator);
     try std.testing.expect(result.owned);
-    try std.testing.expect(result.data.ptr != t.data.ptr);
-    try std.testing.expectEqual(@as(f32, 1.0), result.data[0]);
-    try std.testing.expectEqual(@as(f32, 2.0), result.data[1]);
+    try std.testing.expect(result.cpuData().ptr != t.cpuData().ptr);
+    try std.testing.expectEqual(@as(f32, 1.0), result.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 2.0), result.cpuData()[1]);
 }
 
 test "sumToShape — sum broadcasted axis 0" {
@@ -509,19 +509,19 @@ test "sumToShape — sum broadcasted axis 0" {
     defer grad.deinit(allocator);
     // [[1, 2, 3],
     //  [4, 5, 6]]
-    grad.data[0] = 1;
-    grad.data[1] = 2;
-    grad.data[2] = 3;
-    grad.data[3] = 4;
-    grad.data[4] = 5;
-    grad.data[5] = 6;
+    grad.cpuData()[0] = 1;
+    grad.cpuData()[1] = 2;
+    grad.cpuData()[2] = 3;
+    grad.cpuData()[3] = 4;
+    grad.cpuData()[4] = 5;
+    grad.cpuData()[5] = 6;
 
     var result = try sumToShape(allocator, grad, Shape.init2D(1, 3));
     defer result.deinit(allocator);
     // sum axis 0: [1+4, 2+5, 3+6] = [5, 7, 9]
-    try std.testing.expectEqual(@as(f32, 5.0), result.data[0]);
-    try std.testing.expectEqual(@as(f32, 7.0), result.data[1]);
-    try std.testing.expectEqual(@as(f32, 9.0), result.data[2]);
+    try std.testing.expectEqual(@as(f32, 5.0), result.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 7.0), result.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 9.0), result.cpuData()[2]);
     try std.testing.expectEqual(@as(usize, 1), result.shape.dims[0]);
     try std.testing.expectEqual(@as(usize, 3), result.shape.dims[1]);
 }
@@ -531,37 +531,37 @@ test "sumToShape — sum broadcasted axis 1" {
     // grad shape (2,3), target shape (2,1)
     var grad = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer grad.deinit(allocator);
-    grad.data[0] = 1;
-    grad.data[1] = 2;
-    grad.data[2] = 3;
-    grad.data[3] = 4;
-    grad.data[4] = 5;
-    grad.data[5] = 6;
+    grad.cpuData()[0] = 1;
+    grad.cpuData()[1] = 2;
+    grad.cpuData()[2] = 3;
+    grad.cpuData()[3] = 4;
+    grad.cpuData()[4] = 5;
+    grad.cpuData()[5] = 6;
 
     var result = try sumToShape(allocator, grad, Shape.init2D(2, 1));
     defer result.deinit(allocator);
     // sum axis 1: [1+2+3, 4+5+6] = [6, 15]
-    try std.testing.expectEqual(@as(f32, 6.0), result.data[0]);
-    try std.testing.expectEqual(@as(f32, 15.0), result.data[1]);
+    try std.testing.expectEqual(@as(f32, 6.0), result.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 15.0), result.cpuData()[1]);
 }
 
 test "sumToShape — reduce rank (2,3) → (3,)" {
     const allocator = std.testing.allocator;
     var grad = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer grad.deinit(allocator);
-    grad.data[0] = 1;
-    grad.data[1] = 2;
-    grad.data[2] = 3;
-    grad.data[3] = 4;
-    grad.data[4] = 5;
-    grad.data[5] = 6;
+    grad.cpuData()[0] = 1;
+    grad.cpuData()[1] = 2;
+    grad.cpuData()[2] = 3;
+    grad.cpuData()[3] = 4;
+    grad.cpuData()[4] = 5;
+    grad.cpuData()[5] = 6;
 
     var result = try sumToShape(allocator, grad, Shape.init1D(3));
     defer result.deinit(allocator);
     // sum the leading axis (axis 0), then reshape to (3,)
-    try std.testing.expectEqual(@as(f32, 5.0), result.data[0]);
-    try std.testing.expectEqual(@as(f32, 7.0), result.data[1]);
-    try std.testing.expectEqual(@as(f32, 9.0), result.data[2]);
+    try std.testing.expectEqual(@as(f32, 5.0), result.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 7.0), result.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 9.0), result.cpuData()[2]);
 }
 
 test "sumToShape — transposed (non-contiguous) view" {
@@ -574,12 +574,12 @@ test "sumToShape — transposed (non-contiguous) view" {
     defer t.deinit(allocator);
     // t = [[1, 2, 3],
     //      [4, 5, 6]]
-    t.data[0] = 1;
-    t.data[1] = 2;
-    t.data[2] = 3;
-    t.data[3] = 4;
-    t.data[4] = 5;
-    t.data[5] = 6;
+    t.cpuData()[0] = 1;
+    t.cpuData()[1] = 2;
+    t.cpuData()[2] = 3;
+    t.cpuData()[3] = 4;
+    t.cpuData()[4] = 5;
+    t.cpuData()[5] = 6;
 
     // transpose2d returns a non-contiguous VIEW with strides [1, 3]
     // and shape (3, 2). Logically: [[1, 4], [2, 5], [3, 6]]
@@ -597,10 +597,10 @@ test "sumToShape — transposed (non-contiguous) view" {
     // result[1,1] = t_view[1,1] = t[1,1] = 5
     // result[2,0] = t_view[2,0] = t[0,2] = 3
     // result[2,1] = t_view[2,1] = t[1,2] = 6
-    try std.testing.expectEqual(@as(f32, 1.0), result.data[0]);
-    try std.testing.expectEqual(@as(f32, 4.0), result.data[1]);
-    try std.testing.expectEqual(@as(f32, 2.0), result.data[2]);
-    try std.testing.expectEqual(@as(f32, 5.0), result.data[3]);
-    try std.testing.expectEqual(@as(f32, 3.0), result.data[4]);
-    try std.testing.expectEqual(@as(f32, 6.0), result.data[5]);
+    try std.testing.expectEqual(@as(f32, 1.0), result.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 4.0), result.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 2.0), result.cpuData()[2]);
+    try std.testing.expectEqual(@as(f32, 5.0), result.cpuData()[3]);
+    try std.testing.expectEqual(@as(f32, 3.0), result.cpuData()[4]);
+    try std.testing.expectEqual(@as(f32, 6.0), result.cpuData()[5]);
 }

@@ -229,7 +229,7 @@ test "Linear forward — 2D input" {
 
     // Check all output values are finite (no NaN/Inf from init)
     for (0..6) |i| {
-        try std.testing.expect(std.math.isFinite(output.data[i]));
+        try std.testing.expect(std.math.isFinite(output.cpuData()[i]));
     }
 }
 

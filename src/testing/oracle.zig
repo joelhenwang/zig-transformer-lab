@@ -136,7 +136,7 @@ pub fn loadTensor(
     const payload = bytes[ZTLT_HEADER_SIZE..expected_bytes];
     // On every target we support the payload layout is identical to
     // f32 row-major little-endian, so we can memcpy directly.
-    @memcpy(std.mem.sliceAsBytes(t.data), payload);
+    @memcpy(std.mem.sliceAsBytes(t.cpuData()), payload);
 
     return t;
 }
@@ -153,11 +153,11 @@ pub const CloseOptions = struct {
 /// tensors, and all our op outputs are contiguous).
 pub fn maxAbsDiff(a: Tensor, b: Tensor) LabError!f32 {
     if (totalElements(a.shape) != totalElements(b.shape)) return error.ShapeMismatch;
-    const n = a.data.len;
-    if (b.data.len != n) return error.ShapeMismatch;
+    const n = a.cpuData().len;
+    if (b.cpuData().len != n) return error.ShapeMismatch;
     var worst: f32 = 0.0;
     for (0..n) |i| {
-        const d = @abs(a.data[i] - b.data[i]);
+        const d = @abs(a.cpuData()[i] - b.cpuData()[i]);
         if (d > worst) worst = d;
     }
     return worst;
@@ -175,12 +175,12 @@ pub fn maxAbsDiff(a: Tensor, b: Tensor) LabError!f32 {
 /// is the intuitive notion.
 pub fn maxRelErr(a: Tensor, b: Tensor, denom_floor: f32) LabError!f32 {
     if (totalElements(a.shape) != totalElements(b.shape)) return error.ShapeMismatch;
-    const n = a.data.len;
-    if (b.data.len != n) return error.ShapeMismatch;
+    const n = a.cpuData().len;
+    if (b.cpuData().len != n) return error.ShapeMismatch;
     var worst: f32 = 0.0;
     for (0..n) |i| {
-        const d = @abs(a.data[i] - b.data[i]);
-        const denom = @max(@abs(b.data[i]), denom_floor);
+        const d = @abs(a.cpuData()[i] - b.cpuData()[i]);
+        const denom = @max(@abs(b.cpuData()[i]), denom_floor);
         const r = d / denom;
         if (r > worst) worst = r;
     }
@@ -246,8 +246,8 @@ test "maxAbsDiff and maxRelErr on identical tensors are zero" {
     defer a.deinit(alloc);
     var b = try Tensor.init(alloc, Shape.init1D(3));
     defer b.deinit(alloc);
-    a.data[0] = 1.0; a.data[1] = 2.0; a.data[2] = 3.0;
-    b.data[0] = 1.0; b.data[1] = 2.0; b.data[2] = 3.0;
+    a.cpuData()[0] = 1.0; a.cpuData()[1] = 2.0; a.cpuData()[2] = 3.0;
+    b.cpuData()[0] = 1.0; b.cpuData()[1] = 2.0; b.cpuData()[2] = 3.0;
     try std.testing.expectEqual(@as(f32, 0.0), try maxAbsDiff(a, b));
     try std.testing.expectEqual(@as(f32, 0.0), try maxRelErr(a, b, 1e-8));
 }
@@ -258,8 +258,8 @@ test "expectClose passes on small differences within tolerance" {
     defer a.deinit(alloc);
     var b = try Tensor.init(alloc, Shape.init1D(2));
     defer b.deinit(alloc);
-    a.data[0] = 1.00001; a.data[1] = 2.00001;
-    b.data[0] = 1.00000; b.data[1] = 2.00000;
+    a.cpuData()[0] = 1.00001; a.cpuData()[1] = 2.00001;
+    b.cpuData()[0] = 1.00000; b.cpuData()[1] = 2.00000;
     try expectClose(a, b, .{ .rel_tol = 1e-4, .abs_tol = 1e-4 });
 }
 
@@ -269,8 +269,8 @@ test "expectClose fails on large differences" {
     defer a.deinit(alloc);
     var b = try Tensor.init(alloc, Shape.init1D(1));
     defer b.deinit(alloc);
-    a.data[0] = 1.0;
-    b.data[0] = 2.0;
+    a.cpuData()[0] = 1.0;
+    b.cpuData()[0] = 2.0;
     try std.testing.expectError(
         error.NumericalError,
         expectClose(a, b, .{ .rel_tol = 1e-4, .abs_tol = 1e-4 }),

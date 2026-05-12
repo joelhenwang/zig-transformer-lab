@@ -154,7 +154,7 @@ pub fn add(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Te
     for (0..n) |i| {
         const a_idx = broadcastIndex(i, out_shape, a.shape, a.strides);
         const b_idx = broadcastIndex(i, out_shape, b.shape, b.strides);
-        out.data[i] = a.data[a_idx] + b.data[b_idx];
+        out.cpuData()[i] = a.cpuData()[a_idx] + b.cpuData()[b_idx];
     }
     try recordBinaryOp(tape, &out, &a, &b, .add);
     return out;
@@ -173,7 +173,7 @@ pub fn sub(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Te
     for (0..n) |i| {
         const a_idx = broadcastIndex(i, out_shape, a.shape, a.strides);
         const b_idx = broadcastIndex(i, out_shape, b.shape, b.strides);
-        out.data[i] = a.data[a_idx] - b.data[b_idx];
+        out.cpuData()[i] = a.cpuData()[a_idx] - b.cpuData()[b_idx];
     }
     try recordBinaryOp(tape, &out, &a, &b, .sub);
     return out;
@@ -192,7 +192,7 @@ pub fn mul(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Te
     for (0..n) |i| {
         const a_idx = broadcastIndex(i, out_shape, a.shape, a.strides);
         const b_idx = broadcastIndex(i, out_shape, b.shape, b.strides);
-        out.data[i] = a.data[a_idx] * b.data[b_idx];
+        out.cpuData()[i] = a.cpuData()[a_idx] * b.cpuData()[b_idx];
     }
     try recordBinaryOp(tape, &out, &a, &b, .mul);
     return out;
@@ -212,7 +212,7 @@ pub fn div(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) !Te
     for (0..n) |i| {
         const a_idx = broadcastIndex(i, out_shape, a.shape, a.strides);
         const b_idx = broadcastIndex(i, out_shape, b.shape, b.strides);
-        out.data[i] = a.data[a_idx] / b.data[b_idx];
+        out.cpuData()[i] = a.cpuData()[a_idx] / b.cpuData()[b_idx];
     }
     try recordBinaryOp(tape, &out, &a, &b, .div);
     return out;
@@ -246,7 +246,7 @@ pub fn addScalar(allocator: std.mem.Allocator, a: Tensor, scalar: f32, tape: ?*T
     const n = totalElements(out_shape);
     for (0..n) |i| {
         const a_off = logicalOffsetFromLinear(a.shape, a.strides, i);
-        out.data[i] = a.data[a_off] + scalar;
+        out.cpuData()[i] = a.cpuData()[a_off] + scalar;
     }
     if (tape) |t| {
         if (a.requires_grad) {
@@ -289,7 +289,7 @@ pub fn mulScalar(allocator: std.mem.Allocator, a: Tensor, scalar: f32, tape: ?*T
     const n = totalElements(out_shape);
     for (0..n) |i| {
         const a_off = logicalOffsetFromLinear(a.shape, a.strides, i);
-        out.data[i] = a.data[a_off] * scalar;
+        out.cpuData()[i] = a.cpuData()[a_off] * scalar;
     }
     if (tape) |t| {
         if (a.requires_grad) {
@@ -319,7 +319,7 @@ pub fn addInPlace(a: *Tensor, b: Tensor) !void {
     if (!a.isContiguous() or !b.isContiguous()) return LabError.InvalidLayout;
     const n = totalElements(a.shape);
     for (0..n) |i| {
-        a.data[i] += b.data[i];
+        a.cpuData()[i] += b.cpuData()[i];
     }
 }
 
@@ -348,7 +348,7 @@ pub fn neg(allocator: std.mem.Allocator, a: Tensor, tape: ?*Tape) !Tensor {
     const n = totalElements(out_shape);
     for (0..n) |i| {
         const a_off = logicalOffsetFromLinear(a.shape, a.strides, i);
-        out.data[i] = -a.data[a_off];
+        out.cpuData()[i] = -a.cpuData()[a_off];
     }
     if (tape) |t| {
         if (a.requires_grad) {
@@ -401,176 +401,176 @@ test "add (2,3) + (2,3) = (2,3)" {
     const allocator = std.testing.allocator;
     var a = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer a.deinit(allocator);
-    a.data[0] = 1;
-    a.data[1] = 2;
-    a.data[2] = 3;
-    a.data[3] = 4;
-    a.data[4] = 5;
-    a.data[5] = 6;
+    a.cpuData()[0] = 1;
+    a.cpuData()[1] = 2;
+    a.cpuData()[2] = 3;
+    a.cpuData()[3] = 4;
+    a.cpuData()[4] = 5;
+    a.cpuData()[5] = 6;
 
     var b = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer b.deinit(allocator);
-    b.data[0] = 10;
-    b.data[1] = 20;
-    b.data[2] = 30;
-    b.data[3] = 40;
-    b.data[4] = 50;
-    b.data[5] = 60;
+    b.cpuData()[0] = 10;
+    b.cpuData()[1] = 20;
+    b.cpuData()[2] = 30;
+    b.cpuData()[3] = 40;
+    b.cpuData()[4] = 50;
+    b.cpuData()[5] = 60;
 
     var out = try add(allocator, a, b, null);
     defer out.deinit(allocator);
-    try std.testing.expectEqual(@as(f32, 11.0), out.data[0]);
-    try std.testing.expectEqual(@as(f32, 66.0), out.data[5]);
+    try std.testing.expectEqual(@as(f32, 11.0), out.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 66.0), out.cpuData()[5]);
 }
 
 test "add broadcast (1,3) + (2,3) = (2,3)" {
     const allocator = std.testing.allocator;
     var a = try Tensor.init(allocator, Shape.init2D(1, 3));
     defer a.deinit(allocator);
-    a.data[0] = 1;
-    a.data[1] = 2;
-    a.data[2] = 3;
+    a.cpuData()[0] = 1;
+    a.cpuData()[1] = 2;
+    a.cpuData()[2] = 3;
 
     var b = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer b.deinit(allocator);
-    b.data[0] = 10;
-    b.data[1] = 20;
-    b.data[2] = 30;
-    b.data[3] = 40;
-    b.data[4] = 50;
-    b.data[5] = 60;
+    b.cpuData()[0] = 10;
+    b.cpuData()[1] = 20;
+    b.cpuData()[2] = 30;
+    b.cpuData()[3] = 40;
+    b.cpuData()[4] = 50;
+    b.cpuData()[5] = 60;
 
     var out = try add(allocator, a, b, null);
     defer out.deinit(allocator);
     // Row 0: [1+10, 2+20, 3+30] = [11, 22, 33]
-    try std.testing.expectEqual(@as(f32, 11.0), out.data[0]);
-    try std.testing.expectEqual(@as(f32, 22.0), out.data[1]);
-    try std.testing.expectEqual(@as(f32, 33.0), out.data[2]);
+    try std.testing.expectEqual(@as(f32, 11.0), out.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 22.0), out.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 33.0), out.cpuData()[2]);
     // Row 1: [1+40, 2+50, 3+60] = [41, 52, 63]  (a is broadcast)
-    try std.testing.expectEqual(@as(f32, 41.0), out.data[3]);
-    try std.testing.expectEqual(@as(f32, 52.0), out.data[4]);
-    try std.testing.expectEqual(@as(f32, 63.0), out.data[5]);
+    try std.testing.expectEqual(@as(f32, 41.0), out.cpuData()[3]);
+    try std.testing.expectEqual(@as(f32, 52.0), out.cpuData()[4]);
+    try std.testing.expectEqual(@as(f32, 63.0), out.cpuData()[5]);
 }
 
 test "sub (2,3) - (2,3)" {
     const allocator = std.testing.allocator;
     var a = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer a.deinit(allocator);
-    a.data[0] = 10;
-    a.data[1] = 20;
-    a.data[2] = 30;
+    a.cpuData()[0] = 10;
+    a.cpuData()[1] = 20;
+    a.cpuData()[2] = 30;
 
     var b = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer b.deinit(allocator);
-    b.data[0] = 1;
-    b.data[1] = 2;
-    b.data[2] = 3;
+    b.cpuData()[0] = 1;
+    b.cpuData()[1] = 2;
+    b.cpuData()[2] = 3;
 
     var out = try sub(allocator, a, b, null);
     defer out.deinit(allocator);
-    try std.testing.expectEqual(@as(f32, 9.0), out.data[0]);
-    try std.testing.expectEqual(@as(f32, 27.0), out.data[2]);
+    try std.testing.expectEqual(@as(f32, 9.0), out.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 27.0), out.cpuData()[2]);
 }
 
 test "mul elementwise" {
     const allocator = std.testing.allocator;
     var a = try Tensor.init(allocator, Shape.init1D(3));
     defer a.deinit(allocator);
-    a.data[0] = 2;
-    a.data[1] = 3;
-    a.data[2] = 4;
+    a.cpuData()[0] = 2;
+    a.cpuData()[1] = 3;
+    a.cpuData()[2] = 4;
 
     var b = try Tensor.init(allocator, Shape.init1D(3));
     defer b.deinit(allocator);
-    b.data[0] = 5;
-    b.data[1] = 6;
-    b.data[2] = 7;
+    b.cpuData()[0] = 5;
+    b.cpuData()[1] = 6;
+    b.cpuData()[2] = 7;
 
     var out = try mul(allocator, a, b, null);
     defer out.deinit(allocator);
-    try std.testing.expectEqual(@as(f32, 10.0), out.data[0]);
-    try std.testing.expectEqual(@as(f32, 28.0), out.data[2]);
+    try std.testing.expectEqual(@as(f32, 10.0), out.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 28.0), out.cpuData()[2]);
 }
 
 test "div produces Inf for division by zero" {
     const allocator = std.testing.allocator;
     var a = try Tensor.init(allocator, Shape.init1D(2));
     defer a.deinit(allocator);
-    a.data[0] = 1.0;
-    a.data[1] = 0.0;
+    a.cpuData()[0] = 1.0;
+    a.cpuData()[1] = 0.0;
 
     var b = try Tensor.init(allocator, Shape.init1D(2));
     defer b.deinit(allocator);
-    b.data[0] = 0.0;
-    b.data[1] = 0.0;
+    b.cpuData()[0] = 0.0;
+    b.cpuData()[1] = 0.0;
 
     var out = try div(allocator, a, b, null);
     defer out.deinit(allocator);
     // 1.0/0.0 = +Inf, 0.0/0.0 = NaN
-    try std.testing.expect(std.math.isPositiveInf(out.data[0]));
-    try std.testing.expect(std.math.isNan(out.data[1]));
+    try std.testing.expect(std.math.isPositiveInf(out.cpuData()[0]));
+    try std.testing.expect(std.math.isNan(out.cpuData()[1]));
 }
 
 test "addScalar" {
     const allocator = std.testing.allocator;
     var a = try Tensor.init(allocator, Shape.init1D(3));
     defer a.deinit(allocator);
-    a.data[0] = 1;
-    a.data[1] = 2;
-    a.data[2] = 3;
+    a.cpuData()[0] = 1;
+    a.cpuData()[1] = 2;
+    a.cpuData()[2] = 3;
 
     var out = try addScalar(allocator, a, 10.0, null);
     defer out.deinit(allocator);
-    try std.testing.expectEqual(@as(f32, 11.0), out.data[0]);
-    try std.testing.expectEqual(@as(f32, 13.0), out.data[2]);
+    try std.testing.expectEqual(@as(f32, 11.0), out.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 13.0), out.cpuData()[2]);
 }
 
 test "mulScalar" {
     const allocator = std.testing.allocator;
     var a = try Tensor.init(allocator, Shape.init1D(3));
     defer a.deinit(allocator);
-    a.data[0] = 1;
-    a.data[1] = 2;
-    a.data[2] = 3;
+    a.cpuData()[0] = 1;
+    a.cpuData()[1] = 2;
+    a.cpuData()[2] = 3;
 
     var out = try mulScalar(allocator, a, 3.0, null);
     defer out.deinit(allocator);
-    try std.testing.expectEqual(@as(f32, 3.0), out.data[0]);
-    try std.testing.expectEqual(@as(f32, 9.0), out.data[2]);
+    try std.testing.expectEqual(@as(f32, 3.0), out.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 9.0), out.cpuData()[2]);
 }
 
 test "neg" {
     const allocator = std.testing.allocator;
     var a = try Tensor.init(allocator, Shape.init1D(3));
     defer a.deinit(allocator);
-    a.data[0] = 1;
-    a.data[1] = -2;
-    a.data[2] = 0;
+    a.cpuData()[0] = 1;
+    a.cpuData()[1] = -2;
+    a.cpuData()[2] = 0;
 
     var out = try neg(allocator, a, null);
     defer out.deinit(allocator);
-    try std.testing.expectEqual(@as(f32, -1.0), out.data[0]);
-    try std.testing.expectEqual(@as(f32, 2.0), out.data[1]);
-    try std.testing.expectEqual(@as(f32, 0.0), out.data[2]);
+    try std.testing.expectEqual(@as(f32, -1.0), out.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 2.0), out.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 0.0), out.cpuData()[2]);
 }
 
 test "addInPlace" {
     const allocator = std.testing.allocator;
     var a = try Tensor.init(allocator, Shape.init1D(3));
     defer a.deinit(allocator);
-    a.data[0] = 1;
-    a.data[1] = 2;
-    a.data[2] = 3;
+    a.cpuData()[0] = 1;
+    a.cpuData()[1] = 2;
+    a.cpuData()[2] = 3;
 
     var b = try Tensor.init(allocator, Shape.init1D(3));
     defer b.deinit(allocator);
-    b.data[0] = 10;
-    b.data[1] = 20;
-    b.data[2] = 30;
+    b.cpuData()[0] = 10;
+    b.cpuData()[1] = 20;
+    b.cpuData()[2] = 30;
 
     try addInPlace(&a, b);
-    try std.testing.expectEqual(@as(f32, 11.0), a.data[0]);
-    try std.testing.expectEqual(@as(f32, 33.0), a.data[2]);
+    try std.testing.expectEqual(@as(f32, 11.0), a.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 33.0), a.cpuData()[2]);
 }
 
 test "add broadcast 3D + 2D: (2,3,8) + (1,8) = (2,3,8)" {
@@ -578,50 +578,50 @@ test "add broadcast 3D + 2D: (2,3,8) + (1,8) = (2,3,8)" {
     // gamma-like broadcasting: (1,8) over (2,3,8)
     var a = try Tensor.init(allocator, Shape.init3D(2, 3, 8));
     defer a.deinit(allocator);
-    for (0..48) |i| a.data[i] = @floatFromInt(i);
+    for (0..48) |i| a.cpuData()[i] = @floatFromInt(i);
 
     var b = try Tensor.init(allocator, Shape.init2D(1, 8));
     defer b.deinit(allocator);
-    for (0..8) |i| b.data[i] = @floatFromInt(i * 10);
+    for (0..8) |i| b.cpuData()[i] = @floatFromInt(i * 10);
 
     var out = try add(allocator, a, b, null);
     defer out.deinit(allocator);
 
     // Position (0, 0, 5): a[0,0,5]=5, b[0,5]=50 → out = 55
-    try std.testing.expectApproxEqAbs(@as(f32, 55.0), out.data[0 * 24 + 0 * 8 + 5], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 55.0), out.cpuData()[0 * 24 + 0 * 8 + 5], 1e-4);
     // Position (1, 2, 5): a[1,2,5]=1*24+2*8+5=45, b[0,5]=50 → out = 95
-    try std.testing.expectApproxEqAbs(@as(f32, 95.0), out.data[1 * 24 + 2 * 8 + 5], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 95.0), out.cpuData()[1 * 24 + 2 * 8 + 5], 1e-4);
     // Position (0, 1, 3): a[0,1,3]=11, b[0,3]=30 → out = 41
-    try std.testing.expectApproxEqAbs(@as(f32, 41.0), out.data[0 * 24 + 1 * 8 + 3], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 41.0), out.cpuData()[0 * 24 + 1 * 8 + 3], 1e-4);
 }
 
 test "add broadcast 2D + 1D: (2,3) + (3,) = (2,3)" {
     const allocator = std.testing.allocator;
     var a = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer a.deinit(allocator);
-    a.data[0] = 1;
-    a.data[1] = 2;
-    a.data[2] = 3;
-    a.data[3] = 4;
-    a.data[4] = 5;
-    a.data[5] = 6;
+    a.cpuData()[0] = 1;
+    a.cpuData()[1] = 2;
+    a.cpuData()[2] = 3;
+    a.cpuData()[3] = 4;
+    a.cpuData()[4] = 5;
+    a.cpuData()[5] = 6;
 
     var b = try Tensor.init(allocator, Shape.init1D(3));
     defer b.deinit(allocator);
-    b.data[0] = 10;
-    b.data[1] = 20;
-    b.data[2] = 30;
+    b.cpuData()[0] = 10;
+    b.cpuData()[1] = 20;
+    b.cpuData()[2] = 30;
 
     var out = try add(allocator, a, b, null);
     defer out.deinit(allocator);
     // Row 0: [1+10, 2+20, 3+30] = [11, 22, 33]
-    try std.testing.expectEqual(@as(f32, 11.0), out.data[0]);
-    try std.testing.expectEqual(@as(f32, 22.0), out.data[1]);
-    try std.testing.expectEqual(@as(f32, 33.0), out.data[2]);
+    try std.testing.expectEqual(@as(f32, 11.0), out.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 22.0), out.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 33.0), out.cpuData()[2]);
     // Row 1: [4+10, 5+20, 6+30] = [14, 25, 36]
-    try std.testing.expectEqual(@as(f32, 14.0), out.data[3]);
-    try std.testing.expectEqual(@as(f32, 25.0), out.data[4]);
-    try std.testing.expectEqual(@as(f32, 36.0), out.data[5]);
+    try std.testing.expectEqual(@as(f32, 14.0), out.cpuData()[3]);
+    try std.testing.expectEqual(@as(f32, 25.0), out.cpuData()[4]);
+    try std.testing.expectEqual(@as(f32, 36.0), out.cpuData()[5]);
 }
 
 test "addInPlace rejects shape mismatch" {
@@ -637,26 +637,26 @@ test "add broadcast (2,1) + (2,3) = (2,3)" {
     const allocator = std.testing.allocator;
     var a = try Tensor.init(allocator, Shape.init2D(2, 1));
     defer a.deinit(allocator);
-    a.data[0] = 100;
-    a.data[1] = 200;
+    a.cpuData()[0] = 100;
+    a.cpuData()[1] = 200;
 
     var b = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer b.deinit(allocator);
-    b.data[0] = 1;
-    b.data[1] = 2;
-    b.data[2] = 3;
-    b.data[3] = 4;
-    b.data[4] = 5;
-    b.data[5] = 6;
+    b.cpuData()[0] = 1;
+    b.cpuData()[1] = 2;
+    b.cpuData()[2] = 3;
+    b.cpuData()[3] = 4;
+    b.cpuData()[4] = 5;
+    b.cpuData()[5] = 6;
 
     var out = try add(allocator, a, b, null);
     defer out.deinit(allocator);
     // Row 0: 100 + [1,2,3] = [101, 102, 103]
-    try std.testing.expectEqual(@as(f32, 101.0), out.data[0]);
-    try std.testing.expectEqual(@as(f32, 103.0), out.data[2]);
+    try std.testing.expectEqual(@as(f32, 101.0), out.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 103.0), out.cpuData()[2]);
     // Row 1: 200 + [4,5,6] = [204, 205, 206]
-    try std.testing.expectEqual(@as(f32, 204.0), out.data[3]);
-    try std.testing.expectEqual(@as(f32, 206.0), out.data[5]);
+    try std.testing.expectEqual(@as(f32, 204.0), out.cpuData()[3]);
+    try std.testing.expectEqual(@as(f32, 206.0), out.cpuData()[5]);
 }
 
 // -- Strided-input correctness (PR-β) ---------------------------------------
@@ -672,12 +672,12 @@ test "addScalar on transposed view reads logical elements" {
     //    4, 5, 6]
     var base = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer base.deinit(allocator);
-    base.data[0] = 1;
-    base.data[1] = 2;
-    base.data[2] = 3;
-    base.data[3] = 4;
-    base.data[4] = 5;
-    base.data[5] = 6;
+    base.cpuData()[0] = 1;
+    base.cpuData()[1] = 2;
+    base.cpuData()[2] = 3;
+    base.cpuData()[3] = 4;
+    base.cpuData()[4] = 5;
+    base.cpuData()[5] = 6;
 
     // Transposed view, shape (3,2), strides (1,3). Logical row-major
     // iteration of the view visits the original values in order
@@ -687,24 +687,24 @@ test "addScalar on transposed view reads logical elements" {
     var out = try addScalar(allocator, view, 10.0, null);
     defer out.deinit(allocator);
 
-    try std.testing.expectEqual(@as(f32, 11.0), out.data[0]);
-    try std.testing.expectEqual(@as(f32, 14.0), out.data[1]);
-    try std.testing.expectEqual(@as(f32, 12.0), out.data[2]);
-    try std.testing.expectEqual(@as(f32, 15.0), out.data[3]);
-    try std.testing.expectEqual(@as(f32, 13.0), out.data[4]);
-    try std.testing.expectEqual(@as(f32, 16.0), out.data[5]);
+    try std.testing.expectEqual(@as(f32, 11.0), out.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 14.0), out.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 12.0), out.cpuData()[2]);
+    try std.testing.expectEqual(@as(f32, 15.0), out.cpuData()[3]);
+    try std.testing.expectEqual(@as(f32, 13.0), out.cpuData()[4]);
+    try std.testing.expectEqual(@as(f32, 16.0), out.cpuData()[5]);
 }
 
 test "mulScalar on transposed view reads logical elements" {
     const allocator = std.testing.allocator;
     var base = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer base.deinit(allocator);
-    base.data[0] = 1;
-    base.data[1] = 2;
-    base.data[2] = 3;
-    base.data[3] = 4;
-    base.data[4] = 5;
-    base.data[5] = 6;
+    base.cpuData()[0] = 1;
+    base.cpuData()[1] = 2;
+    base.cpuData()[2] = 3;
+    base.cpuData()[3] = 4;
+    base.cpuData()[4] = 5;
+    base.cpuData()[5] = 6;
     const view = try base.transpose2d();
 
     var out = try mulScalar(allocator, view, 2.0, null);
@@ -712,7 +712,7 @@ test "mulScalar on transposed view reads logical elements" {
 
     const expected = [_]f32{ 2, 8, 4, 10, 6, 12 };
     for (expected, 0..) |want, i| {
-        try std.testing.expectEqual(want, out.data[i]);
+        try std.testing.expectEqual(want, out.cpuData()[i]);
     }
 }
 
@@ -720,7 +720,7 @@ test "neg on transposed view reads logical elements" {
     const allocator = std.testing.allocator;
     var base = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer base.deinit(allocator);
-    for (base.data, 0..) |*v, i| v.* = @floatFromInt(i + 1);
+    for (base.cpuData(), 0..) |*v, i| v.* = @floatFromInt(i + 1);
     const view = try base.transpose2d();
 
     var out = try neg(allocator, view, null);
@@ -728,7 +728,7 @@ test "neg on transposed view reads logical elements" {
 
     const expected = [_]f32{ -1, -4, -2, -5, -3, -6 };
     for (expected, 0..) |want, i| {
-        try std.testing.expectEqual(want, out.data[i]);
+        try std.testing.expectEqual(want, out.cpuData()[i]);
     }
 }
 

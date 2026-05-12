@@ -146,7 +146,7 @@ pub const TinyWordTransformer = struct {
         var pos_ids_cpu = try Tensor.init(self.allocator, Shape.init2D(1, T));
         defer pos_ids_cpu.deinit(self.allocator);
         for (0..T) |t| {
-            pos_ids_cpu.data[t] = @floatFromInt(t);
+            pos_ids_cpu.cpuData()[t] = @floatFromInt(t);
         }
 
         // Session 3: when the model lives on CUDA, upload pos_ids
@@ -382,7 +382,7 @@ pub const TinyWordTransformer = struct {
                 try w.writeInt(u32, dim, .little);
             }
             // Element count in a device-agnostic way. On CPU this is
-            // equivalent to `t.data.len`; on CUDA `t.data` is the stub
+            // equivalent to `t.cpuData().len`; on CUDA `t.data` is the stub
             // empty slice so we must consult the storage length.
             const n_elems = t.storage.len();
             const data_len: u32 = @intCast(n_elems * 4);
@@ -564,7 +564,7 @@ pub const TinyWordTransformer = struct {
                 const expected_dim: u32 = if (i < t.shape.ndim()) @intCast(t.shape.dims[i]) else 0;
                 if (dims[i] != expected_dim) return error.ShapeMismatch;
             }
-            // Device-agnostic size check. CUDA tensors have `t.data.len
+            // Device-agnostic size check. CUDA tensors have `t.cpuData().len
             // == 0`; the true element count lives in `t.storage.len()`.
             const n_elems = t.storage.len();
             const expected_bytes: u32 = @intCast(n_elems * 4);
@@ -737,9 +737,9 @@ test "TinyWordTransformer init — n_layer=3 allocates 3 blocks" {
 
     // Each block's attention has its own causal mask; verify they
     // are independent allocations.
-    const m0 = model.blocks[0].attn.causal_mask.data.ptr;
-    const m1 = model.blocks[1].attn.causal_mask.data.ptr;
-    const m2 = model.blocks[2].attn.causal_mask.data.ptr;
+    const m0 = model.blocks[0].attn.causal_mask.cpuData().ptr;
+    const m1 = model.blocks[1].attn.causal_mask.cpuData().ptr;
+    const m2 = model.blocks[2].attn.causal_mask.cpuData().ptr;
     try std.testing.expect(m0 != m1);
     try std.testing.expect(m1 != m2);
     try std.testing.expect(m0 != m2);
@@ -774,7 +774,7 @@ test "TinyWordTransformer forward — 2-block model produces finite logits" {
 
     var ids = try Tensor.init(alloc, Shape.init2D(2, 3));
     defer ids.deinit(alloc);
-    for (0..6) |i| ids.data[i] = @floatFromInt(i % 16);
+    for (0..6) |i| ids.cpuData()[i] = @floatFromInt(i % 16);
 
     var logits = try model.forward(ids, null);
     defer logits.deinit(alloc);
@@ -783,8 +783,8 @@ test "TinyWordTransformer forward — 2-block model produces finite logits" {
     try std.testing.expectEqual(@as(usize, 3), logits.shape.dims[1]);
     try std.testing.expectEqual(@as(usize, 16), logits.shape.dims[2]);
 
-    for (0..logits.data.len) |i| {
-        try std.testing.expect(std.math.isFinite(logits.data[i]));
+    for (0..logits.cpuData().len) |i| {
+        try std.testing.expect(std.math.isFinite(logits.cpuData()[i]));
     }
 }
 
@@ -892,13 +892,13 @@ test "Checkpoint v3 save/load round-trip preserves n_layer/n_head/dropout" {
 
     // Every parameter in the 2-block model must match after load.
     // Compare embedding + first attention weight as representatives.
-    for (model_a.tok_embed.weight.data, model_b.tok_embed.weight.data) |x, y| {
+    for (model_a.tok_embed.weight.cpuData(), model_b.tok_embed.weight.cpuData()) |x, y| {
         try std.testing.expectEqual(x, y);
     }
-    for (model_a.blocks[0].attn.w_q.weight.data, model_b.blocks[0].attn.w_q.weight.data) |x, y| {
+    for (model_a.blocks[0].attn.w_q.weight.cpuData(), model_b.blocks[0].attn.w_q.weight.cpuData()) |x, y| {
         try std.testing.expectEqual(x, y);
     }
-    for (model_a.blocks[1].attn.w_q.weight.data, model_b.blocks[1].attn.w_q.weight.data) |x, y| {
+    for (model_a.blocks[1].attn.w_q.weight.cpuData(), model_b.blocks[1].attn.w_q.weight.cpuData()) |x, y| {
         try std.testing.expectEqual(x, y);
     }
 }
@@ -983,7 +983,7 @@ test "Checkpoint v2 backward compat — single-block load via name rewrite" {
     const dim1: u32 = @intCast(lm_w.shape.dims[1]);
     // Seed the weight with known values so the load can verify
     // round-trip semantics.
-    for (lm_w.data, 0..) |*v, i| v.* = @floatFromInt(i);
+    for (lm_w.cpuData(), 0..) |*v, i| v.* = @floatFromInt(i);
 
     // To exercise the v2 compat path we need the checkpoint to
     // include a parameter named `block.*`. But our n_layer=1 model's
@@ -1095,7 +1095,7 @@ test "Checkpoint v2 backward compat — single-block load via name rewrite" {
     defer loader.deinit();
     try loader.load(io, path);
 
-    for (loader.lm_head.weight.data, 0..) |v, i| {
+    for (loader.lm_head.weight.cpuData(), 0..) |v, i| {
         const expected: f32 = @floatFromInt(i);
         try std.testing.expectEqual(expected, v);
     }
@@ -1119,7 +1119,7 @@ test "TinyWordTransformer forward — produces (B, T, V) logits" {
     // Input: batch of 2 sequences of length 3
     var ids = try Tensor.init(alloc, Shape.init2D(2, 3));
     defer ids.deinit(alloc);
-    for (0..6) |i| ids.data[i] = @floatFromInt(i % 16);
+    for (0..6) |i| ids.cpuData()[i] = @floatFromInt(i % 16);
 
     var logits = try model.forward(ids, null);
     defer logits.deinit(alloc);
@@ -1129,8 +1129,8 @@ test "TinyWordTransformer forward — produces (B, T, V) logits" {
     try std.testing.expectEqual(@as(usize, 16), logits.shape.dims[2]);
 
     // All logits should be finite
-    for (0..logits.data.len) |i| {
-        try std.testing.expect(std.math.isFinite(logits.data[i]));
+    for (0..logits.cpuData().len) |i| {
+        try std.testing.expect(std.math.isFinite(logits.cpuData()[i]));
     }
 }
 
@@ -1193,7 +1193,7 @@ test "Checkpoint save/load round-trip" {
 
     // Compare token-embedding weights — they came from rng(7) on save
     // and rng(99) on init, so if load worked, they are now equal.
-    for (model_a.tok_embed.weight.data, model_b.tok_embed.weight.data) |x, y| {
+    for (model_a.tok_embed.weight.cpuData(), model_b.tok_embed.weight.cpuData()) |x, y| {
         try std.testing.expectEqual(x, y);
     }
 }

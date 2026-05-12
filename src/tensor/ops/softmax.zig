@@ -165,23 +165,23 @@ pub fn softmax(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabEr
         const stride_last = tensor.strides.values[ndim - 1];
         var max_val: f32 = -std.math.inf(f32);
         for (0..C) |c| {
-            const val = tensor.data[base_offset + c * stride_last];
+            const val = tensor.cpuData()[base_offset + c * stride_last];
             max_val = @max(max_val, val);
         }
 
         // --- Step 2: Compute exp(x - max) and accumulate the sum ---
         var sum_exp: f32 = 0;
         for (0..C) |c| {
-            const val = tensor.data[base_offset + c * stride_last] - max_val;
+            const val = tensor.cpuData()[base_offset + c * stride_last] - max_val;
             const ev = @exp(val);
-            out.data[g * C + c] = ev;
+            out.cpuData()[g * C + c] = ev;
             sum_exp += ev;
         }
 
         // --- Step 3: Normalize by the sum ---
         // After this, each group sums to 1.0 (within float precision).
         for (0..C) |c| {
-            out.data[g * C + c] /= sum_exp;
+            out.cpuData()[g * C + c] /= sum_exp;
         }
     }
 
@@ -266,7 +266,7 @@ pub fn logSoftmax(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) La
         const stride_last = tensor.strides.values[ndim - 1];
         var max_val: f32 = -std.math.inf(f32);
         for (0..C) |c| {
-            const val = tensor.data[base_offset + c * stride_last];
+            const val = tensor.cpuData()[base_offset + c * stride_last];
             max_val = @max(max_val, val);
         }
 
@@ -275,7 +275,7 @@ pub fn logSoftmax(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) La
         // for log_softmax.
         var sum_exp: f32 = 0;
         for (0..C) |c| {
-            const val = tensor.data[base_offset + c * stride_last] - max_val;
+            const val = tensor.cpuData()[base_offset + c * stride_last] - max_val;
             sum_exp += @exp(val);
         }
 
@@ -284,8 +284,8 @@ pub fn logSoftmax(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) La
         // This avoids the unstable log(softmax) path.
         const log_sum_exp = @log(sum_exp);
         for (0..C) |c| {
-            const val = tensor.data[base_offset + c * stride_last];
-            out.data[g * C + c] = val - max_val - log_sum_exp;
+            const val = tensor.cpuData()[base_offset + c * stride_last];
+            out.cpuData()[g * C + c] = val - max_val - log_sum_exp;
         }
     }
 
@@ -315,18 +315,18 @@ test "softmax [[1,2,3]] = [[0.0900, 0.2447, 0.6652]]" {
 
     var t = try Tensor.init(alloc, Shape.init2D(1, 3));
     defer t.deinit(alloc);
-    t.data[0] = 1.0;
-    t.data[1] = 2.0;
-    t.data[2] = 3.0;
+    t.cpuData()[0] = 1.0;
+    t.cpuData()[1] = 2.0;
+    t.cpuData()[2] = 3.0;
 
     var out = try softmax(alloc, t, null);
     defer out.deinit(alloc);
 
     // exp(1-3)=0.1353, exp(2-3)=0.3679, exp(3-3)=1.0
     // sum=1.5032, normalized: [0.0900, 0.2447, 0.6652]
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0900), out.data[0], 1e-3);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.2447), out.data[1], 1e-3);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.6652), out.data[2], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0900), out.cpuData()[0], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.2447), out.cpuData()[1], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.6652), out.cpuData()[2], 1e-3);
 }
 
 test "softmax [[0,0]] = [[0.5, 0.5]]" {
@@ -334,14 +334,14 @@ test "softmax [[0,0]] = [[0.5, 0.5]]" {
 
     var t = try Tensor.init(alloc, Shape.init2D(1, 2));
     defer t.deinit(alloc);
-    t.data[0] = 0.0;
-    t.data[1] = 0.0;
+    t.cpuData()[0] = 0.0;
+    t.cpuData()[1] = 0.0;
 
     var out = try softmax(alloc, t, null);
     defer out.deinit(alloc);
 
-    try std.testing.expectApproxEqAbs(@as(f32, 0.5), out.data[0], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.5), out.data[1], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), out.cpuData()[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), out.cpuData()[1], 1e-4);
 }
 
 test "softmax [[100,101]] does not overflow" {
@@ -349,18 +349,18 @@ test "softmax [[100,101]] does not overflow" {
 
     var t = try Tensor.init(alloc, Shape.init2D(1, 2));
     defer t.deinit(alloc);
-    t.data[0] = 100.0;
-    t.data[1] = 101.0;
+    t.cpuData()[0] = 100.0;
+    t.cpuData()[1] = 101.0;
 
     var out = try softmax(alloc, t, null);
     defer out.deinit(alloc);
 
     // max=101, exp(-1)=0.3679, exp(0)=1.0
     // sum=1.3679, [0.2689, 0.7311]
-    try std.testing.expect(std.math.isFinite(out.data[0]));
-    try std.testing.expect(std.math.isFinite(out.data[1]));
-    try std.testing.expectApproxEqAbs(@as(f32, 0.2689), out.data[0], 1e-3);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.7311), out.data[1], 1e-3);
+    try std.testing.expect(std.math.isFinite(out.cpuData()[0]));
+    try std.testing.expect(std.math.isFinite(out.cpuData()[1]));
+    try std.testing.expectApproxEqAbs(@as(f32, 0.2689), out.cpuData()[0], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.7311), out.cpuData()[1], 1e-3);
 }
 
 test "softmax rows sum to 1.0" {
@@ -369,7 +369,7 @@ test "softmax rows sum to 1.0" {
     var t = try Tensor.init(alloc, Shape.init2D(3, 5));
     defer t.deinit(alloc);
     // Fill with various values
-    for (0..15) |i| t.data[i] = @as(f32, @floatFromInt(i));
+    for (0..15) |i| t.cpuData()[i] = @as(f32, @floatFromInt(i));
 
     var out = try softmax(alloc, t, null);
     defer out.deinit(alloc);
@@ -378,7 +378,7 @@ test "softmax rows sum to 1.0" {
     for (0..3) |row| {
         var sum: f32 = 0;
         for (0..5) |col| {
-            sum += out.data[row * 5 + col];
+            sum += out.cpuData()[row * 5 + col];
         }
         try std.testing.expectApproxEqAbs(@as(f32, 1.0), sum, 1e-4);
     }
@@ -389,9 +389,9 @@ test "logSoftmax [[1,2,3]]" {
 
     var t = try Tensor.init(alloc, Shape.init2D(1, 3));
     defer t.deinit(alloc);
-    t.data[0] = 1.0;
-    t.data[1] = 2.0;
-    t.data[2] = 3.0;
+    t.cpuData()[0] = 1.0;
+    t.cpuData()[1] = 2.0;
+    t.cpuData()[2] = 3.0;
 
     var out = try logSoftmax(alloc, t, null);
     defer out.deinit(alloc);
@@ -399,7 +399,7 @@ test "logSoftmax [[1,2,3]]" {
     // log_softmax = [1-3-ln(1.5032), 2-3-ln(1.5032), 3-3-ln(1.5032)]
     // ln(1.5032) ~ 0.4076
     // = [-2.4076, -1.4076, -0.4076]
-    try std.testing.expectApproxEqAbs(@as(f32, -2.4076), out.data[0], 1e-3);
-    try std.testing.expectApproxEqAbs(@as(f32, -1.4076), out.data[1], 1e-3);
-    try std.testing.expectApproxEqAbs(@as(f32, -0.4076), out.data[2], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, -2.4076), out.cpuData()[0], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, -1.4076), out.cpuData()[1], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, -0.4076), out.cpuData()[2], 1e-3);
 }

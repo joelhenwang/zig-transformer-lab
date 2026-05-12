@@ -335,14 +335,14 @@ pub const Trainer = struct {
             var ids_host = try Tensor.init(allocator, Shape.init2D(B, T));
             defer ids_host.deinit(allocator);
             for (0..B * T) |i| {
-                ids_host.data[i] = @floatFromInt(batch.input[i]);
+                ids_host.cpuData()[i] = @floatFromInt(batch.input[i]);
             }
 
             // --- Create target tensor (B*T,) on host ---
             var targets_host = try Tensor.init(allocator, Shape.init1D(B * T));
             defer targets_host.deinit(allocator);
             for (0..B * T) |i| {
-                targets_host.data[i] = @floatFromInt(batch.target[i]);
+                targets_host.cpuData()[i] = @floatFromInt(batch.target[i]);
             }
 
             // Owned CUDA copies when on-device; otherwise the host
@@ -392,9 +392,9 @@ pub const Trainer = struct {
                 if (loss.device == .cuda) {
                     var loss_cpu = try loss.toCpu(allocator);
                     defer loss_cpu.deinit(allocator);
-                    break :blk loss_cpu.data[0];
+                    break :blk loss_cpu.cpuData()[0];
                 }
-                break :blk loss.data[0];
+                break :blk loss.cpuData()[0];
             };
 
             // --- Sample callback ---
@@ -442,7 +442,7 @@ pub const Trainer = struct {
                                 total_norm_sq += v * v;
                             }
                         } else {
-                            for (g.data) |val| {
+                            for (g.cpuData()) |val| {
                                 const v: f64 = @floatCast(val);
                                 total_norm_sq += v * v;
                             }
@@ -464,7 +464,7 @@ pub const Trainer = struct {
                                     for (host_buf) |*v| v.* *= clip_coeff;
                                     try g.storage.cuda.copyFromHost(host_buf);
                                 } else {
-                                    for (g.data) |*v| {
+                                    for (g.cpuData()) |*v| {
                                         v.* *= clip_coeff;
                                     }
                                 }
@@ -587,7 +587,7 @@ pub fn generate(
         var ids = try Tensor.init(allocator, Shape.init2D(1, context_len));
         defer ids.deinit(allocator);
         for (0..context_len) |i| {
-            ids.data[i] = @floatFromInt(tokens.items[context_start + i]);
+            ids.cpuData()[i] = @floatFromInt(tokens.items[context_start + i]);
         }
 
         // Forward pass (no tape — generation doesn't need gradients)
@@ -609,7 +609,7 @@ pub fn generate(
         var logits = try allocator.alloc(f32, V);
         defer allocator.free(logits);
         for (0..V) |v| {
-            logits[v] = logits_3d.data[last_pos + v] / temp;
+            logits[v] = logits_3d.cpuData()[last_pos + v] / temp;
         }
 
         // Find top-k candidates

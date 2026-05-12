@@ -82,8 +82,8 @@ fn tensorToHostAlloc(allocator: std.mem.Allocator, t: Tensor) LabError![]f32 {
             // Return a fresh copy so the caller can free uniformly on
             // both paths. The cost is one memcpy for CPU tensors —
             // acceptable in a debug helper.
-            const out = allocator.alloc(f32, t.data.len) catch return error.OutOfMemory;
-            @memcpy(out, t.data);
+            const out = allocator.alloc(f32, t.cpuData().len) catch return error.OutOfMemory;
+            @memcpy(out, t.cpuData());
             break :blk out;
         },
         .cuda => |buf| blk: {
@@ -164,11 +164,11 @@ test "compare: identical tensors report zero diff" {
     defer a.deinit(alloc);
     var b = try Tensor.init(alloc, Shape.init1D(4));
     defer b.deinit(alloc);
-    a.data[0] = 1.0;
-    a.data[1] = 2.0;
-    a.data[2] = 3.0;
-    a.data[3] = 4.0;
-    @memcpy(b.data, a.data);
+    a.cpuData()[0] = 1.0;
+    a.cpuData()[1] = 2.0;
+    a.cpuData()[2] = 3.0;
+    a.cpuData()[3] = 4.0;
+    @memcpy(b.cpuData(), a.cpuData());
 
     const r = try compare(alloc, a, b, .{});
     try std.testing.expectEqual(@as(f32, 0.0), r.max_abs_diff);
@@ -182,12 +182,12 @@ test "compare: small abs diff in the 2nd element" {
     defer a.deinit(alloc);
     var b = try Tensor.init(alloc, Shape.init1D(3));
     defer b.deinit(alloc);
-    a.data[0] = 1.0;
-    a.data[1] = 2.0;
-    a.data[2] = 3.0;
-    b.data[0] = 1.0;
-    b.data[1] = 2.001;
-    b.data[2] = 3.0;
+    a.cpuData()[0] = 1.0;
+    a.cpuData()[1] = 2.0;
+    a.cpuData()[2] = 3.0;
+    b.cpuData()[0] = 1.0;
+    b.cpuData()[1] = 2.001;
+    b.cpuData()[2] = 3.0;
 
     const r = try compare(alloc, a, b, .{});
     try std.testing.expectApproxEqAbs(@as(f32, 0.001), r.max_abs_diff, 1e-6);
@@ -209,8 +209,8 @@ test "compare: near-zero reference uses denom floor" {
     defer a.deinit(alloc);
     var b = try Tensor.init(alloc, Shape.init1D(1));
     defer b.deinit(alloc);
-    a.data[0] = 1e-6;
-    b.data[0] = 0.0;
+    a.cpuData()[0] = 1e-6;
+    b.cpuData()[0] = 0.0;
     // With default denom_floor=1e-8, rel = 1e-6 / 1e-8 = 100 -> huge.
     const r_tight = try compare(alloc, a, b, .{});
     try std.testing.expect(r_tight.max_rel_err > 10.0);
@@ -240,10 +240,10 @@ test "compare: 2D tensors scan row-major order" {
     var b = try Tensor.init(alloc, Shape.init2D(2, 3));
     defer b.deinit(alloc);
     for (0..6) |i| {
-        a.data[i] = @floatFromInt(i);
-        b.data[i] = @floatFromInt(i);
+        a.cpuData()[i] = @floatFromInt(i);
+        b.cpuData()[i] = @floatFromInt(i);
     }
-    b.data[4] = 100.0; // (row 1, col 1)
+    b.cpuData()[4] = 100.0; // (row 1, col 1)
 
     const r = try compare(alloc, a, b, .{});
     try std.testing.expectEqual(@as(usize, 4), r.worst_idx);

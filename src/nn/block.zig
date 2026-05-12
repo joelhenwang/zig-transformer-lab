@@ -167,8 +167,8 @@ test "TransformerBlock forward — correct output shape" {
     try std.testing.expectEqual(@as(usize, 8), out.shape.dims[2]);
 
     // Check all values finite
-    for (0..out.data.len) |i| {
-        try std.testing.expect(std.math.isFinite(out.data[i]));
+    for (0..out.cpuData().len) |i| {
+        try std.testing.expect(std.math.isFinite(out.cpuData()[i]));
     }
 }
 

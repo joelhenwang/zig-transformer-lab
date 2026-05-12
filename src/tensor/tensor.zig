@@ -361,7 +361,7 @@ pub const Tensor = struct {
     ///   tensor.at(&[_]usize{1, 2}) => 5.0
     pub fn at(self: Tensor, indices: []const usize) f32 {
         const idx = self.flatIndex(indices);
-        return self.data[idx];
+        return self.cpuData()[idx];
     }
 
     /// Get a mutable pointer to the f32 value at the given index.
@@ -375,7 +375,7 @@ pub const Tensor = struct {
     ///   // Now tensor.at(&[_]usize{0, 1}) == 99.0
     pub fn atPtr(self: *Tensor, indices: []const usize) *f32 {
         const idx = self.flatIndex(indices);
-        return &self.data[idx];
+        return &self.cpuData()[idx];
     }
 
     /// Check if this tensor's strides match row-major (contiguous) layout.
@@ -395,6 +395,46 @@ pub const Tensor = struct {
     ///   // After transpose2d: NOT contiguous (strides are swapped)
     pub fn isContiguous(self: Tensor) bool {
         return shape_isContiguous(self.shape, self.strides);
+    }
+
+    // -- Device-safe data accessors (Phase 1a) ----------------------------
+    //
+    // These replace direct `tensor.data[i]` access. The key safety benefit:
+    // calling `cpuData()` on a CUDA tensor hits a debug-mode assertion
+    // rather than silently iterating an empty slice. New code should always
+    // use these instead of reaching into `.data` directly.
+
+    /// Return the mutable CPU backing slice. Asserts `device == .cpu`.
+    ///
+    /// Use this everywhere you previously wrote `self.data[i]` for writes
+    /// or reads. On CUDA tensors this panics in debug builds — the
+    /// programmer must DtoH-copy first or use a CUDA kernel.
+    ///
+    /// Returns []f32 (mutable) because the backing storage is heap-
+    /// allocated and we frequently need write access (gradient accumulation,
+    /// fill, optimizer steps). For read-only semantics, assign to a
+    /// `const` local: `const d = t.cpuData();`.
+    ///
+    /// Worked example:
+    ///   var t = try Tensor.init(alloc, Shape.init2D(2, 3));
+    ///   t.cpuData()[0] = 42.0;
+    ///   const val = t.cpuData()[5];  // read access
+    pub inline fn cpuData(self: Tensor) []f32 {
+        std.debug.assert(self.device == .cpu);
+        return self.storage.cpu.data;
+    }
+
+    /// Whether this tensor owns its backing storage (and thus is
+    /// responsible for freeing it in deinit).
+    ///
+    /// For CPU tensors this is `storage.cpu.owned`; for CUDA tensors
+    /// this is `storage.cuda.owned`. Replaces direct `.owned` field
+    /// access which only ever reflected the CPU case.
+    pub inline fn isOwned(self: Tensor) bool {
+        return switch (self.storage) {
+            .cpu => |s| s.owned,
+            .cuda => |b| b.owned,
+        };
     }
 
     /// Create a view of this tensor that shares the same data buffer.
@@ -583,7 +623,7 @@ pub const Tensor = struct {
 
         // Fast path: both sides contiguous row-major → plain memcpy.
         if (self.isContiguous() and dst.isContiguous()) {
-            @memcpy(dst.data, self.data);
+            @memcpy(dst.cpuData(), self.cpuData());
             return;
         }
 
@@ -594,7 +634,7 @@ pub const Tensor = struct {
         for (0..n) |logical| {
             const src_off = logicalOffsetFromLinear(self.shape, self.strides, logical);
             const dst_off = logicalOffsetFromLinear(dst.shape, dst.strides, logical);
-            dst.data[dst_off] = self.data[src_off];
+            dst.cpuData()[dst_off] = self.cpuData()[src_off];
         }
     }
 
@@ -619,13 +659,13 @@ pub const Tensor = struct {
     ///   // t.at(&.{0, 0}) == 42.0, t.at(&.{1, 2}) == 42.0
     pub fn fill(self: *Tensor, value: f32) void {
         if (self.isContiguous()) {
-            @memset(self.data, value);
+            @memset(self.cpuData(), value);
             return;
         }
         const n = totalElements(self.shape);
         for (0..n) |logical| {
             const off = logicalOffsetFromLinear(self.shape, self.strides, logical);
-            self.data[off] = value;
+            self.cpuData()[off] = value;
         }
     }
 
@@ -883,7 +923,7 @@ test "Tensor init/deinit — no leak" {
     const shape = Shape.init2D(2, 3);
     var t = try Tensor.init(std.testing.allocator, shape);
     // Verify the basic fields
-    try std.testing.expectEqual(@as(usize, 6), t.data.len);
+    try std.testing.expectEqual(@as(usize, 6), t.cpuData().len);
     try std.testing.expect(t.owned);
     try std.testing.expectEqual(Device.cpu, t.device);
     try std.testing.expectEqual(DType.f32, t.dtype);
@@ -892,7 +932,7 @@ test "Tensor init/deinit — no leak" {
     try std.testing.expect(t.tape_node == null);
 
     // Verify data is zero-initialized
-    for (t.data) |v| {
+    for (t.cpuData()) |v| {
         try std.testing.expectEqual(@as(f32, 0.0), v);
     }
 
@@ -950,7 +990,7 @@ test "Tensor view does not own data" {
     try std.testing.expect(!v.owned);
 
     // View shares the same data pointer
-    try std.testing.expect(t.data.ptr == v.data.ptr);
+    try std.testing.expect(t.cpuData().ptr == v.cpuData().ptr);
 
     // View has the same shape and strides
     try std.testing.expect(shape_equals(t.shape, v.shape));
@@ -977,12 +1017,12 @@ test "Tensor transpose2d shape and strides" {
     defer t.deinit(std.testing.allocator);
 
     // Fill with sequential values to verify element mapping
-    t.data[0] = 1.0;
-    t.data[1] = 2.0;
-    t.data[2] = 3.0;
-    t.data[3] = 4.0;
-    t.data[4] = 5.0;
-    t.data[5] = 6.0;
+    t.cpuData()[0] = 1.0;
+    t.cpuData()[1] = 2.0;
+    t.cpuData()[2] = 3.0;
+    t.cpuData()[3] = 4.0;
+    t.cpuData()[4] = 5.0;
+    t.cpuData()[5] = 6.0;
 
     const tr = try t.transpose2d();
 
@@ -996,7 +1036,7 @@ test "Tensor transpose2d shape and strides" {
 
     // Transpose is a view (no copy)
     try std.testing.expect(!tr.owned);
-    try std.testing.expect(t.data.ptr == tr.data.ptr);
+    try std.testing.expect(t.cpuData().ptr == tr.cpuData().ptr);
 
     // Verify element mapping: t[i][j] == tr[j][i]
     // t[0][1] = 2.0, so tr[1][0] should also be 2.0
@@ -1037,7 +1077,7 @@ test "Tensor reshape — contiguous view" {
     try std.testing.expectEqual(@as(usize, 1), r.strides.values[1]);
 
     // Data should be shared
-    try std.testing.expect(t.data.ptr == r.data.ptr);
+    try std.testing.expect(t.cpuData().ptr == r.cpuData().ptr);
 
     // Value should be preserved
     try std.testing.expectEqual(@as(f32, 7.0), r.at(&[_]usize{ 0, 0 }));
@@ -1051,7 +1091,7 @@ test "Tensor reshape — same shape returns view" {
     const same_shape = Shape.init2D(2, 3);
     const r = try t.reshape(same_shape);
     try std.testing.expect(!r.owned);
-    try std.testing.expect(t.data.ptr == r.data.ptr);
+    try std.testing.expect(t.cpuData().ptr == r.cpuData().ptr);
 }
 
 test "Tensor reshape — wrong element count returns ShapeMismatch" {
@@ -1085,7 +1125,7 @@ test "Tensor fill" {
     t.fill(42.0);
 
     // Every element should be 42.0
-    for (t.data) |v| {
+    for (t.cpuData()) |v| {
         try std.testing.expectEqual(@as(f32, 42.0), v);
     }
 
@@ -1105,7 +1145,7 @@ test "Tensor copyTo" {
     src.fill(99.0);
 
     // Destination starts at zero
-    for (dst.data) |v| {
+    for (dst.cpuData()) |v| {
         try std.testing.expectEqual(@as(f32, 0.0), v);
     }
 
@@ -1113,7 +1153,7 @@ test "Tensor copyTo" {
     try src.copyTo(std.testing.allocator, &dst);
 
     // Destination should now match source
-    for (dst.data) |v| {
+    for (dst.cpuData()) |v| {
         try std.testing.expectEqual(@as(f32, 99.0), v);
     }
 }
@@ -1147,12 +1187,12 @@ test "Tensor copyTo — transposed source materialises the transpose" {
     // (2,3) row-major buffer: [0,1,2, 3,4,5]
     var src = try Tensor.init(std.testing.allocator, Shape.init2D(2, 3));
     defer src.deinit(std.testing.allocator);
-    src.data[0] = 0;
-    src.data[1] = 1;
-    src.data[2] = 2;
-    src.data[3] = 3;
-    src.data[4] = 4;
-    src.data[5] = 5;
+    src.cpuData()[0] = 0;
+    src.cpuData()[1] = 1;
+    src.cpuData()[2] = 2;
+    src.cpuData()[3] = 3;
+    src.cpuData()[4] = 4;
+    src.cpuData()[5] = 5;
 
     // Non-contiguous view of src with shape (3,2) — the logical
     // transpose. Iterating view logically 0..5 yields 0,3,1,4,2,5.
@@ -1164,12 +1204,12 @@ test "Tensor copyTo — transposed source materialises the transpose" {
     try view.copyTo(std.testing.allocator, &dst);
 
     // dst must contain the logical transpose of src, laid out row-major.
-    try std.testing.expectEqual(@as(f32, 0), dst.data[0]);
-    try std.testing.expectEqual(@as(f32, 3), dst.data[1]);
-    try std.testing.expectEqual(@as(f32, 1), dst.data[2]);
-    try std.testing.expectEqual(@as(f32, 4), dst.data[3]);
-    try std.testing.expectEqual(@as(f32, 2), dst.data[4]);
-    try std.testing.expectEqual(@as(f32, 5), dst.data[5]);
+    try std.testing.expectEqual(@as(f32, 0), dst.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 3), dst.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 1), dst.cpuData()[2]);
+    try std.testing.expectEqual(@as(f32, 4), dst.cpuData()[3]);
+    try std.testing.expectEqual(@as(f32, 2), dst.cpuData()[4]);
+    try std.testing.expectEqual(@as(f32, 5), dst.cpuData()[5]);
 }
 
 test "Tensor copyTo — contiguous source into transposed dst preserves logical order" {
@@ -1183,12 +1223,12 @@ test "Tensor copyTo — contiguous source into transposed dst preserves logical 
 
     var src2 = try Tensor.init(std.testing.allocator, Shape.init2D(3, 2));
     defer src2.deinit(std.testing.allocator);
-    src2.data[0] = 10;
-    src2.data[1] = 20;
-    src2.data[2] = 30;
-    src2.data[3] = 40;
-    src2.data[4] = 50;
-    src2.data[5] = 60;
+    src2.cpuData()[0] = 10;
+    src2.cpuData()[1] = 20;
+    src2.cpuData()[2] = 30;
+    src2.cpuData()[3] = 40;
+    src2.cpuData()[4] = 50;
+    src2.cpuData()[5] = 60;
 
     // dst starts as contiguous (2,3), then we take its transpose view
     // to get a NON-contiguous (3,2) destination. Writing logical
@@ -1217,12 +1257,12 @@ test "Tensor fill — transposed view mutates only logical elements" {
     var t = try Tensor.init(std.testing.allocator, Shape.init2D(3, 2));
     defer t.deinit(std.testing.allocator);
     // Seed with known junk so a bug that skips elements would show up.
-    for (t.data, 0..) |*v, i| v.* = @floatFromInt(i + 1);
+    for (t.cpuData(), 0..) |*v, i| v.* = @floatFromInt(i + 1);
 
     var view = try t.transpose2d();
     view.fill(7.0);
 
-    for (t.data) |v| {
+    for (t.cpuData()) |v| {
         try std.testing.expectEqual(@as(f32, 7.0), v);
     }
 }
@@ -1337,8 +1377,8 @@ test "Tensor storage is cpu-tagged after init" {
         .cpu => |s| {
             try std.testing.expect(s.owned);
             try std.testing.expectEqual(@as(usize, 6), s.data.len);
-            // data and storage.cpu.data must point at the same buffer.
-            try std.testing.expect(t.data.ptr == s.data.ptr);
+            // cpuData() accessor returns storage.cpu.data directly.
+            try std.testing.expect(t.cpuData().ptr == s.data.ptr);
         },
         .cuda => unreachable,
     }

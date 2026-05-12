@@ -132,13 +132,13 @@ pub const Embedding = struct {
 
         // Gather rows: output[i, :] = weight[idx[i], :]
         for (0..n_ids) |i| {
-            const idx: usize = @intFromFloat(ids.data[i]);
+            const idx: usize = @intFromFloat(ids.cpuData()[i]);
             if (idx >= self.vocab_size) return error.InvalidArgument;
 
             // Copy the row from weight to output
             const src_offset = idx * self.d_model;
             const dst_offset = i * self.d_model;
-            @memcpy(output.data[dst_offset .. dst_offset + self.d_model], self.weight.data[src_offset .. src_offset + self.d_model]);
+            @memcpy(output.cpuData()[dst_offset .. dst_offset + self.d_model], self.weight.cpuData()[src_offset .. src_offset + self.d_model]);
         }
 
         // Record on the tape for backward (scatter-add)
@@ -151,8 +151,7 @@ pub const Embedding = struct {
                     .n_parents = 1,
                     .saved = .{ .embedding_info = .{
                         .weight = self.weight,
-                        .indices = ids.data,
-                    } },
+                        .indices = ids.cpuData(),                     } },
                 });
                 output.requires_grad = true;
                 output.tape_node = node_id;
@@ -197,10 +196,10 @@ test "Embedding forward — 1D ids" {
 
     var ids = try Tensor.init(alloc, Shape.init1D(4));
     defer ids.deinit(alloc);
-    ids.data[0] = 0.0;
-    ids.data[1] = 1.0;
-    ids.data[2] = 2.0;
-    ids.data[3] = 3.0;
+    ids.cpuData()[0] = 0.0;
+    ids.cpuData()[1] = 1.0;
+    ids.cpuData()[2] = 2.0;
+    ids.cpuData()[3] = 3.0;
 
     var output = try embed.forward(ids, null);
     defer output.deinit(alloc);
@@ -218,7 +217,7 @@ test "Embedding forward — 2D ids" {
 
     var ids = try Tensor.init(alloc, Shape.init2D(2, 3));
     defer ids.deinit(alloc);
-    for (0..6) |i| ids.data[i] = @floatFromInt(i);
+    for (0..6) |i| ids.cpuData()[i] = @floatFromInt(i);
 
     var output = try embed.forward(ids, null);
     defer output.deinit(alloc);
@@ -236,27 +235,27 @@ test "Embedding forward — matches weight rows" {
     defer embed.deinit();
 
     // Set specific weight values
-    embed.weight.data[0 * 3 + 0] = 10.0;
-    embed.weight.data[0 * 3 + 1] = 20.0;
-    embed.weight.data[0 * 3 + 2] = 30.0;
-    embed.weight.data[2 * 3 + 0] = 40.0;
-    embed.weight.data[2 * 3 + 1] = 50.0;
-    embed.weight.data[2 * 3 + 2] = 60.0;
+    embed.weight.cpuData()[0 * 3 + 0] = 10.0;
+    embed.weight.cpuData()[0 * 3 + 1] = 20.0;
+    embed.weight.cpuData()[0 * 3 + 2] = 30.0;
+    embed.weight.cpuData()[2 * 3 + 0] = 40.0;
+    embed.weight.cpuData()[2 * 3 + 1] = 50.0;
+    embed.weight.cpuData()[2 * 3 + 2] = 60.0;
 
     var ids = try Tensor.init(alloc, Shape.init1D(2));
     defer ids.deinit(alloc);
-    ids.data[0] = 0.0; // row 0
-    ids.data[1] = 2.0; // row 2
+    ids.cpuData()[0] = 0.0; // row 0
+    ids.cpuData()[1] = 2.0; // row 2
 
     var output = try embed.forward(ids, null);
     defer output.deinit(alloc);
 
     // output[0] should be weight[0] = [10, 20, 30]
-    try std.testing.expectEqual(@as(f32, 10.0), output.data[0]);
-    try std.testing.expectEqual(@as(f32, 20.0), output.data[1]);
-    try std.testing.expectEqual(@as(f32, 30.0), output.data[2]);
+    try std.testing.expectEqual(@as(f32, 10.0), output.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 20.0), output.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 30.0), output.cpuData()[2]);
     // output[1] should be weight[2] = [40, 50, 60]
-    try std.testing.expectEqual(@as(f32, 40.0), output.data[3]);
-    try std.testing.expectEqual(@as(f32, 50.0), output.data[4]);
-    try std.testing.expectEqual(@as(f32, 60.0), output.data[5]);
+    try std.testing.expectEqual(@as(f32, 40.0), output.cpuData()[3]);
+    try std.testing.expectEqual(@as(f32, 50.0), output.cpuData()[4]);
+    try std.testing.expectEqual(@as(f32, 60.0), output.cpuData()[5]);
 }

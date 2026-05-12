@@ -47,7 +47,7 @@ pub const SGD = struct {
     config: SGDConfig,
 
     /// Velocity buffers, keyed by the parameter's stable `ParamId`.
-    /// PR-ζ: previously keyed by `@intFromPtr(param.data.ptr)` which
+    /// PR-ζ: previously keyed by `@intFromPtr(param.cpuData().ptr)` which
     /// breaks silently when a parameter's backing buffer is replaced
     /// (checkpoint load, future device transfer).
     velocity: std.AutoHashMap(ParamId, Tensor),
@@ -86,7 +86,7 @@ pub const SGD = struct {
             }
             const v = self.velocity.getPtr(key).?;
 
-            for (param.data, grad.data, v.data) |*p, g, *vel| {
+            for (param.cpuData(), grad.cpuData(), v.cpuData()) |*p, g, *vel| {
                 vel.* = self.config.momentum * vel.* + g + self.config.weight_decay * p.*;
                 p.* -= self.config.lr * vel.*;
             }
@@ -150,17 +150,17 @@ test "SGD step — decreases parameter magnitude" {
     // Create a parameter with gradient
     var param = try Tensor.init(alloc, @import("../tensor/shape.zig").Shape.init1D(3));
     defer param.deinit(alloc);
-    param.data[0] = 5.0;
-    param.data[1] = -3.0;
-    param.data[2] = 0.0;
+    param.cpuData()[0] = 5.0;
+    param.cpuData()[1] = -3.0;
+    param.cpuData()[2] = 0.0;
     // PR-ζ: assign a ParamId so the optimizer can key state.
     @import("../nn/module.zig").assignParamId(&param);
 
     var grad = try Tensor.init(alloc, @import("../tensor/shape.zig").Shape.init1D(3));
     defer grad.deinit(alloc);
-    grad.data[0] = 1.0;
-    grad.data[1] = -1.0;
-    grad.data[2] = 0.0;
+    grad.cpuData()[0] = 1.0;
+    grad.cpuData()[1] = -1.0;
+    grad.cpuData()[2] = 0.0;
 
     param.grad = &grad;
 
@@ -170,7 +170,7 @@ test "SGD step — decreases parameter magnitude" {
     try opt.step(&params);
 
     // param -= 0.1 * grad: [5-0.1, -3+0.1, 0]
-    try std.testing.expectApproxEqAbs(@as(f32, 4.9), param.data[0], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, -2.9), param.data[1], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), param.data[2], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.9), param.cpuData()[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, -2.9), param.cpuData()[1], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), param.cpuData()[2], 1e-4);
 }

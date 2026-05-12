@@ -129,7 +129,7 @@ pub fn reshapeTracked(allocator: std.mem.Allocator, tensor: Tensor, new_shape: S
             offset += idx * tensor.strides.values[axis];
         }
         offset += remaining * tensor.strides.values[axis];
-        out.data[flat] = tensor.data[offset];
+        out.cpuData()[flat] = tensor.cpuData()[offset];
     }
 
     if (tape) |t| {
@@ -199,7 +199,7 @@ pub fn transpose2dTracked(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*
     for (0..M) |i| {
         for (0..N) |j| {
             const in_offset = i * tensor.strides.values[0] + j * tensor.strides.values[1];
-            out.data[j * M + i] = tensor.data[in_offset];
+            out.cpuData()[j * M + i] = tensor.cpuData()[in_offset];
         }
     }
 
@@ -235,7 +235,7 @@ pub fn transpose2dTracked(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*
 /// Worked example:
 ///   // t shape (2, 3, 4) → transposeInner2d → view shape (2, 4, 3)
 ///   const tr = try transposeInner2d(t);
-///   // tr.data.ptr == t.data.ptr  (shared buffer, no copy)
+///   // tr.cpuData().ptr == t.cpuData().ptr  (shared buffer, no copy)
 ///
 /// Memory: returns a VIEW (owned=false). Caller must NOT deinit the
 ///   returned tensor's data — only the original tensor owns it.
@@ -325,7 +325,7 @@ pub fn transposeInner2dTracked(allocator: std.mem.Allocator, tensor: Tensor, tap
             for (0..K) |k| {
                 const in_offset = b * tensor.strides.values[0] + m * tensor.strides.values[1] + k * tensor.strides.values[2];
                 const out_offset = b * K * M + k * M + m;
-                out.data[out_offset] = tensor.data[in_offset];
+                out.cpuData()[out_offset] = tensor.cpuData()[in_offset];
             }
         }
     }
@@ -358,7 +358,7 @@ pub fn transposeInner2dTracked(allocator: std.mem.Allocator, tensor: Tensor, tap
 /// Worked example:
 ///   // q shape (2, 4, 3, 8) → transposeAxes12_4d → view (2, 3, 4, 8)
 ///   const qv = try transposeAxes12_4d(q);
-///   // qv.data.ptr == q.data.ptr (shared buffer)
+///   // qv.cpuData().ptr == q.cpuData().ptr (shared buffer)
 ///
 /// Memory: returns a VIEW (owned=false). Caller must NOT deinit the
 /// returned tensor's data — only the original tensor owns it.
@@ -455,7 +455,7 @@ pub fn transposeAxes12_4dTracked(allocator: std.mem.Allocator, tensor: Tensor, t
                         ih * (d1 * d3) +
                         it * d3 +
                         id;
-                    out.data[out_offset] = tensor.data[in_offset];
+                    out.cpuData()[out_offset] = tensor.cpuData()[in_offset];
                 }
             }
         }
@@ -483,12 +483,12 @@ test "reshapeTracked (2,3) → (6,)" {
 
     var t = try Tensor.init(alloc, Shape.init2D(2, 3));
     defer t.deinit(alloc);
-    t.data[0] = 1.0;
-    t.data[1] = 2.0;
-    t.data[2] = 3.0;
-    t.data[3] = 4.0;
-    t.data[4] = 5.0;
-    t.data[5] = 6.0;
+    t.cpuData()[0] = 1.0;
+    t.cpuData()[1] = 2.0;
+    t.cpuData()[2] = 3.0;
+    t.cpuData()[3] = 4.0;
+    t.cpuData()[4] = 5.0;
+    t.cpuData()[5] = 6.0;
 
     var out = try reshapeTracked(alloc, t, Shape.init1D(6), null);
     defer out.deinit(alloc);
@@ -496,7 +496,7 @@ test "reshapeTracked (2,3) → (6,)" {
     try std.testing.expectEqual(@as(usize, 6), out.shape.dims[0]);
     try std.testing.expect(out.owned);
     for (0..6) |i| {
-        try std.testing.expectEqual(@as(f32, @floatFromInt(i + 1)), out.data[i]);
+        try std.testing.expectEqual(@as(f32, @floatFromInt(i + 1)), out.cpuData()[i]);
     }
 }
 
@@ -505,12 +505,12 @@ test "transpose2dTracked (2,3) → (3,2)" {
 
     var t = try Tensor.init(alloc, Shape.init2D(2, 3));
     defer t.deinit(alloc);
-    t.data[0] = 1.0;
-    t.data[1] = 2.0;
-    t.data[2] = 3.0;
-    t.data[3] = 4.0;
-    t.data[4] = 5.0;
-    t.data[5] = 6.0;
+    t.cpuData()[0] = 1.0;
+    t.cpuData()[1] = 2.0;
+    t.cpuData()[2] = 3.0;
+    t.cpuData()[3] = 4.0;
+    t.cpuData()[4] = 5.0;
+    t.cpuData()[5] = 6.0;
 
     var out = try transpose2dTracked(alloc, t, null);
     defer out.deinit(alloc);
@@ -519,11 +519,11 @@ test "transpose2dTracked (2,3) → (3,2)" {
     try std.testing.expectEqual(@as(usize, 2), out.shape.dims[1]);
     try std.testing.expect(out.owned);
     // out[0,0] = t[0,0] = 1, out[0,1] = t[1,0] = 4
-    try std.testing.expectEqual(@as(f32, 1.0), out.data[0]);
-    try std.testing.expectEqual(@as(f32, 4.0), out.data[1]);
+    try std.testing.expectEqual(@as(f32, 1.0), out.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 4.0), out.cpuData()[1]);
     // out[1,0] = t[0,1] = 2, out[1,1] = t[1,1] = 5
-    try std.testing.expectEqual(@as(f32, 2.0), out.data[2]);
-    try std.testing.expectEqual(@as(f32, 5.0), out.data[3]);
+    try std.testing.expectEqual(@as(f32, 2.0), out.cpuData()[2]);
+    try std.testing.expectEqual(@as(f32, 5.0), out.cpuData()[3]);
 }
 
 test "transposeInner2d (2,3,4) → (2,4,3) view" {
@@ -531,7 +531,7 @@ test "transposeInner2d (2,3,4) → (2,4,3) view" {
 
     var t = try Tensor.init(alloc, Shape.init3D(2, 3, 4));
     defer t.deinit(alloc);
-    for (0..24) |i| t.data[i] = @floatFromInt(i);
+    for (0..24) |i| t.cpuData()[i] = @floatFromInt(i);
 
     const tr = try transposeInner2d(t);
 
@@ -542,14 +542,14 @@ test "transposeInner2d (2,3,4) → (2,4,3) view" {
 
     // View — does not own data
     try std.testing.expect(!tr.owned);
-    try std.testing.expect(tr.data.ptr == t.data.ptr);
+    try std.testing.expect(tr.cpuData().ptr == t.cpuData().ptr);
 
     // Verify element: tr[0, 2, 1] = t[0, 1, 2]
     // t[0,1,2] = 0*12 + 1*4 + 2 = 6
     // tr[0,2,1] offset = 0*12 + 2*3 + 1 = 7 (using tr's strides)
-    const t_val = t.data[0 * 12 + 1 * 4 + 2];
+    const t_val = t.cpuData()[0 * 12 + 1 * 4 + 2];
     const tr_offset = 0 * tr.strides.values[0] + 2 * tr.strides.values[1] + 1 * tr.strides.values[2];
-    try std.testing.expectEqual(t_val, tr.data[tr_offset]);
+    try std.testing.expectEqual(t_val, tr.cpuData()[tr_offset]);
 }
 
 test "transposeInner2d rejects non-rank-3" {

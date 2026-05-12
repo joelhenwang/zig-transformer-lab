@@ -111,7 +111,7 @@ fn scanCuda(allocator: std.mem.Allocator, t: Tensor) LabError!?Offender {
 ///   //   assertFinite FAIL: NaN at flat index 12 (value = nan)
 pub fn assertFinite(allocator: std.mem.Allocator, t: Tensor) LabError!void {
     const maybe_offender: ?Offender = switch (t.storage) {
-        .cpu => scanHost(t.data),
+        .cpu => scanHost(t.cpuData()),
         .cuda => try scanCuda(allocator, t),
     };
 
@@ -136,7 +136,7 @@ pub fn assertFinite(allocator: std.mem.Allocator, t: Tensor) LabError!void {
 ///   }
 pub fn hasNaN(allocator: std.mem.Allocator, t: Tensor) LabError!bool {
     const o = switch (t.storage) {
-        .cpu => scanHost(t.data),
+        .cpu => scanHost(t.cpuData()),
         .cuda => try scanCuda(allocator, t),
     };
     if (o) |off| return off.kind == .nan;
@@ -146,7 +146,7 @@ pub fn hasNaN(allocator: std.mem.Allocator, t: Tensor) LabError!bool {
 /// Non-asserting query: returns true if any +Inf or -Inf is present.
 pub fn hasInf(allocator: std.mem.Allocator, t: Tensor) LabError!bool {
     const o = switch (t.storage) {
-        .cpu => scanHost(t.data),
+        .cpu => scanHost(t.cpuData()),
         .cuda => try scanCuda(allocator, t),
     };
     if (o) |off| return off.kind == .pos_inf or off.kind == .neg_inf;
@@ -162,66 +162,66 @@ const Shape = @import("../tensor/shape.zig").Shape;
 test "assertFinite: passes on all-finite tensor" {
     var t = try Tensor.init(std.testing.allocator, Shape.init1D(4));
     defer t.deinit(std.testing.allocator);
-    t.data[0] = 1.0;
-    t.data[1] = -2.5;
-    t.data[2] = 0.0;
-    t.data[3] = 1e-10;
+    t.cpuData()[0] = 1.0;
+    t.cpuData()[1] = -2.5;
+    t.cpuData()[2] = 0.0;
+    t.cpuData()[3] = 1e-10;
     try assertFinite(std.testing.allocator, t);
 }
 
 test "assertFinite: detects NaN at first offender" {
     var t = try Tensor.init(std.testing.allocator, Shape.init1D(4));
     defer t.deinit(std.testing.allocator);
-    t.data[0] = 1.0;
-    t.data[1] = 2.0;
-    t.data[2] = std.math.nan(f32);
-    t.data[3] = 4.0;
+    t.cpuData()[0] = 1.0;
+    t.cpuData()[1] = 2.0;
+    t.cpuData()[2] = std.math.nan(f32);
+    t.cpuData()[3] = 4.0;
     try std.testing.expectError(error.NumericalError, assertFinite(std.testing.allocator, t));
 }
 
 test "assertFinite: detects +Inf" {
     var t = try Tensor.init(std.testing.allocator, Shape.init1D(3));
     defer t.deinit(std.testing.allocator);
-    t.data[0] = 1.0;
-    t.data[1] = std.math.inf(f32);
-    t.data[2] = 3.0;
+    t.cpuData()[0] = 1.0;
+    t.cpuData()[1] = std.math.inf(f32);
+    t.cpuData()[2] = 3.0;
     try std.testing.expectError(error.NumericalError, assertFinite(std.testing.allocator, t));
 }
 
 test "assertFinite: detects -Inf" {
     var t = try Tensor.init(std.testing.allocator, Shape.init1D(3));
     defer t.deinit(std.testing.allocator);
-    t.data[0] = 1.0;
-    t.data[1] = -std.math.inf(f32);
-    t.data[2] = 3.0;
+    t.cpuData()[0] = 1.0;
+    t.cpuData()[1] = -std.math.inf(f32);
+    t.cpuData()[2] = 3.0;
     try std.testing.expectError(error.NumericalError, assertFinite(std.testing.allocator, t));
 }
 
 test "hasNaN: returns true only when NaN is present" {
     var t = try Tensor.init(std.testing.allocator, Shape.init1D(2));
     defer t.deinit(std.testing.allocator);
-    t.data[0] = 1.0;
-    t.data[1] = 2.0;
+    t.cpuData()[0] = 1.0;
+    t.cpuData()[1] = 2.0;
     try std.testing.expect(!(try hasNaN(std.testing.allocator, t)));
 
-    t.data[1] = std.math.nan(f32);
+    t.cpuData()[1] = std.math.nan(f32);
     try std.testing.expect(try hasNaN(std.testing.allocator, t));
 }
 
 test "hasInf: returns true only when +/-Inf is present" {
     var t = try Tensor.init(std.testing.allocator, Shape.init1D(2));
     defer t.deinit(std.testing.allocator);
-    t.data[0] = 1.0;
-    t.data[1] = 2.0;
+    t.cpuData()[0] = 1.0;
+    t.cpuData()[1] = 2.0;
     try std.testing.expect(!(try hasInf(std.testing.allocator, t)));
 
-    t.data[1] = std.math.inf(f32);
+    t.cpuData()[1] = std.math.inf(f32);
     try std.testing.expect(try hasInf(std.testing.allocator, t));
 
-    t.data[1] = -std.math.inf(f32);
+    t.cpuData()[1] = -std.math.inf(f32);
     try std.testing.expect(try hasInf(std.testing.allocator, t));
 
     // NaN is not an Inf
-    t.data[1] = std.math.nan(f32);
+    t.cpuData()[1] = std.math.nan(f32);
     try std.testing.expect(!(try hasInf(std.testing.allocator, t)));
 }

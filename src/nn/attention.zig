@@ -129,7 +129,7 @@ pub const CausalSelfAttention = struct {
         var causal_mask = try Tensor.init(allocator, Shape.init2D(max_seq_len, max_seq_len));
         for (0..max_seq_len) |i| {
             for (0..max_seq_len) |j| {
-                causal_mask.data[i * max_seq_len + j] = if (j <= i) 0.0 else -1e9;
+                causal_mask.cpuData()[i * max_seq_len + j] = if (j <= i) 0.0 else -1e9;
             }
         }
 
@@ -213,7 +213,7 @@ pub const CausalSelfAttention = struct {
             mask_slice = try Tensor.init(self.allocator, Shape.init2D(T, T));
             for (0..T) |i| {
                 for (0..T) |j| {
-                    mask_slice.data[i * T + j] = if (j <= i) 0.0 else -1e9;
+                    mask_slice.cpuData()[i * T + j] = if (j <= i) 0.0 else -1e9;
                 }
             }
         }
@@ -378,7 +378,7 @@ test "CausalSelfAttention forward — n_head=1 produces (B, T, D) output" {
     try std.testing.expectEqual(@as(usize, 3), out.shape.dims[1]);
     try std.testing.expectEqual(@as(usize, 8), out.shape.dims[2]);
 
-    for (out.data) |v| try std.testing.expect(std.math.isFinite(v));
+    for (out.cpuData()) |v| try std.testing.expect(std.math.isFinite(v));
 }
 
 test "CausalSelfAttention forward — n_head=2 produces (B, T, D) output" {
@@ -398,7 +398,7 @@ test "CausalSelfAttention forward — n_head=2 produces (B, T, D) output" {
     try std.testing.expectEqual(@as(usize, 3), out.shape.dims[1]);
     try std.testing.expectEqual(@as(usize, 8), out.shape.dims[2]);
 
-    for (out.data) |v| try std.testing.expect(std.math.isFinite(v));
+    for (out.cpuData()) |v| try std.testing.expect(std.math.isFinite(v));
 }
 
 test "CausalSelfAttention forward — n_head=4 on D=16 produces finite output" {
@@ -415,7 +415,7 @@ test "CausalSelfAttention forward — n_head=4 on D=16 produces finite output" {
     defer out.deinit(alloc);
 
     try std.testing.expectEqual(@as(usize, 16), out.shape.dims[2]);
-    for (out.data) |v| try std.testing.expect(std.math.isFinite(v));
+    for (out.cpuData()) |v| try std.testing.expect(std.math.isFinite(v));
 }
 
 test "CausalSelfAttention causal mask — upper triangle is -1e9" {
@@ -428,9 +428,9 @@ test "CausalSelfAttention causal mask — upper triangle is -1e9" {
     // mask[0,0]=0, mask[0,1]=-1e9, mask[0,2]=-1e9
     // mask[1,0]=0, mask[1,1]=0,     mask[1,2]=-1e9
     // mask[2,0]=0, mask[2,1]=0,     mask[2,2]=0
-    try std.testing.expectEqual(@as(f32, 0.0), attn.causal_mask.data[0]);
-    try std.testing.expectEqual(@as(f32, -1e9), attn.causal_mask.data[1]);
-    try std.testing.expectEqual(@as(f32, 0.0), attn.causal_mask.data[3]);
-    try std.testing.expectEqual(@as(f32, -1e9), attn.causal_mask.data[5]);
-    try std.testing.expectEqual(@as(f32, 0.0), attn.causal_mask.data[8]);
+    try std.testing.expectEqual(@as(f32, 0.0), attn.causal_mask.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, -1e9), attn.causal_mask.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 0.0), attn.causal_mask.cpuData()[3]);
+    try std.testing.expectEqual(@as(f32, -1e9), attn.causal_mask.cpuData()[5]);
+    try std.testing.expectEqual(@as(f32, 0.0), attn.causal_mask.cpuData()[8]);
 }

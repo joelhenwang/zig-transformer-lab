@@ -49,7 +49,7 @@ const Tensor = @import("../tensor/tensor.zig").Tensor;
 // ---------------------------------------------------------------------------
 //
 // Optimizers track per-parameter state (e.g. AdamW's m and v moments).
-// Pre-PR-ζ that state was keyed by `@intFromPtr(param.data.ptr)` — the
+// Pre-PR-ζ that state was keyed by `@intFromPtr(param.cpuData().ptr)` — the
 // raw memory address of the parameter's backing buffer. That key is
 // unstable: any operation that replaces the buffer (loading a
 // checkpoint into a fresh tensor; PR-ι moving parameters to CUDA and

@@ -181,8 +181,8 @@ test "LayerNorm init — gamma ones, beta zeros" {
 
     try std.testing.expectEqual(@as(usize, 4), ln.gamma.shape.dims[0]);
     for (0..4) |i| {
-        try std.testing.expectEqual(@as(f32, 1.0), ln.gamma.data[i]);
-        try std.testing.expectEqual(@as(f32, 0.0), ln.beta.data[i]);
+        try std.testing.expectEqual(@as(f32, 1.0), ln.gamma.cpuData()[i]);
+        try std.testing.expectEqual(@as(f32, 0.0), ln.beta.cpuData()[i]);
     }
 }
 
@@ -197,14 +197,14 @@ test "LayerNorm forward — normalizes to zero mean, unit variance" {
     //         row 1 = [10, 20, 30, 40] (mean=25, var=125)
     var x = try Tensor.init(alloc, Shape.init2D(2, 4));
     defer x.deinit(alloc);
-    x.data[0] = 1.0;
-    x.data[1] = 2.0;
-    x.data[2] = 3.0;
-    x.data[3] = 4.0;
-    x.data[4] = 10.0;
-    x.data[5] = 20.0;
-    x.data[6] = 30.0;
-    x.data[7] = 40.0;
+    x.cpuData()[0] = 1.0;
+    x.cpuData()[1] = 2.0;
+    x.cpuData()[2] = 3.0;
+    x.cpuData()[3] = 4.0;
+    x.cpuData()[4] = 10.0;
+    x.cpuData()[5] = 20.0;
+    x.cpuData()[6] = 30.0;
+    x.cpuData()[7] = 40.0;
 
     var y = try ln.forward(x, null);
     defer y.deinit(alloc);
@@ -219,7 +219,7 @@ test "LayerNorm forward — normalizes to zero mean, unit variance" {
     // Check that the mean of row 0 is close to 0
     var mean0: f32 = 0;
     for (0..4) |i| {
-        mean0 += y.data[i];
+        mean0 += y.cpuData()[i];
     }
     mean0 /= 4.0;
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), mean0, 1e-3);
@@ -234,7 +234,7 @@ test "LayerNorm forward — 3D input" {
 
     var x = try Tensor.init(alloc, Shape.init3D(2, 3, 4));
     defer x.deinit(alloc);
-    for (0..24) |i| x.data[i] = @floatFromInt(i + 1);
+    for (0..24) |i| x.cpuData()[i] = @floatFromInt(i + 1);
 
     var y = try ln.forward(x, null);
     defer y.deinit(alloc);

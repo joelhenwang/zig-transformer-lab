@@ -147,34 +147,34 @@ pub fn gradCheck(
                 result.n_sampled;
 
             // Save the original value
-            const original = param.data[idx];
+            const original = param.cpuData()[idx];
 
             // --- Loss with p[i] + eps ---
-            param.data[idx] = original + eps;
+            param.cpuData()[idx] = original + eps;
             var tape_plus = Tape.init(allocator);
             defer tape_plus.deinit();
             const loss_plus = try loss_fn(allocator, params, &tape_plus);
-            const loss_plus_val = loss_plus.data[0];
+            const loss_plus_val = loss_plus.cpuData()[0];
             loss_plus.deinit(allocator);
             allocator.destroy(loss_plus);
 
             // --- Loss with p[i] - eps ---
-            param.data[idx] = original - eps;
+            param.cpuData()[idx] = original - eps;
             var tape_minus = Tape.init(allocator);
             defer tape_minus.deinit();
             const loss_minus = try loss_fn(allocator, params, &tape_minus);
-            const loss_minus_val = loss_minus.data[0];
+            const loss_minus_val = loss_minus.cpuData()[0];
             loss_minus.deinit(allocator);
             allocator.destroy(loss_minus);
 
             // Restore original value
-            param.data[idx] = original;
+            param.cpuData()[idx] = original;
 
             // Numerical gradient via central difference
             const numerical = (loss_plus_val - loss_minus_val) / (2.0 * eps);
 
             // Analytical gradient
-            const analytical = grad.data[idx];
+            const analytical = grad.cpuData()[idx];
 
             // Relative error: |analytical - numerical| / max(|analytical|, |numerical|, floor)
             const abs_diff = @abs(analytical - numerical);
@@ -209,9 +209,9 @@ test "gradCheck — simple linear function" {
     // dL/da[i] = 2
     var a = try Tensor.init(allocator, Shape.init1D(3));
     defer a.deinit(allocator);
-    a.data[0] = 1.0;
-    a.data[1] = 2.0;
-    a.data[2] = 3.0;
+    a.cpuData()[0] = 1.0;
+    a.cpuData()[1] = 2.0;
+    a.cpuData()[2] = 3.0;
     a.requires_grad = true;
 
     // Run forward+backward to get analytical gradients
@@ -254,10 +254,10 @@ fn matmulLossFn(allocator: std.mem.Allocator, params: []*Tensor, tape: *Tape) La
     // Recreate X (it doesn't require grad, so we don't pass it as a param)
     var X = try Tensor.init(allocator, Shape.init2D(2, 2));
     defer X.deinit(allocator);
-    X.data[0] = 1.0;
-    X.data[1] = 0.0;
-    X.data[2] = 0.0;
-    X.data[3] = 1.0;
+    X.cpuData()[0] = 1.0;
+    X.cpuData()[1] = 0.0;
+    X.cpuData()[2] = 0.0;
+    X.cpuData()[3] = 1.0;
 
     const W = params[0];
     var out = try @import("../tensor/ops/matmul.zig").matmul(allocator, X, W.*, tape);
@@ -273,9 +273,9 @@ test "gradCheck — detects wrong gradient" {
 
     var a = try Tensor.init(allocator, Shape.init1D(3));
     defer a.deinit(allocator);
-    a.data[0] = 1.0;
-    a.data[1] = 2.0;
-    a.data[2] = 3.0;
+    a.cpuData()[0] = 1.0;
+    a.cpuData()[1] = 2.0;
+    a.cpuData()[2] = 3.0;
     a.requires_grad = true;
 
     // Manually set a WRONG gradient (should be 2, we set 100)
@@ -305,20 +305,20 @@ test "gradCheck — matmul gradient" {
     // dL/dW = Xᵀ (broadcast to match W's shape)
     var W = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer W.deinit(allocator);
-    W.data[0] = 0.1;
-    W.data[1] = 0.2;
-    W.data[2] = 0.3;
-    W.data[3] = 0.4;
-    W.data[4] = 0.5;
-    W.data[5] = 0.6;
+    W.cpuData()[0] = 0.1;
+    W.cpuData()[1] = 0.2;
+    W.cpuData()[2] = 0.3;
+    W.cpuData()[3] = 0.4;
+    W.cpuData()[4] = 0.5;
+    W.cpuData()[5] = 0.6;
     W.requires_grad = true;
 
     var X = try Tensor.init(allocator, Shape.init2D(2, 2));
     defer X.deinit(allocator);
-    X.data[0] = 1.0;
-    X.data[1] = 0.0;
-    X.data[2] = 0.0;
-    X.data[3] = 1.0;
+    X.cpuData()[0] = 1.0;
+    X.cpuData()[1] = 0.0;
+    X.cpuData()[2] = 0.0;
+    X.cpuData()[3] = 1.0;
     // X doesn't require grad for this test
 
     // Forward + backward
@@ -357,7 +357,7 @@ test "gradCheck — Linear layer weight gradient (transpose2d path)" {
     defer layer.deinit();
 
     // Scale down weights for numerical stability
-    for (layer.weight.data) |*v| v.* *= 0.1;
+    for (layer.weight.cpuData()) |*v| v.* *= 0.1;
 
     var x = try @import("../tensor/ops/create.zig").randn(allocator, Shape.init2D(2, 4), &rng, 0.0, 0.1);
     defer x.deinit(allocator);
@@ -382,32 +382,32 @@ test "gradCheck — Linear layer weight gradient (transpose2d path)" {
     // Manual numerical gradient check
     const h: f32 = 1e-4;
     var max_rel_err: f32 = 0;
-    const n = layer.weight.data.len;
+    const n = layer.weight.cpuData().len;
 
     for (0..n) |idx| {
-        const original = layer.weight.data[idx];
+        const original = layer.weight.cpuData()[idx];
 
         // Forward with +h
-        layer.weight.data[idx] = original + h;
+        layer.weight.cpuData()[idx] = original + h;
         var logits_p = try layer.forward(x, null);
         defer logits_p.deinit(allocator);
         var loss_p = try ops_reduce.sumAll(allocator, logits_p, null);
         defer loss_p.deinit(allocator);
-        const lp = loss_p.data[0];
+        const lp = loss_p.cpuData()[0];
 
         // Forward with -h
-        layer.weight.data[idx] = original - h;
+        layer.weight.cpuData()[idx] = original - h;
         var logits_m = try layer.forward(x, null);
         defer logits_m.deinit(allocator);
         var loss_m = try ops_reduce.sumAll(allocator, logits_m, null);
         defer loss_m.deinit(allocator);
-        const lm = loss_m.data[0];
+        const lm = loss_m.cpuData()[0];
 
         // Restore
-        layer.weight.data[idx] = original;
+        layer.weight.cpuData()[idx] = original;
 
         const numerical = (lp - lm) / (2.0 * h);
-        const analytical = grad.data[idx];
+        const analytical = grad.cpuData()[idx];
         const abs_diff = @abs(analytical - numerical);
         const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
         const rel_err = abs_diff / denom;
@@ -428,7 +428,7 @@ test "gradCheck — Linear layer 3D input (reshape path)" {
     var layer = try Linear.init(allocator, 4, 3, false, &rng);
     defer layer.deinit();
 
-    for (layer.weight.data) |*v| v.* *= 0.1;
+    for (layer.weight.cpuData()) |*v| v.* *= 0.1;
 
     // 3D input — tests the reshape→matmul→reshape path
     var x = try @import("../tensor/ops/create.zig").randn(allocator, Shape.init3D(2, 3, 4), &rng, 0.0, 0.1);
@@ -452,27 +452,27 @@ test "gradCheck — Linear layer 3D input (reshape path)" {
 
     const h: f32 = 1e-4;
     var max_rel_err: f32 = 0;
-    const n = layer.weight.data.len;
+    const n = layer.weight.cpuData().len;
 
     for (0..n) |idx| {
-        const original = layer.weight.data[idx];
+        const original = layer.weight.cpuData()[idx];
 
-        layer.weight.data[idx] = original + h;
+        layer.weight.cpuData()[idx] = original + h;
         var out_p = try layer.forward(x, null);
         defer out_p.deinit(allocator);
         var loss_p = try ops_reduce.sumAll(allocator, out_p, null);
         defer loss_p.deinit(allocator);
 
-        layer.weight.data[idx] = original - h;
+        layer.weight.cpuData()[idx] = original - h;
         var out_m = try layer.forward(x, null);
         defer out_m.deinit(allocator);
         var loss_m = try ops_reduce.sumAll(allocator, out_m, null);
         defer loss_m.deinit(allocator);
 
-        layer.weight.data[idx] = original;
+        layer.weight.cpuData()[idx] = original;
 
-        const numerical = (loss_p.data[0] - loss_m.data[0]) / (2.0 * h);
-        const analytical = grad.data[idx];
+        const numerical = (loss_p.cpuData()[0] - loss_m.cpuData()[0]) / (2.0 * h);
+        const analytical = grad.cpuData()[idx];
         const abs_diff = @abs(analytical - numerical);
         const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
         const rel_err = abs_diff / denom;
@@ -495,7 +495,7 @@ test "gradCheck — Linear in residual path (add + identity)" {
     var layer = try Linear.init(allocator, 4, 4, false, &rng);
     defer layer.deinit();
 
-    for (layer.weight.data) |*v| v.* *= 0.1;
+    for (layer.weight.cpuData()) |*v| v.* *= 0.1;
 
     var x = try @import("../tensor/ops/create.zig").randn(allocator, Shape.init3D(2, 3, 4), &rng, 0.0, 0.1);
     defer x.deinit(allocator);
@@ -525,12 +525,12 @@ test "gradCheck — Linear in residual path (add + identity)" {
     // Numerical check: perturb weight, recompute x + Linear(x) with tape=null
     const h: f32 = 1e-4;
     var max_rel_err: f32 = 0;
-    const n = layer.weight.data.len;
+    const n = layer.weight.cpuData().len;
 
     for (0..n) |idx| {
-        const original = layer.weight.data[idx];
+        const original = layer.weight.cpuData()[idx];
 
-        layer.weight.data[idx] = original + h;
+        layer.weight.cpuData()[idx] = original + h;
         var lo_p = try layer.forward(x, null);
         defer lo_p.deinit(allocator);
         var op_p = try ops_elementwise.add(allocator, x, lo_p, null);
@@ -538,7 +538,7 @@ test "gradCheck — Linear in residual path (add + identity)" {
         var lp = try ops_reduce.sumAll(allocator, op_p, null);
         defer lp.deinit(allocator);
 
-        layer.weight.data[idx] = original - h;
+        layer.weight.cpuData()[idx] = original - h;
         var lo_m = try layer.forward(x, null);
         defer lo_m.deinit(allocator);
         var op_m = try ops_elementwise.add(allocator, x, lo_m, null);
@@ -546,10 +546,10 @@ test "gradCheck — Linear in residual path (add + identity)" {
         var lm = try ops_reduce.sumAll(allocator, op_m, null);
         defer lm.deinit(allocator);
 
-        layer.weight.data[idx] = original;
+        layer.weight.cpuData()[idx] = original;
 
-        const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
-        const analytical = grad.data[idx];
+        const numerical = (lp.cpuData()[0] - lm.cpuData()[0]) / (2.0 * h);
+        const analytical = grad.cpuData()[idx];
         const abs_diff = @abs(analytical - numerical);
         const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
         const rel_err = abs_diff / denom;
@@ -570,7 +570,7 @@ test "gradCheck — Linear bias gradient (3D input)" {
     var layer = try Linear.init(allocator, 4, 3, true, &rng);
     defer layer.deinit();
 
-    for (layer.weight.data) |*v| v.* *= 0.1;
+    for (layer.weight.cpuData()) |*v| v.* *= 0.1;
 
     var x = try @import("../tensor/ops/create.zig").randn(allocator, Shape.init3D(2, 3, 4), &rng, 0.0, 0.1);
     defer x.deinit(allocator);
@@ -593,27 +593,27 @@ test "gradCheck — Linear bias gradient (3D input)" {
 
     const h: f32 = 1e-4;
     var max_rel_err: f32 = 0;
-    const n = layer.bias.?.data.len;
+    const n = layer.bias.?.cpuData().len;
 
     for (0..n) |idx| {
-        const original = layer.bias.?.data[idx];
+        const original = layer.bias.?.cpuData()[idx];
 
-        layer.bias.?.data[idx] = original + h;
+        layer.bias.?.cpuData()[idx] = original + h;
         var out_p = try layer.forward(x, null);
         defer out_p.deinit(allocator);
         var loss_p = try ops_reduce.sumAll(allocator, out_p, null);
         defer loss_p.deinit(allocator);
 
-        layer.bias.?.data[idx] = original - h;
+        layer.bias.?.cpuData()[idx] = original - h;
         var out_m = try layer.forward(x, null);
         defer out_m.deinit(allocator);
         var loss_m = try ops_reduce.sumAll(allocator, out_m, null);
         defer loss_m.deinit(allocator);
 
-        layer.bias.?.data[idx] = original;
+        layer.bias.?.cpuData()[idx] = original;
 
-        const numerical = (loss_p.data[0] - loss_m.data[0]) / (2.0 * h);
-        const analytical = grad.data[idx];
+        const numerical = (loss_p.cpuData()[0] - loss_m.cpuData()[0]) / (2.0 * h);
+        const analytical = grad.cpuData()[idx];
         const abs_diff = @abs(analytical - numerical);
         const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
         const rel_err = abs_diff / denom;
@@ -652,7 +652,7 @@ test "gradCheck — full TinyWordTransformer model (sumAll loss)" {
     try model.collectNamedParams(&named);
     defer model.freeBlockNames(&named);
     for (named.items) |entry| {
-        for (entry.tensor.data) |*v| v.* *= 0.1;
+        for (entry.tensor.cpuData()) |*v| v.* *= 0.1;
     }
 
     // Use -1 mask for grad check (not -1e9 or -10).
@@ -663,14 +663,14 @@ test "gradCheck — full TinyWordTransformer model (sumAll loss)" {
     //
     // Stage 8 M3: model.block became model.blocks[]; this grad check
     // operates on the first (and, for its default config, only) block.
-    for (model.blocks[0].attn.causal_mask.data) |*v| {
+    for (model.blocks[0].attn.causal_mask.cpuData()) |*v| {
         if (v.* < 0.0) v.* = -1.0;
     }
 
     // Small fixed input
     var ids = try Tensor.init(allocator, Shape.init2D(2, 3));
     defer ids.deinit(allocator);
-    for (0..6) |i| ids.data[i] = @floatFromInt(i % 8);
+    for (0..6) |i| ids.cpuData()[i] = @floatFromInt(i % 8);
 
     // Track all parameters
     var params: std.ArrayList(*Tensor) = .empty;
@@ -700,7 +700,7 @@ test "gradCheck — full TinyWordTransformer model (sumAll loss)" {
     var overall_max_abs_diff: f32 = 0;
     for (named.items) |entry| {
         const grad = entry.tensor.grad orelse continue;
-        const n = entry.tensor.data.len;
+        const n = entry.tensor.cpuData().len;
         const n_check = @min(n, 5);
         var max_rel_err: f32 = 0;
         var max_abs_diff: f32 = 0;
@@ -708,25 +708,25 @@ test "gradCheck — full TinyWordTransformer model (sumAll loss)" {
 
         for (0..n_check) |_| {
             const idx = check_rng.next() % n;
-            const original = entry.tensor.data[idx];
+            const original = entry.tensor.cpuData()[idx];
             const h: f32 = 1e-4;
 
-            entry.tensor.data[idx] = original + h;
+            entry.tensor.cpuData()[idx] = original + h;
             var lp_logits = try model.forward(ids, null);
             defer lp_logits.deinit(allocator);
             var lp_loss = try ops_reduce.sumAll(allocator, lp_logits, null);
             defer lp_loss.deinit(allocator);
 
-            entry.tensor.data[idx] = original - h;
+            entry.tensor.cpuData()[idx] = original - h;
             var lm_logits = try model.forward(ids, null);
             defer lm_logits.deinit(allocator);
             var lm_loss = try ops_reduce.sumAll(allocator, lm_logits, null);
             defer lm_loss.deinit(allocator);
 
-            entry.tensor.data[idx] = original;
+            entry.tensor.cpuData()[idx] = original;
 
-            const numerical = (lp_loss.data[0] - lm_loss.data[0]) / (2.0 * h);
-            const analytical = grad.data[idx];
+            const numerical = (lp_loss.cpuData()[0] - lm_loss.cpuData()[0]) / (2.0 * h);
+            const analytical = grad.cpuData()[idx];
             const abs_diff = @abs(analytical - numerical);
             const denom = @max(@abs(analytical), @abs(numerical), 1e-2);
             const rel_err = abs_diff / denom;
@@ -769,7 +769,7 @@ test "gradCheck — TransformerBlock (residual connections)" {
     defer block.deinit();
 
     // Use -1 mask for grad check (not -1e9 or -10)
-    for (block.attn.causal_mask.data) |*v| {
+    for (block.attn.causal_mask.cpuData()) |*v| {
         if (v.* < 0.0) v.* = -1.0;
     }
 
@@ -804,7 +804,7 @@ test "gradCheck — TransformerBlock (residual connections)" {
 
     for (params.items) |param| {
         const grad = param.grad orelse continue;
-        const n = param.data.len;
+        const n = param.cpuData().len;
         const n_check = @min(n, 5);
         var max_rel_err: f32 = 0;
         var max_abs_diff: f32 = 0;
@@ -812,24 +812,24 @@ test "gradCheck — TransformerBlock (residual connections)" {
 
         for (0..n_check) |_| {
             const idx = check_rng.next() % n;
-            const original = param.data[idx];
+            const original = param.cpuData()[idx];
 
-            param.data[idx] = original + h;
+            param.cpuData()[idx] = original + h;
             var op = try block.forward(x, null);
             defer op.deinit(allocator);
             var lp = try ops_reduce.sumAll(allocator, op, null);
             defer lp.deinit(allocator);
 
-            param.data[idx] = original - h;
+            param.cpuData()[idx] = original - h;
             var om = try block.forward(x, null);
             defer om.deinit(allocator);
             var lm = try ops_reduce.sumAll(allocator, om, null);
             defer lm.deinit(allocator);
 
-            param.data[idx] = original;
+            param.cpuData()[idx] = original;
 
-            const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
-            const analytical = grad.data[idx];
+            const numerical = (lp.cpuData()[0] - lm.cpuData()[0]) / (2.0 * h);
+            const analytical = grad.cpuData()[idx];
             const abs_diff = @abs(analytical - numerical);
             const denom = @max(@abs(analytical), @abs(numerical), 1e-2);
             const rel_err = abs_diff / denom;
@@ -887,23 +887,23 @@ test "gradCheck — LayerNorm alone (3D input)" {
     // Check gamma
     {
         const grad = ln.gamma.grad.?;
-        const n = ln.gamma.data.len;
+        const n = ln.gamma.cpuData().len;
         var max_rel_err: f32 = 0;
         for (0..n) |idx| {
-            const original = ln.gamma.data[idx];
-            ln.gamma.data[idx] = original + h;
+            const original = ln.gamma.cpuData()[idx];
+            ln.gamma.cpuData()[idx] = original + h;
             var op = try ln.forward(x, null);
             defer op.deinit(allocator);
             var lp = try ops_reduce.sumAll(allocator, op, null);
             defer lp.deinit(allocator);
-            ln.gamma.data[idx] = original - h;
+            ln.gamma.cpuData()[idx] = original - h;
             var om = try ln.forward(x, null);
             defer om.deinit(allocator);
             var lm = try ops_reduce.sumAll(allocator, om, null);
             defer lm.deinit(allocator);
-            ln.gamma.data[idx] = original;
-            const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
-            const analytical = grad.data[idx];
+            ln.gamma.cpuData()[idx] = original;
+            const numerical = (lp.cpuData()[0] - lm.cpuData()[0]) / (2.0 * h);
+            const analytical = grad.cpuData()[idx];
             const abs_diff = @abs(analytical - numerical);
             const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
             const rel_err = abs_diff / denom;
@@ -916,23 +916,23 @@ test "gradCheck — LayerNorm alone (3D input)" {
     // Check beta
     {
         const grad = ln.beta.grad.?;
-        const n = ln.beta.data.len;
+        const n = ln.beta.cpuData().len;
         var max_rel_err: f32 = 0;
         for (0..n) |idx| {
-            const original = ln.beta.data[idx];
-            ln.beta.data[idx] = original + h;
+            const original = ln.beta.cpuData()[idx];
+            ln.beta.cpuData()[idx] = original + h;
             var op = try ln.forward(x, null);
             defer op.deinit(allocator);
             var lp = try ops_reduce.sumAll(allocator, op, null);
             defer lp.deinit(allocator);
-            ln.beta.data[idx] = original - h;
+            ln.beta.cpuData()[idx] = original - h;
             var om = try ln.forward(x, null);
             defer om.deinit(allocator);
             var lm = try ops_reduce.sumAll(allocator, om, null);
             defer lm.deinit(allocator);
-            ln.beta.data[idx] = original;
-            const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
-            const analytical = grad.data[idx];
+            ln.beta.cpuData()[idx] = original;
+            const numerical = (lp.cpuData()[0] - lm.cpuData()[0]) / (2.0 * h);
+            const analytical = grad.cpuData()[idx];
             const abs_diff = @abs(analytical - numerical);
             const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
             const rel_err = abs_diff / denom;
@@ -988,15 +988,15 @@ test "gradCheck — matmulBatch backward (Q @ K^T pattern)" {
         const grad = Q.grad.?;
         const h: f32 = 1e-4;
         var max_rel_err: f32 = 0;
-        const n = Q.data.len;
+        const n = Q.cpuData().len;
         const n_check = @min(n, 10);
         var check_rng = std.Random.Xoshiro256.init(77);
 
         for (0..n_check) |_| {
             const idx = check_rng.next() % n;
-            const original = Q.data[idx];
+            const original = Q.cpuData()[idx];
 
-            Q.data[idx] = original + h;
+            Q.cpuData()[idx] = original + h;
             var kt_p = try ops_shape.transposeInner2dTracked(allocator, K, null);
             defer kt_p.deinit(allocator);
             var sc_p = try ops_matmul.matmulBatch(allocator, Q, kt_p, null);
@@ -1004,7 +1004,7 @@ test "gradCheck — matmulBatch backward (Q @ K^T pattern)" {
             var lp = try ops_reduce.sumAll(allocator, sc_p, null);
             defer lp.deinit(allocator);
 
-            Q.data[idx] = original - h;
+            Q.cpuData()[idx] = original - h;
             var kt_m = try ops_shape.transposeInner2dTracked(allocator, K, null);
             defer kt_m.deinit(allocator);
             var sc_m = try ops_matmul.matmulBatch(allocator, Q, kt_m, null);
@@ -1012,10 +1012,10 @@ test "gradCheck — matmulBatch backward (Q @ K^T pattern)" {
             var lm = try ops_reduce.sumAll(allocator, sc_m, null);
             defer lm.deinit(allocator);
 
-            Q.data[idx] = original;
+            Q.cpuData()[idx] = original;
 
-            const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
-            const analytical = grad.data[idx];
+            const numerical = (lp.cpuData()[0] - lm.cpuData()[0]) / (2.0 * h);
+            const analytical = grad.cpuData()[idx];
             const abs_diff = @abs(analytical - numerical);
             const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
             const rel_err = abs_diff / denom;
@@ -1030,15 +1030,15 @@ test "gradCheck — matmulBatch backward (Q @ K^T pattern)" {
         const grad = K.grad.?;
         const h: f32 = 1e-4;
         var max_rel_err: f32 = 0;
-        const n = K.data.len;
+        const n = K.cpuData().len;
         const n_check = @min(n, 10);
         var check_rng = std.Random.Xoshiro256.init(88);
 
         for (0..n_check) |_| {
             const idx = check_rng.next() % n;
-            const original = K.data[idx];
+            const original = K.cpuData()[idx];
 
-            K.data[idx] = original + h;
+            K.cpuData()[idx] = original + h;
             var kt_p = try ops_shape.transposeInner2dTracked(allocator, K, null);
             defer kt_p.deinit(allocator);
             var sc_p = try ops_matmul.matmulBatch(allocator, Q, kt_p, null);
@@ -1046,7 +1046,7 @@ test "gradCheck — matmulBatch backward (Q @ K^T pattern)" {
             var lp = try ops_reduce.sumAll(allocator, sc_p, null);
             defer lp.deinit(allocator);
 
-            K.data[idx] = original - h;
+            K.cpuData()[idx] = original - h;
             var kt_m = try ops_shape.transposeInner2dTracked(allocator, K, null);
             defer kt_m.deinit(allocator);
             var sc_m = try ops_matmul.matmulBatch(allocator, Q, kt_m, null);
@@ -1054,10 +1054,10 @@ test "gradCheck — matmulBatch backward (Q @ K^T pattern)" {
             var lm = try ops_reduce.sumAll(allocator, sc_m, null);
             defer lm.deinit(allocator);
 
-            K.data[idx] = original;
+            K.cpuData()[idx] = original;
 
-            const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
-            const analytical = grad.data[idx];
+            const numerical = (lp.cpuData()[0] - lm.cpuData()[0]) / (2.0 * h);
+            const analytical = grad.cpuData()[idx];
             const abs_diff = @abs(analytical - numerical);
             const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
             const rel_err = abs_diff / denom;
@@ -1085,8 +1085,8 @@ test "gradCheck — attention Q@K^T path without softmax" {
     var w_k = try Linear.init(allocator, 4, 4, false, &rng);
     defer w_k.deinit();
 
-    for (w_q.weight.data) |*v| v.* *= 0.1;
-    for (w_k.weight.data) |*v| v.* *= 0.1;
+    for (w_q.weight.cpuData()) |*v| v.* *= 0.1;
+    for (w_k.weight.cpuData()) |*v| v.* *= 0.1;
 
     var x = try ops_create.randn(allocator, Shape.init3D(2, 3, 4), &rng, 0.0, 0.1);
     defer x.deinit(allocator);
@@ -1126,11 +1126,11 @@ test "gradCheck — attention Q@K^T path without softmax" {
         const grad = w_q.weight.grad.?;
         const h: f32 = 1e-4;
         var max_rel_err: f32 = 0;
-        const n = w_q.weight.data.len;
+        const n = w_q.weight.cpuData().len;
         for (0..n) |idx| {
-            const original = w_q.weight.data[idx];
+            const original = w_q.weight.cpuData()[idx];
 
-            w_q.weight.data[idx] = original + h;
+            w_q.weight.cpuData()[idx] = original + h;
             var q_p = try w_q.forward(x, null);
             defer q_p.deinit(allocator);
             var s_p = try ops_matmul.matmulBatch(allocator, q_p, k_t, null);
@@ -1138,7 +1138,7 @@ test "gradCheck — attention Q@K^T path without softmax" {
             var lp = try ops_reduce.sumAll(allocator, s_p, null);
             defer lp.deinit(allocator);
 
-            w_q.weight.data[idx] = original - h;
+            w_q.weight.cpuData()[idx] = original - h;
             var q_m = try w_q.forward(x, null);
             defer q_m.deinit(allocator);
             var s_m = try ops_matmul.matmulBatch(allocator, q_m, k_t, null);
@@ -1146,10 +1146,10 @@ test "gradCheck — attention Q@K^T path without softmax" {
             var lm = try ops_reduce.sumAll(allocator, s_m, null);
             defer lm.deinit(allocator);
 
-            w_q.weight.data[idx] = original;
+            w_q.weight.cpuData()[idx] = original;
 
-            const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
-            const analytical = grad.data[idx];
+            const numerical = (lp.cpuData()[0] - lm.cpuData()[0]) / (2.0 * h);
+            const analytical = grad.cpuData()[idx];
             const abs_diff = @abs(analytical - numerical);
             const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
             const rel_err = abs_diff / denom;
@@ -1181,7 +1181,7 @@ test "gradCheck — add broadcast 3D + 3D(1,T,T) backward" {
     defer b.deinit(allocator);
     for (0..3) |i| {
         for (0..3) |j| {
-            b.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+            b.cpuData()[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
         }
     }
 
@@ -1202,28 +1202,28 @@ test "gradCheck — add broadcast 3D + 3D(1,T,T) backward" {
 
     const grad = a.grad orelse unreachable;
     const h: f32 = 1e-4;
-    const n = a.data.len;
+    const n = a.cpuData().len;
     var max_rel_err: f32 = 0;
 
     for (0..n) |idx| {
-        const original = a.data[idx];
+        const original = a.cpuData()[idx];
 
-        a.data[idx] = original + h;
+        a.cpuData()[idx] = original + h;
         var cp = try ops_elementwise.add(allocator, a, b, null);
         defer cp.deinit(allocator);
         var lp = try ops_reduce.sumAll(allocator, cp, null);
         defer lp.deinit(allocator);
 
-        a.data[idx] = original - h;
+        a.cpuData()[idx] = original - h;
         var cm = try ops_elementwise.add(allocator, a, b, null);
         defer cm.deinit(allocator);
         var lm = try ops_reduce.sumAll(allocator, cm, null);
         defer lm.deinit(allocator);
 
-        a.data[idx] = original;
+        a.cpuData()[idx] = original;
 
-        const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
-        const analytical = grad.data[idx];
+        const numerical = (lp.cpuData()[0] - lm.cpuData()[0]) / (2.0 * h);
+        const analytical = grad.cpuData()[idx];
         const abs_diff = @abs(analytical - numerical);
         const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
         const rel_err = abs_diff / denom;
@@ -1257,10 +1257,10 @@ test "gradCheck — attention pipeline step-by-step" {
     var w_o = try Linear.init(allocator, 4, 4, true, &rng);
     defer w_o.deinit();
 
-    for (w_q.weight.data) |*v| v.* *= 0.1;
-    for (w_k.weight.data) |*v| v.* *= 0.1;
-    for (w_v.weight.data) |*v| v.* *= 0.1;
-    for (w_o.weight.data) |*v| v.* *= 0.1;
+    for (w_q.weight.cpuData()) |*v| v.* *= 0.1;
+    for (w_k.weight.cpuData()) |*v| v.* *= 0.1;
+    for (w_v.weight.cpuData()) |*v| v.* *= 0.1;
+    for (w_o.weight.cpuData()) |*v| v.* *= 0.1;
 
     var x = try ops_create.randn(allocator, Shape.init3D(2, 3, 4), &rng, 0.0, 0.1);
     defer x.deinit(allocator);
@@ -1314,7 +1314,7 @@ test "gradCheck — attention pipeline step-by-step" {
                 defer mask.deinit(allocator);
                 for (0..3) |i| {
                     for (0..3) |j| {
-                        mask.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+                        mask.cpuData()[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
                     }
                 }
                 var masked = try ops_elementwise.add(allocator, scaled, mask, &tape);
@@ -1329,7 +1329,7 @@ test "gradCheck — attention pipeline step-by-step" {
                 defer mask.deinit(allocator);
                 for (0..3) |i| {
                     for (0..3) |j| {
-                        mask.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+                        mask.cpuData()[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
                     }
                 }
                 var masked = try ops_elementwise.add(allocator, scaled, mask, &tape);
@@ -1346,7 +1346,7 @@ test "gradCheck — attention pipeline step-by-step" {
                 defer mask.deinit(allocator);
                 for (0..3) |i| {
                     for (0..3) |j| {
-                        mask.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+                        mask.cpuData()[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
                     }
                 }
                 var masked = try ops_elementwise.add(allocator, scaled, mask, &tape);
@@ -1367,13 +1367,13 @@ test "gradCheck — attention pipeline step-by-step" {
         try tape.backward(&loss);
 
         const grad = w_q.weight.grad orelse unreachable;
-        const n = w_q.weight.data.len;
+        const n = w_q.weight.cpuData().len;
         var max_rel_err: f32 = 0;
         var max_abs_diff: f32 = 0;
         for (0..n) |idx| {
-            const original = w_q.weight.data[idx];
+            const original = w_q.weight.cpuData()[idx];
 
-            w_q.weight.data[idx] = original + h;
+            w_q.weight.cpuData()[idx] = original + h;
             var q_p = try w_q.forward(x, null);
             defer q_p.deinit(allocator);
             var k_p = try w_k.forward(x, null);
@@ -1388,7 +1388,7 @@ test "gradCheck — attention pipeline step-by-step" {
                 .scores_only => {
                     var l = try ops_reduce.sumAll(allocator, sc_p, null);
                     defer l.deinit(allocator);
-                    lp = l.data[0];
+                    lp = l.cpuData()[0];
                 },
                 .scaled => {
                     const sc: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
@@ -1396,7 +1396,7 @@ test "gradCheck — attention pipeline step-by-step" {
                     defer s.deinit(allocator);
                     var l = try ops_reduce.sumAll(allocator, s, null);
                     defer l.deinit(allocator);
-                    lp = l.data[0];
+                    lp = l.cpuData()[0];
                 },
                 .masked => {
                     const sc: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
@@ -1406,14 +1406,14 @@ test "gradCheck — attention pipeline step-by-step" {
                     defer mask.deinit(allocator);
                     for (0..3) |i| {
                         for (0..3) |j| {
-                            mask.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+                            mask.cpuData()[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
                         }
                     }
                     var m = try ops_elementwise.add(allocator, s, mask, null);
                     defer m.deinit(allocator);
                     var l = try ops_reduce.sumAll(allocator, m, null);
                     defer l.deinit(allocator);
-                    lp = l.data[0];
+                    lp = l.cpuData()[0];
                 },
                 .softmaxed => {
                     const sc: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
@@ -1423,7 +1423,7 @@ test "gradCheck — attention pipeline step-by-step" {
                     defer mask.deinit(allocator);
                     for (0..3) |i| {
                         for (0..3) |j| {
-                            mask.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+                            mask.cpuData()[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
                         }
                     }
                     var m = try ops_elementwise.add(allocator, s, mask, null);
@@ -1432,7 +1432,7 @@ test "gradCheck — attention pipeline step-by-step" {
                     defer w.deinit(allocator);
                     var l = try ops_reduce.sumAll(allocator, w, null);
                     defer l.deinit(allocator);
-                    lp = l.data[0];
+                    lp = l.cpuData()[0];
                 },
                 .full_attn => {
                     const sc: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
@@ -1442,7 +1442,7 @@ test "gradCheck — attention pipeline step-by-step" {
                     defer mask.deinit(allocator);
                     for (0..3) |i| {
                         for (0..3) |j| {
-                            mask.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+                            mask.cpuData()[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
                         }
                     }
                     var m = try ops_elementwise.add(allocator, s, mask, null);
@@ -1457,11 +1457,11 @@ test "gradCheck — attention pipeline step-by-step" {
                     defer out_p.deinit(allocator);
                     var l = try ops_reduce.sumAll(allocator, out_p, null);
                     defer l.deinit(allocator);
-                    lp = l.data[0];
+                    lp = l.cpuData()[0];
                 },
             }
 
-            w_q.weight.data[idx] = original - h;
+            w_q.weight.cpuData()[idx] = original - h;
             var q_m = try w_q.forward(x, null);
             defer q_m.deinit(allocator);
             var k_m = try w_k.forward(x, null);
@@ -1476,7 +1476,7 @@ test "gradCheck — attention pipeline step-by-step" {
                 .scores_only => {
                     var l = try ops_reduce.sumAll(allocator, sc_m, null);
                     defer l.deinit(allocator);
-                    lm = l.data[0];
+                    lm = l.cpuData()[0];
                 },
                 .scaled => {
                     const sc: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
@@ -1484,7 +1484,7 @@ test "gradCheck — attention pipeline step-by-step" {
                     defer s.deinit(allocator);
                     var l = try ops_reduce.sumAll(allocator, s, null);
                     defer l.deinit(allocator);
-                    lm = l.data[0];
+                    lm = l.cpuData()[0];
                 },
                 .masked => {
                     const sc: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
@@ -1494,14 +1494,14 @@ test "gradCheck — attention pipeline step-by-step" {
                     defer mask.deinit(allocator);
                     for (0..3) |i| {
                         for (0..3) |j| {
-                            mask.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+                            mask.cpuData()[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
                         }
                     }
                     var m = try ops_elementwise.add(allocator, s, mask, null);
                     defer m.deinit(allocator);
                     var l = try ops_reduce.sumAll(allocator, m, null);
                     defer l.deinit(allocator);
-                    lm = l.data[0];
+                    lm = l.cpuData()[0];
                 },
                 .softmaxed => {
                     const sc: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
@@ -1511,7 +1511,7 @@ test "gradCheck — attention pipeline step-by-step" {
                     defer mask.deinit(allocator);
                     for (0..3) |i| {
                         for (0..3) |j| {
-                            mask.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+                            mask.cpuData()[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
                         }
                     }
                     var m = try ops_elementwise.add(allocator, s, mask, null);
@@ -1520,7 +1520,7 @@ test "gradCheck — attention pipeline step-by-step" {
                     defer w.deinit(allocator);
                     var l = try ops_reduce.sumAll(allocator, w, null);
                     defer l.deinit(allocator);
-                    lm = l.data[0];
+                    lm = l.cpuData()[0];
                 },
                 .full_attn => {
                     const sc: f32 = @floatCast(1.0 / std.math.sqrt(@as(f64, @floatFromInt(D))));
@@ -1530,7 +1530,7 @@ test "gradCheck — attention pipeline step-by-step" {
                     defer mask.deinit(allocator);
                     for (0..3) |i| {
                         for (0..3) |j| {
-                            mask.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+                            mask.cpuData()[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
                         }
                     }
                     var m = try ops_elementwise.add(allocator, s, mask, null);
@@ -1545,14 +1545,14 @@ test "gradCheck — attention pipeline step-by-step" {
                     defer out_m.deinit(allocator);
                     var l = try ops_reduce.sumAll(allocator, out_m, null);
                     defer l.deinit(allocator);
-                    lm = l.data[0];
+                    lm = l.cpuData()[0];
                 },
             }
 
-            w_q.weight.data[idx] = original;
+            w_q.weight.cpuData()[idx] = original;
 
             const numerical = (lp - lm) / (2.0 * h);
-            const analytical = grad.data[idx];
+            const analytical = grad.cpuData()[idx];
             const abs_diff = @abs(analytical - numerical);
             // denom_floor=1e-2: near-zero gradients (< 0.01) cause inflated
             // relative error from finite-difference noise, especially in
@@ -1602,7 +1602,7 @@ test "gradCheck — CausalSelfAttention alone" {
     // With -0.5, the softmax of the upper triangle gets exp(-0.5) ≈ 0.607,
     // keeping the distribution smooth enough for accurate gradients
     // while still enforcing the causal pattern.
-    for (attn.causal_mask.data) |*v| {
+    for (attn.causal_mask.cpuData()) |*v| {
         if (v.* < 0.0) v.* = -0.5;
     }
 
@@ -1637,7 +1637,7 @@ test "gradCheck — CausalSelfAttention alone" {
     var max_overall_abs: f32 = 0;
     for (params.items) |param| {
         const grad = param.grad orelse continue;
-        const n = param.data.len;
+        const n = param.cpuData().len;
         const n_check = @min(n, 5);
         var max_rel_err: f32 = 0;
         var max_abs_analytical: f32 = 0;
@@ -1647,24 +1647,24 @@ test "gradCheck — CausalSelfAttention alone" {
 
         for (0..n_check) |_| {
             const idx = check_rng.next() % n;
-            const original = param.data[idx];
+            const original = param.cpuData()[idx];
 
-            param.data[idx] = original + h;
+            param.cpuData()[idx] = original + h;
             var op = try attn.forward(x, null);
             defer op.deinit(allocator);
             var lp = try ops_reduce.sumAll(allocator, op, null);
             defer lp.deinit(allocator);
 
-            param.data[idx] = original - h;
+            param.cpuData()[idx] = original - h;
             var om = try attn.forward(x, null);
             defer om.deinit(allocator);
             var lm = try ops_reduce.sumAll(allocator, om, null);
             defer lm.deinit(allocator);
 
-            param.data[idx] = original;
+            param.cpuData()[idx] = original;
 
-            const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
-            const analytical = grad.data[idx];
+            const numerical = (lp.cpuData()[0] - lm.cpuData()[0]) / (2.0 * h);
+            const analytical = grad.cpuData()[idx];
             const abs_diff = @abs(analytical - numerical);
             const denom = @max(@abs(analytical), @abs(numerical), 1e-2);
             const rel_err = abs_diff / denom;
@@ -1717,7 +1717,7 @@ test "gradCheck — softmax backward produces zero when loss=sumAll(softmax)" {
 
     const grad = x.grad orelse unreachable;
     var max_abs: f32 = 0;
-    for (grad.data) |v| {
+    for (grad.cpuData()) |v| {
         max_abs = @max(max_abs, @abs(v));
     }
 
@@ -1746,8 +1746,8 @@ test "gradCheck — softmax with mask then sumAll (pipeline softmaxed)" {
     var w_k = try Linear.init(allocator, 4, 4, true, &rng);
     defer w_k.deinit();
 
-    for (w_q.weight.data) |*v| v.* *= 0.1;
-    for (w_k.weight.data) |*v| v.* *= 0.1;
+    for (w_q.weight.cpuData()) |*v| v.* *= 0.1;
+    for (w_k.weight.cpuData()) |*v| v.* *= 0.1;
 
     var x = try ops_create.randn(allocator, Shape.init3D(2, 3, 4), &rng, 0.0, 0.1);
     defer x.deinit(allocator);
@@ -1779,7 +1779,7 @@ test "gradCheck — softmax with mask then sumAll (pipeline softmaxed)" {
     defer mask.deinit(allocator);
     for (0..3) |i| {
         for (0..3) |j| {
-            mask.data[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
+            mask.cpuData()[i * 3 + j] = if (j <= i) @as(f32, 0.0) else -1.0;
         }
     }
     var masked = try ops_elementwise.add(allocator, scaled, mask, &tape);
@@ -1795,7 +1795,7 @@ test "gradCheck — softmax with mask then sumAll (pipeline softmaxed)" {
 
     const grad = w_q.weight.grad orelse unreachable;
     var max_abs: f32 = 0;
-    for (grad.data) |v| {
+    for (grad.cpuData()) |v| {
         max_abs = @max(max_abs, @abs(v));
     }
 
@@ -1839,13 +1839,13 @@ test "gradCheck — softmax backward (2D, non-trivial loss)" {
 
     const grad = x.grad orelse unreachable;
     const h: f32 = 1e-4;
-    const n = x.data.len;
+    const n = x.cpuData().len;
     var max_rel_err: f32 = 0;
 
     for (0..n) |idx| {
-        const original = x.data[idx];
+        const original = x.cpuData()[idx];
 
-        x.data[idx] = original + h;
+        x.cpuData()[idx] = original + h;
         var sp = try ops_softmax.softmax(allocator, x, null);
         defer sp.deinit(allocator);
         var wp = try ops_elementwise.mul(allocator, sp, target, null);
@@ -1853,7 +1853,7 @@ test "gradCheck — softmax backward (2D, non-trivial loss)" {
         var lp = try ops_reduce.sumAll(allocator, wp, null);
         defer lp.deinit(allocator);
 
-        x.data[idx] = original - h;
+        x.cpuData()[idx] = original - h;
         var sm = try ops_softmax.softmax(allocator, x, null);
         defer sm.deinit(allocator);
         var wm = try ops_elementwise.mul(allocator, sm, target, null);
@@ -1861,10 +1861,10 @@ test "gradCheck — softmax backward (2D, non-trivial loss)" {
         var lm = try ops_reduce.sumAll(allocator, wm, null);
         defer lm.deinit(allocator);
 
-        x.data[idx] = original;
+        x.cpuData()[idx] = original;
 
-        const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
-        const analytical = grad.data[idx];
+        const numerical = (lp.cpuData()[0] - lm.cpuData()[0]) / (2.0 * h);
+        const analytical = grad.cpuData()[idx];
         const abs_diff = @abs(analytical - numerical);
         const denom = @max(@abs(analytical), @abs(numerical), 1e-8);
         const rel_err = abs_diff / denom;
@@ -1911,7 +1911,7 @@ test "gradCheck — softmax backward (3D, non-trivial loss)" {
 
     const grad = x.grad orelse unreachable;
     const h: f32 = 1e-4;
-    const n = x.data.len;
+    const n = x.cpuData().len;
     var max_rel_err: f32 = 0;
     var max_abs_diff: f32 = 0;
     // Use denom floor of 1e-2 for relative error: near-zero gradients
@@ -1920,9 +1920,9 @@ test "gradCheck — softmax backward (3D, non-trivial loss)" {
     const denom_floor: f32 = 1e-2;
 
     for (0..n) |idx| {
-        const original = x.data[idx];
+        const original = x.cpuData()[idx];
 
-        x.data[idx] = original + h;
+        x.cpuData()[idx] = original + h;
         var sp = try ops_softmax.softmax(allocator, x, null);
         defer sp.deinit(allocator);
         var wp = try ops_elementwise.mul(allocator, sp, target, null);
@@ -1930,7 +1930,7 @@ test "gradCheck — softmax backward (3D, non-trivial loss)" {
         var lp = try ops_reduce.sumAll(allocator, wp, null);
         defer lp.deinit(allocator);
 
-        x.data[idx] = original - h;
+        x.cpuData()[idx] = original - h;
         var sm = try ops_softmax.softmax(allocator, x, null);
         defer sm.deinit(allocator);
         var wm = try ops_elementwise.mul(allocator, sm, target, null);
@@ -1938,10 +1938,10 @@ test "gradCheck — softmax backward (3D, non-trivial loss)" {
         var lm = try ops_reduce.sumAll(allocator, wm, null);
         defer lm.deinit(allocator);
 
-        x.data[idx] = original;
+        x.cpuData()[idx] = original;
 
-        const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
-        const analytical = grad.data[idx];
+        const numerical = (lp.cpuData()[0] - lm.cpuData()[0]) / (2.0 * h);
+        const analytical = grad.cpuData()[idx];
         const abs_diff = @abs(analytical - numerical);
         const denom = @max(@abs(analytical), @abs(numerical), denom_floor);
         const rel_err = abs_diff / denom;
@@ -1991,15 +1991,15 @@ test "gradCheck — softmax→matmulBatch (weights@V path)" {
 
     const grad = x.grad orelse unreachable;
     const h: f32 = 1e-4;
-    const n = x.data.len;
+    const n = x.cpuData().len;
     var max_rel_err: f32 = 0;
     var max_abs_diff: f32 = 0;
     const denom_floor: f32 = 1e-2;
 
     for (0..n) |idx| {
-        const original = x.data[idx];
+        const original = x.cpuData()[idx];
 
-        x.data[idx] = original + h;
+        x.cpuData()[idx] = original + h;
         var wp = try ops_softmax.softmax(allocator, x, null);
         defer wp.deinit(allocator);
         var aop = try ops_matmul.matmulBatch(allocator, wp, v_tensor, null);
@@ -2007,7 +2007,7 @@ test "gradCheck — softmax→matmulBatch (weights@V path)" {
         var lp = try ops_reduce.sumAll(allocator, aop, null);
         defer lp.deinit(allocator);
 
-        x.data[idx] = original - h;
+        x.cpuData()[idx] = original - h;
         var wm = try ops_softmax.softmax(allocator, x, null);
         defer wm.deinit(allocator);
         var aom = try ops_matmul.matmulBatch(allocator, wm, v_tensor, null);
@@ -2015,10 +2015,10 @@ test "gradCheck — softmax→matmulBatch (weights@V path)" {
         var lm = try ops_reduce.sumAll(allocator, aom, null);
         defer lm.deinit(allocator);
 
-        x.data[idx] = original;
+        x.cpuData()[idx] = original;
 
-        const numerical = (lp.data[0] - lm.data[0]) / (2.0 * h);
-        const analytical = grad.data[idx];
+        const numerical = (lp.cpuData()[0] - lm.cpuData()[0]) / (2.0 * h);
+        const analytical = grad.cpuData()[idx];
         const abs_diff = @abs(analytical - numerical);
         const denom = @max(@abs(analytical), @abs(numerical), denom_floor);
         const rel_err = abs_diff / denom;

@@ -177,7 +177,7 @@ pub fn exp(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!
         // Last axis: remaining is the index along the last dim
         offset += remaining * tensor.strides.values[axis];
 
-        out.data[flat] = @exp(tensor.data[offset]);
+        out.cpuData()[flat] = @exp(tensor.cpuData()[offset]);
     }
 
     if (tape) |t| {
@@ -249,7 +249,7 @@ pub fn log(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!
         }
         offset += remaining * tensor.strides.values[axis];
 
-        out.data[flat] = @log(tensor.data[offset]);
+        out.cpuData()[flat] = @log(tensor.cpuData()[offset]);
     }
 
     if (tape) |t| {
@@ -320,7 +320,7 @@ pub fn neg(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError!
         }
         offset += remaining * tensor.strides.values[axis];
 
-        out.data[flat] = -tensor.data[offset];
+        out.cpuData()[flat] = -tensor.cpuData()[offset];
     }
 
     if (tape) |t| {
@@ -376,7 +376,7 @@ pub fn relu(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError
         }
         offset += remaining * tensor.strides.values[axis];
 
-        out.data[flat] = @max(@as(f32, 0.0), tensor.data[offset]);
+        out.cpuData()[flat] = @max(@as(f32, 0.0), tensor.cpuData()[offset]);
     }
 
     if (tape) |t| {
@@ -454,12 +454,12 @@ pub fn geluExact(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) Lab
         }
         offset += remaining * tensor.strides.values[axis];
 
-        const val = tensor.data[offset];
+        const val = tensor.cpuData()[offset];
         // Use our polynomial erf approximation in f64, then cast
         // back to f32 for the output.
         const erf_arg: f64 = @floatCast(val * inv_sqrt2);
         const erf_val: f64 = erfFloat(erf_arg);
-        out.data[flat] = 0.5 * val * (1.0 + @as(f32, @floatCast(erf_val)));
+        out.cpuData()[flat] = 0.5 * val * (1.0 + @as(f32, @floatCast(erf_val)));
     }
 
     if (tape) |t| {
@@ -532,7 +532,7 @@ pub fn sqrt(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError
         }
         offset += remaining * tensor.strides.values[axis];
 
-        out.data[flat] = @sqrt(tensor.data[offset]);
+        out.cpuData()[flat] = @sqrt(tensor.cpuData()[offset]);
     }
 
     if (tape) |t| {
@@ -561,16 +561,16 @@ test "exp [0, 1, 2] = [1, e, e^2]" {
 
     var t = try Tensor.init(alloc, Shape.init1D(3));
     defer t.deinit(alloc);
-    t.data[0] = 0.0;
-    t.data[1] = 1.0;
-    t.data[2] = 2.0;
+    t.cpuData()[0] = 0.0;
+    t.cpuData()[1] = 1.0;
+    t.cpuData()[2] = 2.0;
 
     var out = try exp(alloc, t, null);
     defer out.deinit(alloc);
 
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), out.data[0], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, std.math.e), out.data[1], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, std.math.e * std.math.e), out.data[2], 1e-2);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), out.cpuData()[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, std.math.e), out.cpuData()[1], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, std.math.e * std.math.e), out.cpuData()[2], 1e-2);
 }
 
 test "log [1, e, e^2] = [0, 1, 2]" {
@@ -578,16 +578,16 @@ test "log [1, e, e^2] = [0, 1, 2]" {
 
     var t = try Tensor.init(alloc, Shape.init1D(3));
     defer t.deinit(alloc);
-    t.data[0] = 1.0;
-    t.data[1] = @floatCast(std.math.e);
-    t.data[2] = @floatCast(std.math.e * std.math.e);
+    t.cpuData()[0] = 1.0;
+    t.cpuData()[1] = @floatCast(std.math.e);
+    t.cpuData()[2] = @floatCast(std.math.e * std.math.e);
 
     var out = try log(alloc, t, null);
     defer out.deinit(alloc);
 
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), out.data[0], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), out.data[1], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 2.0), out.data[2], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), out.cpuData()[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), out.cpuData()[1], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), out.cpuData()[2], 1e-3);
 }
 
 test "neg [-1, 0, 1] = [1, 0, -1]" {
@@ -595,16 +595,16 @@ test "neg [-1, 0, 1] = [1, 0, -1]" {
 
     var t = try Tensor.init(alloc, Shape.init1D(3));
     defer t.deinit(alloc);
-    t.data[0] = -1.0;
-    t.data[1] = 0.0;
-    t.data[2] = 1.0;
+    t.cpuData()[0] = -1.0;
+    t.cpuData()[1] = 0.0;
+    t.cpuData()[2] = 1.0;
 
     var out = try neg(alloc, t, null);
     defer out.deinit(alloc);
 
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), out.data[0], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), out.data[1], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, -1.0), out.data[2], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), out.cpuData()[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), out.cpuData()[1], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, -1.0), out.cpuData()[2], 1e-4);
 }
 
 test "relu [-1, 0, 1] = [0, 0, 1]" {
@@ -612,16 +612,16 @@ test "relu [-1, 0, 1] = [0, 0, 1]" {
 
     var t = try Tensor.init(alloc, Shape.init1D(3));
     defer t.deinit(alloc);
-    t.data[0] = -1.0;
-    t.data[1] = 0.0;
-    t.data[2] = 1.0;
+    t.cpuData()[0] = -1.0;
+    t.cpuData()[1] = 0.0;
+    t.cpuData()[2] = 1.0;
 
     var out = try relu(alloc, t, null);
     defer out.deinit(alloc);
 
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), out.data[0], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), out.data[1], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), out.data[2], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), out.cpuData()[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), out.cpuData()[1], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), out.cpuData()[2], 1e-4);
 }
 
 test "geluExact [0] ~ 0, [1] ~ 0.8412" {
@@ -629,19 +629,19 @@ test "geluExact [0] ~ 0, [1] ~ 0.8412" {
 
     var t0 = try Tensor.init(alloc, Shape.init1D(1));
     defer t0.deinit(alloc);
-    t0.data[0] = 0.0;
+    t0.cpuData()[0] = 0.0;
 
     var out0 = try geluExact(alloc, t0, null);
     defer out0.deinit(alloc);
     // gelu(0) = 0.5 * 0 * (1 + erf(0)) = 0
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), out0.data[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), out0.cpuData()[0], 1e-4);
 
     var t1 = try Tensor.init(alloc, Shape.init1D(1));
     defer t1.deinit(alloc);
-    t1.data[0] = 1.0;
+    t1.cpuData()[0] = 1.0;
 
     var out1 = try geluExact(alloc, t1, null);
     defer out1.deinit(alloc);
     // gelu(1) = 0.5 * 1 * (1 + erf(1/sqrt(2))) ~ 0.8412
-    try std.testing.expectApproxEqAbs(@as(f32, 0.8412), out1.data[0], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.8412), out1.cpuData()[0], 1e-3);
 }

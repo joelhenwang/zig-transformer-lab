@@ -67,7 +67,7 @@ pub const AdamW = struct {
     /// Per-parameter state: first and second moment estimates.
     ///
     /// PR-ζ: keyed by the parameter's stable `ParamId` rather than by
-    /// `@intFromPtr(param.data.ptr)`. The pointer key was a latent bug:
+    /// `@intFromPtr(param.cpuData().ptr)`. The pointer key was a latent bug:
     /// checkpoint loads that allocate a fresh buffer (or future device
     /// transfers that move the tensor to CUDA) would silently change
     /// the key, and the optimizer would start again with zero moments
@@ -148,7 +148,7 @@ pub const AdamW = struct {
             }
 
             // CPU path.
-            for (param.data, grad.data, s.m.data, s.v.data) |*p, g, *m, *vel| {
+            for (param.cpuData(), grad.cpuData(), s.m.cpuData(), s.v.cpuData()) |*p, g, *m, *vel| {
                 m.* = beta1 * m.* + (1.0 - beta1) * g;
                 vel.* = beta2 * vel.* + (1.0 - beta2) * g * g;
 
@@ -226,17 +226,17 @@ test "AdamW step — decreases parameter magnitude" {
 
     var param = try Tensor.init(alloc, @import("../tensor/shape.zig").Shape.init1D(3));
     defer param.deinit(alloc);
-    param.data[0] = 5.0;
-    param.data[1] = -3.0;
-    param.data[2] = 0.0;
+    param.cpuData()[0] = 5.0;
+    param.cpuData()[1] = -3.0;
+    param.cpuData()[2] = 0.0;
     // PR-ζ: assign a ParamId so the optimizer can key state.
     @import("../nn/module.zig").assignParamId(&param);
 
     var grad = try Tensor.init(alloc, @import("../tensor/shape.zig").Shape.init1D(3));
     defer grad.deinit(alloc);
-    grad.data[0] = 1.0;
-    grad.data[1] = -1.0;
-    grad.data[2] = 0.0;
+    grad.cpuData()[0] = 1.0;
+    grad.cpuData()[1] = -1.0;
+    grad.cpuData()[2] = 0.0;
 
     param.grad = &grad;
 
@@ -245,8 +245,8 @@ test "AdamW step — decreases parameter magnitude" {
     try opt.step(&params);
 
     // Update should move param in the direction of -grad
-    try std.testing.expect(param.data[0] < 5.0);
-    try std.testing.expect(param.data[1] > -3.0);
+    try std.testing.expect(param.cpuData()[0] < 5.0);
+    try std.testing.expect(param.cpuData()[1] > -3.0);
 }
 
 test "AdamW step — rejects parameter without ParamId" {
@@ -288,8 +288,8 @@ test "AdamW state persists across buffer replacement (same ParamId)" {
     const id = p1.param_id.?;
 
     var g1 = try Tensor.init(alloc, Shape.init1D(2));
-    g1.data[0] = 1.0;
-    g1.data[1] = -0.5;
+    g1.cpuData()[0] = 1.0;
+    g1.cpuData()[1] = -0.5;
     p1.grad = &g1;
     try opt.step(&.{&p1});
     try std.testing.expect(adam.state.contains(id));
@@ -299,7 +299,7 @@ test "AdamW state persists across buffer replacement (same ParamId)" {
 
     // Replacement parameter with the same ID (simulating checkpoint
     // reload). The buffer is different; if we were keying by
-    // `@intFromPtr(p2.data.ptr)` the new key wouldn't match and the
+    // `@intFromPtr(p2.cpuData().ptr)` the new key wouldn't match and the
     // optimizer would allocate new m/v buffers. With ParamId keying,
     // the existing state is reused.
     var p2 = try Tensor.init(alloc, Shape.init1D(2));
@@ -307,8 +307,8 @@ test "AdamW state persists across buffer replacement (same ParamId)" {
     p2.param_id = id;
     var g2 = try Tensor.init(alloc, Shape.init1D(2));
     defer g2.deinit(alloc);
-    g2.data[0] = 0.3;
-    g2.data[1] = 0.1;
+    g2.cpuData()[0] = 0.3;
+    g2.cpuData()[1] = 0.1;
     p2.grad = &g2;
 
     const state_before = adam.state.count();

@@ -23,7 +23,7 @@
 //!   of memory reads; one pass means 4 MB. The data stays in L2 cache.
 //!
 //! Shape contract:
-//!   Both functions read tensor.data[0..totalElements()]. They do NOT
+//!   Both functions read tensor.cpuData()[0..totalElements()]. They do NOT
 //!   use flatIndex() because stats are computed over the flat buffer
 //!   regardless of stride layout. For a non-contiguous tensor, the
 //!   "flat" stats may not match the logical element order, but they
@@ -92,7 +92,7 @@ pub fn debugSummary(tensor: Tensor, writer: *std.Io.Writer) !void {
     //   1. All elements are in the buffer regardless of strides.
     //   2. A single linear scan is cache-friendly.
     //   3. For contiguous tensors, this is exactly the logical order.
-    const n = tensor.data.len;
+    const n = tensor.cpuData().len;
 
     var min_val: f32 = std.math.inf(f32); // Start at +inf so any real value is smaller
     var max_val: f32 = -std.math.inf(f32); // Start at -inf so any real value is larger
@@ -100,7 +100,7 @@ pub fn debugSummary(tensor: Tensor, writer: *std.Io.Writer) !void {
     var nan_count: usize = 0;
     var inf_count: usize = 0;
 
-    for (tensor.data) |v| {
+    for (tensor.cpuData()) |v| {
         // Check for NaN first — NaN comparisons are always false, so
         // we must detect it before the min/max comparisons. A NaN would
         // never update min_val or max_val because (NaN < x) is false
@@ -160,12 +160,12 @@ pub fn debugSummary(tensor: Tensor, writer: *std.Io.Writer) !void {
 ///   // Output: [1.000, 2.000, 3.000, ...]
 pub fn printValues(tensor: Tensor, writer: *std.Io.Writer, max_items: usize) !void {
     try writer.print("[", .{});
-    const n = tensor.data.len;
+    const n = tensor.cpuData().len;
     const limit = @min(n, max_items);
 
     for (0..limit) |i| {
         if (i > 0) try writer.print(", ", .{});
-        try writer.print("{d:.3}", .{tensor.data[i]});
+        try writer.print("{d:.3}", .{tensor.cpuData()[i]});
     }
 
     // If we truncated, show "..." to indicate there are more values
@@ -188,12 +188,12 @@ test "debugSummary on a small known tensor" {
     defer t.deinit(std.testing.allocator);
 
     // Fill with known values: [1, 2, 3, 4, 5, 6]
-    t.data[0] = 1.0;
-    t.data[1] = 2.0;
-    t.data[2] = 3.0;
-    t.data[3] = 4.0;
-    t.data[4] = 5.0;
-    t.data[5] = 6.0;
+    t.cpuData()[0] = 1.0;
+    t.cpuData()[1] = 2.0;
+    t.cpuData()[2] = 3.0;
+    t.cpuData()[3] = 4.0;
+    t.cpuData()[4] = 5.0;
+    t.cpuData()[5] = 6.0;
 
     // Write to a fixed buffer so we can inspect the output.
     // In Zig 0.16.0, std.Io.Writer.fixed(buf) creates a writer that
@@ -231,10 +231,10 @@ test "debugSummary detects NaN and Inf" {
     defer t.deinit(std.testing.allocator);
 
     // Put in a NaN, an Inf, a -Inf, and a normal value
-    t.data[0] = std.math.nan(f32);
-    t.data[1] = std.math.inf(f32);
-    t.data[2] = -std.math.inf(f32);
-    t.data[3] = 1.0;
+    t.cpuData()[0] = std.math.nan(f32);
+    t.cpuData()[1] = std.math.inf(f32);
+    t.cpuData()[2] = -std.math.inf(f32);
+    t.cpuData()[3] = 1.0;
 
     var buf: [512]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buf);
@@ -255,7 +255,7 @@ test "printValues with truncation" {
 
     // Fill with [1, 2, 3, 4, 5, 6]
     for (0..6) |i| {
-        t.data[i] = @floatFromInt(i + 1);
+        t.cpuData()[i] = @floatFromInt(i + 1);
     }
 
     var buf: [256]u8 = undefined;
@@ -281,9 +281,9 @@ test "printValues without truncation" {
     var t = try Tensor.init(std.testing.allocator, shape);
     defer t.deinit(std.testing.allocator);
 
-    t.data[0] = 10.0;
-    t.data[1] = 20.0;
-    t.data[2] = 30.0;
+    t.cpuData()[0] = 10.0;
+    t.cpuData()[1] = 20.0;
+    t.cpuData()[2] = 30.0;
 
     var buf: [256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buf);

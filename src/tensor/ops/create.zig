@@ -46,21 +46,21 @@ const Rng = @import("../../core/rng.zig").Rng;
 pub fn zeros(allocator: std.mem.Allocator, shape: Shape) !Tensor {
     const t = try Tensor.init(allocator, shape);
     // Tensor.init already zeroes the data, but let's be explicit
-    @memset(t.data, 0);
+    @memset(t.cpuData(), 0);
     return t;
 }
 
 /// Create a tensor filled with 1.0.
 pub fn ones(allocator: std.mem.Allocator, shape: Shape) !Tensor {
     const t = try Tensor.init(allocator, shape);
-    @memset(t.data, @as(f32, 1.0));
+    @memset(t.cpuData(), @as(f32, 1.0));
     return t;
 }
 
 /// Create a tensor filled with a constant value.
 pub fn full(allocator: std.mem.Allocator, shape: Shape, value: f32) !Tensor {
     const t = try Tensor.init(allocator, shape);
-    @memset(t.data, value);
+    @memset(t.cpuData(), value);
     return t;
 }
 
@@ -100,7 +100,7 @@ pub fn randn(allocator: std.mem.Allocator, shape: Shape, rng: *Rng, mean: f32, s
     var t = try Tensor.init(allocator, shape);
     const n = totalElements(shape);
     for (0..n) |i| {
-        t.data[i] = mean + std_dev * rng.normalF32();
+        t.cpuData()[i] = mean + std_dev * rng.normalF32();
     }
     return t;
 }
@@ -113,7 +113,7 @@ pub fn randu(allocator: std.mem.Allocator, shape: Shape, rng: *Rng, low: f32, hi
     const n = totalElements(shape);
     const range = high - low;
     for (0..n) |i| {
-        t.data[i] = low + range * rng.floatF32();
+        t.cpuData()[i] = low + range * rng.floatF32();
     }
     return t;
 }
@@ -132,7 +132,7 @@ pub fn arange(allocator: std.mem.Allocator, start: f32, stop: f32, step: f32) !T
     const t = try Tensor.init(allocator, shape);
     var val: f32 = start;
     for (0..count) |i| {
-        t.data[i] = val;
+        t.cpuData()[i] = val;
         val += step;
     }
     return t;
@@ -150,7 +150,7 @@ pub fn fromSlice(allocator: std.mem.Allocator, shape: Shape, data: []const f32) 
     const n = totalElements(shape);
     if (data.len != n) return LabError.ShapeMismatch;
     const t = try Tensor.init(allocator, shape);
-    @memcpy(t.data, data);
+    @memcpy(t.cpuData(), data);
     return t;
 }
 
@@ -163,7 +163,7 @@ test "zeros creates zero-filled tensor" {
     const shape = Shape.init2D(2, 3);
     var t = try zeros(allocator, shape);
     defer t.deinit(allocator);
-    for (t.data) |v| {
+    for (t.cpuData()) |v| {
         try std.testing.expectEqual(@as(f32, 0.0), v);
     }
 }
@@ -173,7 +173,7 @@ test "ones creates one-filled tensor" {
     const shape = Shape.init2D(2, 3);
     var t = try ones(allocator, shape);
     defer t.deinit(allocator);
-    for (t.data) |v| {
+    for (t.cpuData()) |v| {
         try std.testing.expectEqual(@as(f32, 1.0), v);
     }
 }
@@ -183,7 +183,7 @@ test "full creates constant-filled tensor" {
     const shape = Shape.init2D(2, 3);
     var t = try full(allocator, shape, 42.0);
     defer t.deinit(allocator);
-    for (t.data) |v| {
+    for (t.cpuData()) |v| {
         try std.testing.expectEqual(@as(f32, 42.0), v);
     }
 }
@@ -196,7 +196,7 @@ test "randn produces values with approximate mean and std" {
     defer t.deinit(allocator);
     // Compute sample mean
     var sum: f32 = 0;
-    for (t.data) |v| sum += v;
+    for (t.cpuData()) |v| sum += v;
     const mean = sum / 1000.0;
     // Should be approximately 5.0 (within 1.0 for 1000 samples)
     try std.testing.expect(@abs(mean - 5.0) < 1.0);
@@ -207,9 +207,9 @@ test "arange produces sequential values" {
     var t = try arange(allocator, 0.0, 6.0, 2.0);
     defer t.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 3), t.shape.dims[0]);
-    try std.testing.expectEqual(@as(f32, 0.0), t.data[0]);
-    try std.testing.expectEqual(@as(f32, 2.0), t.data[1]);
-    try std.testing.expectEqual(@as(f32, 4.0), t.data[2]);
+    try std.testing.expectEqual(@as(f32, 0.0), t.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 2.0), t.cpuData()[1]);
+    try std.testing.expectEqual(@as(f32, 4.0), t.cpuData()[2]);
 }
 
 test "fromSlice copies data into tensor" {
@@ -217,8 +217,8 @@ test "fromSlice copies data into tensor" {
     const shape = Shape.init2D(2, 2);
     var t = try fromSlice(allocator, shape, &.{ 1.0, 2.0, 3.0, 4.0 });
     defer t.deinit(allocator);
-    try std.testing.expectEqual(@as(f32, 1.0), t.data[0]);
-    try std.testing.expectEqual(@as(f32, 4.0), t.data[3]);
+    try std.testing.expectEqual(@as(f32, 1.0), t.cpuData()[0]);
+    try std.testing.expectEqual(@as(f32, 4.0), t.cpuData()[3]);
 }
 
 test "fromSlice rejects mismatched length" {

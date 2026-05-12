@@ -145,14 +145,14 @@ pub fn matmul(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*Tape) 
             // Load a[i,k] once — this is the key to the ikj
             // optimization.  Without this hoist, we'd re-read the
             // same element N times in the j loop.
-            const a_ik = a.data[i * a.strides.values[0] + k * a.strides.values[1]];
+            const a_ik = a.cpuData()[i * a.strides.values[0] + k * a.strides.values[1]];
 
             for (0..N) |j| {
                 // b[k,j] is contiguous in row-major order when j
                 // increments.  out[i,j] is also contiguous when j
                 // increments.  Both access patterns are cache-friendly.
-                const b_kj = b.data[k * b.strides.values[0] + j * b.strides.values[1]];
-                out.data[i * N + j] += a_ik * b_kj;
+                const b_kj = b.cpuData()[k * b.strides.values[0] + j * b.strides.values[1]];
+                out.cpuData()[i * N + j] += a_ik * b_kj;
             }
         }
     }
@@ -249,11 +249,11 @@ pub fn matmulBatch(allocator: std.mem.Allocator, a: Tensor, b: Tensor, tape: ?*T
         for (0..M) |i| {
             for (0..K) |k| {
                 // Access a[batch, i, k] using 3D strides
-                const a_ik = a.data[a_off + i * a.strides.values[1] + k * a.strides.values[2]];
+                const a_ik = a.cpuData()[a_off + i * a.strides.values[1] + k * a.strides.values[2]];
                 for (0..N) |j| {
                     // Access b[batch, k, j] using 3D strides
-                    const b_kj = b.data[b_off + k * b.strides.values[1] + j * b.strides.values[2]];
-                    out.data[out_off + i * N + j] += a_ik * b_kj;
+                    const b_kj = b.cpuData()[b_off + k * b.strides.values[1] + j * b.strides.values[2]];
+                    out.cpuData()[out_off + i * N + j] += a_ik * b_kj;
                 }
             }
         }
@@ -307,17 +307,17 @@ test "matmul 2x3 @ 3x4 = 2x4 with hand-computed values" {
     var a = try Tensor.init(alloc, Shape.init2D(2, 3));
     defer a.deinit(alloc);
     // a = [[1,2,3],[4,5,6]]
-    a.data[0] = 1.0;
-    a.data[1] = 2.0;
-    a.data[2] = 3.0;
-    a.data[3] = 4.0;
-    a.data[4] = 5.0;
-    a.data[5] = 6.0;
+    a.cpuData()[0] = 1.0;
+    a.cpuData()[1] = 2.0;
+    a.cpuData()[2] = 3.0;
+    a.cpuData()[3] = 4.0;
+    a.cpuData()[4] = 5.0;
+    a.cpuData()[5] = 6.0;
 
     var b = try Tensor.init(alloc, Shape.init2D(3, 4));
     defer b.deinit(alloc);
     // b = [[1,2,3,4],[5,6,7,8],[9,10,11,12]]
-    for (0..12) |i| b.data[i] = @as(f32, @floatFromInt(i + 1));
+    for (0..12) |i| b.cpuData()[i] = @as(f32, @floatFromInt(i + 1));
 
     var out = try matmul(alloc, a, b, null);
     defer out.deinit(alloc);
@@ -335,14 +335,14 @@ test "matmul 2x3 @ 3x4 = 2x4 with hand-computed values" {
     // out[1,1] = 4*2+5*6+6*10 = 8+30+60 = 98
     // out[1,2] = 4*3+5*7+6*11 = 12+35+66 = 113
     // out[1,3] = 4*4+5*8+6*12 = 16+40+72 = 128
-    try std.testing.expectApproxEqAbs(@as(f32, 38.0), out.data[0], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 44.0), out.data[1], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 50.0), out.data[2], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 56.0), out.data[3], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 83.0), out.data[4], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 98.0), out.data[5], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 113.0), out.data[6], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 128.0), out.data[7], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 38.0), out.cpuData()[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 44.0), out.cpuData()[1], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 50.0), out.cpuData()[2], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 56.0), out.cpuData()[3], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 83.0), out.cpuData()[4], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 98.0), out.cpuData()[5], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 113.0), out.cpuData()[6], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 128.0), out.cpuData()[7], 1e-4);
 }
 
 test "matmul 1x1 edge case" {
@@ -350,18 +350,18 @@ test "matmul 1x1 edge case" {
 
     var a = try Tensor.init(alloc, Shape.init2D(1, 1));
     defer a.deinit(alloc);
-    a.data[0] = 2.0;
+    a.cpuData()[0] = 2.0;
 
     var b = try Tensor.init(alloc, Shape.init2D(1, 1));
     defer b.deinit(alloc);
-    b.data[0] = 3.0;
+    b.cpuData()[0] = 3.0;
 
     var out = try matmul(alloc, a, b, null);
     defer out.deinit(alloc);
 
     try std.testing.expectEqual(@as(usize, 1), out.shape.dims[0]);
     try std.testing.expectEqual(@as(usize, 1), out.shape.dims[1]);
-    try std.testing.expectApproxEqAbs(@as(f32, 6.0), out.data[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 6.0), out.cpuData()[0], 1e-4);
 }
 
 test "matmul shape mismatch returns error" {
@@ -394,13 +394,13 @@ test "matmulBatch (2,3,4) @ (2,4,5)" {
     var a = try Tensor.init(alloc, Shape.init3D(2, 3, 4));
     defer a.deinit(alloc);
     // Batch 0: all 1s, Batch 1: all 2s
-    for (0..12) |i| a.data[i] = 1.0;
-    for (12..24) |i| a.data[i] = 2.0;
+    for (0..12) |i| a.cpuData()[i] = 1.0;
+    for (12..24) |i| a.cpuData()[i] = 2.0;
 
     var b = try Tensor.init(alloc, Shape.init3D(2, 4, 5));
     defer b.deinit(alloc);
     // Both batches: all 1s
-    for (0..40) |i| b.data[i] = 1.0;
+    for (0..40) |i| b.cpuData()[i] = 1.0;
 
     var out = try matmulBatch(alloc, a, b, null);
     defer out.deinit(alloc);
@@ -412,11 +412,11 @@ test "matmulBatch (2,3,4) @ (2,4,5)" {
 
     // Batch 0: each element = 1*1*4 = 4.0
     for (0..15) |i| {
-        try std.testing.expectApproxEqAbs(@as(f32, 4.0), out.data[i], 1e-4);
+        try std.testing.expectApproxEqAbs(@as(f32, 4.0), out.cpuData()[i], 1e-4);
     }
     // Batch 1: each element = 2*1*4 = 8.0
     for (15..30) |i| {
-        try std.testing.expectApproxEqAbs(@as(f32, 8.0), out.data[i], 1e-4);
+        try std.testing.expectApproxEqAbs(@as(f32, 8.0), out.cpuData()[i], 1e-4);
     }
 }
 
