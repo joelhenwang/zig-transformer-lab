@@ -113,6 +113,11 @@ pub const TrainConfig = struct {
     ckpt_every: usize = 0,
     /// Checkpoint file path (used if ckpt_every > 0).
     ckpt_path: []const u8 = "checkpoint.bin",
+    /// Gradient accumulation steps. Default 1 = no accumulation.
+    /// With grad_accum_steps=N, the optimizer steps once every N
+    /// micro-batches. Effective batch size = batch_size * grad_accum_steps.
+    /// Loss is scaled by 1/N so gradient magnitudes match the large batch.
+    grad_accum_steps: u32 = 1,
     /// Random seed for model initialization.
     model_seed: u64 = 1337,
     /// Random seed for data shuffling.
@@ -320,8 +325,35 @@ pub const Trainer = struct {
         const opt = adam.optimizer();
 
         var final_loss: f32 = std.math.inf(f32);
+        const accum_steps = self.cfg.grad_accum_steps;
+        const loss_scale: f32 = 1.0 / @as(f32, @floatFromInt(accum_steps));
+
+        // Pre-allocate gradient accumulation buffers (one per parameter).
+        // These persist across micro-batches within one optimizer step.
+        var grad_accum: std.ArrayList([]f32) = .empty;
+        defer {
+            for (grad_accum.items) |buf| allocator.free(buf);
+            grad_accum.deinit(allocator);
+        }
+        if (accum_steps > 1) {
+            try grad_accum.ensureTotalCapacity(allocator, params.items.len);
+            for (params.items) |param| {
+                const n = param.storage.len();
+                const buf = try allocator.alloc(f32, n);
+                @memset(buf, 0);
+                try grad_accum.append(allocator, buf);
+            }
+        }
 
         for (0..max_steps) |step| {
+            // Zero accumulators at the start of each optimizer step
+            if (accum_steps > 1) {
+                for (grad_accum.items) |buf| @memset(buf, 0);
+            }
+            var step_loss: f32 = 0;
+
+            // --- Micro-batch accumulation loop ---
+            for (0..accum_steps) |_| {
             // --- Get next batch (reset if exhausted) ---
             const batch = self.batcher.next() orelse blk: {
                 self.batcher.reset(&self.data_rng);
@@ -410,6 +442,41 @@ pub const Trainer = struct {
             loss.deinit(allocator);
             logits_3d.deinit(allocator);
 
+            // --- Accumulate gradients ---
+            // When grad_accum_steps > 1, add scaled gradients to the
+            // accumulation buffers. The tape.deinit (via defer) will
+            // null param.grad, so we must copy them out first.
+            if (accum_steps > 1) {
+                for (params.items, 0..) |param, pi| {
+                    if (param.grad) |g| {
+                        const grad_data = g.cpuData();
+                        const acc_buf = grad_accum.items[pi];
+                        for (grad_data, 0..) |v, gi| {
+                            acc_buf[gi] += v * loss_scale;
+                        }
+                    }
+                }
+            }
+
+            step_loss += loss_val * loss_scale;
+            } // end of micro-batch accumulation loop
+
+            // --- Write accumulated gradients back to params ---
+            // For accum_steps=1, grads are already on params from backward.
+            // For accum_steps>1, we need to create grad tensors from the accumulators.
+            if (accum_steps > 1) {
+                for (params.items, 0..) |param, pi| {
+                    // Allocate a new grad tensor and set it on the param
+                    var grad_tensor = try Tensor.init(allocator, param.shape);
+                    @memcpy(grad_tensor.cpuData(), grad_accum.items[pi]);
+                    // The param.grad may be null (tape freed it). Set it.
+                    param.grad = try allocator.create(Tensor);
+                    param.grad.?.* = grad_tensor;
+                }
+            }
+
+            const loss_val_step = step_loss;
+
             // --- Gradient clipping ---
             // Clip all parameter gradients by global L2 norm.
             // This prevents exploding gradients that cause the
@@ -449,7 +516,7 @@ pub const Trainer = struct {
             if (writer) |wr| {
                 if (step % self.cfg.log_every == 0 or step == max_steps - 1) {
                     const grad_norm: f32 = @floatCast(@sqrt(total_norm_sq));
-                    wr.print("Step {:4}: loss = {d:.4}  grad_norm = {d:.4}\n", .{ step, loss_val, grad_norm }) catch {};
+                    wr.print("Step {:4}: loss = {d:.4}  grad_norm = {d:.4}\n", .{ step, loss_val_step, grad_norm }) catch {};
                 }
             }
 
@@ -462,7 +529,7 @@ pub const Trainer = struct {
             };
             opt.zeroGrad(params.items);
 
-            final_loss = loss_val;
+            final_loss = loss_val_step;
 
             // --- Checkpoint ---
             if (self.cfg.ckpt_every > 0 and step > 0 and step % self.cfg.ckpt_every == 0) {
