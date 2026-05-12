@@ -734,7 +734,7 @@ test "oracle multihead_attention_3d: forward and backward parity" {
     const T = x.shape.dims[1];
     const H: usize = 2;
     var rng = Rng.init(0);
-    var attn = try CausalSelfAttention.init(alloc, D, H, T, true, &rng);
+    var attn = try CausalSelfAttention.init(alloc, D, H, T, true, false, &rng);
     defer attn.deinit();
 
     @memcpy(attn.w_q.weight.cpuData(), w_q.cpuData());

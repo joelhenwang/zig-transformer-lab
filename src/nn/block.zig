@@ -99,7 +99,7 @@ pub const TransformerBlock = struct {
         }
 
         // --- Attention ---
-        var attn = try CausalSelfAttention.init(allocator, cfg.d_model, cfg.n_head, cfg.max_seq_len, cfg.bias, rng);
+        var attn = try CausalSelfAttention.init(allocator, cfg.d_model, cfg.n_head, cfg.max_seq_len, cfg.bias, cfg.use_rope, rng);
         errdefer attn.deinit();
 
         // --- Feed-forward ---

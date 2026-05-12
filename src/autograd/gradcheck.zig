@@ -1589,7 +1589,7 @@ test "gradCheck — CausalSelfAttention alone" {
     const ops_create = @import("../tensor/ops/create.zig");
 
     var rng = Rng.init(42);
-    var attn = try CausalSelfAttention.init(allocator, 4, 1, 3, true, &rng);
+    var attn = try CausalSelfAttention.init(allocator, 4, 1, 3, true, false, &rng);
     defer attn.deinit();
 
     // DO NOT scale down weights — we need non-trivial attention scores

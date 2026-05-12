@@ -107,7 +107,7 @@ attn = softmax(Q @ K_cache^T / sqrt(d)) @ V_cache
 
 ### 1.3 Rotary Position Embedding (RoPE)
 
-**Status:** PLANNED — Session 7
+**Status:** DELIVERED (commits 16f097f+)
 
 **What it is.**
 RoPE encodes position by rotating Q and K vectors in 2D subspaces.
@@ -206,7 +206,7 @@ to the attention scores before softmax, conditioned on a config flag.
 
 ### 2.1 RMSNorm
 
-**Status:** PLANNED — Session 6
+**Status:** DELIVERED (commit e394cf0+)
 
 **What it is.**
 Root Mean Square Layer Normalization. Simpler than LayerNorm: it
@@ -249,7 +249,7 @@ tests. Oracle parity fixture. See Session 6 plan.
 
 ### 2.2 SwiGLU / GeGLU
 
-**Status:** PLANNED — Session 6
+**Status:** DELIVERED (commit e394cf0+)
 
 **What it is.**
 Gated Linear Unit variants that replace the standard MLP:
@@ -387,7 +387,7 @@ Full integration requires FP16 dtypes (see gap #3).
 
 ### 5.1 Gradient Accumulation
 
-**Status:** PLANNED — Session 9
+**Status:** DELIVERED (commit e784cd1)
 
 **What it is.**
 Instead of updating weights after every batch, accumulate gradients
@@ -627,7 +627,7 @@ min-max PTQ is easier (~1 week) but lower quality.
 
 ### 10.1 BPE (Byte Pair Encoding)
 
-**Status:** PLANNED — Session 8
+**Status:** DELIVERED (commit 6e01702)
 
 **What it is.**
 An algorithm that builds a vocabulary by iteratively merging the most
@@ -889,14 +889,14 @@ perplexity — just evaluate cross-entropy on a held-out split.
 |---|---|---|---|
 | 1.1 | Flash attention | DOC-ONLY | — |
 | 1.2 | KV cache | DOC-ONLY | — |
-| 1.3 | RoPE | PLANNED | 7 |
+| 1.3 | RoPE | DELIVERED | 7 |
 | 1.4 | GQA | DOC-ONLY | — |
 | 1.5 | ALiBi | DOC-ONLY | — |
-| 2.1 | RMSNorm | PLANNED | 6 |
-| 2.2 | SwiGLU | PLANNED | 6 |
+| 2.1 | RMSNorm | DELIVERED | 6 |
+| 2.2 | SwiGLU | DELIVERED | 6 |
 | 3 | Mixed precision | DEFERRED (D7) | — |
 | 4 | Tensor cores | DOC-ONLY | — |
-| 5.1 | Gradient accumulation | PLANNED | 9 |
+| 5.1 | Gradient accumulation | DELIVERED | 9 |
 | 5.2 | Activation checkpointing | DOC-ONLY | — |
 | 5.3 | CPU offloading | DOC-ONLY | — |
 | 6 | Distributed training | DEFERRED (D14) | — |
@@ -905,7 +905,7 @@ perplexity — just evaluate cross-entropy on a held-out split.
 | 8.2 | Continuous batching | DOC-ONLY | — |
 | 8.3 | Speculative decoding | DOC-ONLY | — |
 | 9 | Quantization | DOC-ONLY | — |
-| 10.1 | BPE tokenizer | PLANNED | 8 |
+| 10.1 | BPE tokenizer | DELIVERED | 8 |
 | 10.2 | SentencePiece | DOC-ONLY | — |
 | 11.1 | LoRA | DOC-ONLY | — |
 | 11.2 | QLoRA | DEFERRED (D7) | — |
@@ -915,5 +915,5 @@ perplexity — just evaluate cross-entropy on a held-out split.
 | 12.3 | RLHF/PPO | DOC-ONLY | — |
 | 13 | Evaluation | DOC-ONLY | — |
 
-**5 gaps PLANNED for implementation. 3 DEFERRED by locked decisions.
+**5 gaps DELIVERED. 3 DEFERRED by locked decisions.
 19 DOC-ONLY (learn from external sources).**

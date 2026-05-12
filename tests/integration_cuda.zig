@@ -2666,7 +2666,7 @@ test "cuda CausalSelfAttention.forward: CPU vs CUDA parity" {
 
     const D: usize = 8;
     const T: usize = 4;
-    var attn_cpu = try CausalSelfAttention.init(alloc, D, 1, T, true, &rng);
+    var attn_cpu = try CausalSelfAttention.init(alloc, D, 1, T, true, false, &rng);
     defer attn_cpu.deinit();
 
     var x_cpu = try lab.ops.create.randn(alloc, Shape.init3D(2, T, D), &rng, 0.0, 1.0);

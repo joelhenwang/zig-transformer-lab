@@ -70,6 +70,7 @@ const Shape = @import("../tensor/shape.zig").Shape;
 const Tape = @import("../autograd/tape.zig").Tape;
 const Rng = @import("../core/rng.zig").Rng;
 const Linear = @import("linear.zig").Linear;
+const RoPECache = @import("rope.zig").RoPECache;
 const ops_matmul = @import("../tensor/ops/matmul.zig");
 const ops_shape = @import("../tensor/ops/shape_ops.zig");
 const ops_elementwise = @import("../tensor/ops/elementwise.zig");
@@ -93,6 +94,10 @@ pub const CausalSelfAttention = struct {
     /// Shape: (max_seq_len, max_seq_len). Created once, reused every forward.
     causal_mask: Tensor,
 
+    /// Optional RoPE cache. Non-null when TransformerConfig.use_rope=true.
+    /// Precomputed cos/sin tables for rotary position encoding.
+    rope_cache: ?RoPECache,
+
     /// Create multi-head causal self-attention.
     ///
     /// Four Linear layers: Q, K, V projections + output projection.
@@ -112,6 +117,7 @@ pub const CausalSelfAttention = struct {
         n_head: usize,
         max_seq_len: usize,
         use_bias: bool,
+        use_rope: bool,
         rng: *Rng,
     ) LabError!CausalSelfAttention {
         if (n_head == 0 or d_model % n_head != 0) return error.InvalidArgument;
@@ -133,6 +139,13 @@ pub const CausalSelfAttention = struct {
             }
         }
 
+        // Optionally create RoPE cache
+        var rope_cache: ?RoPECache = null;
+        if (use_rope) {
+            const d_head = d_model / n_head;
+            rope_cache = try RoPECache.init(allocator, max_seq_len, d_head);
+        }
+
         return CausalSelfAttention{
             .w_q = w_q,
             .w_k = w_k,
@@ -142,6 +155,7 @@ pub const CausalSelfAttention = struct {
             .d_model = d_model,
             .n_head = n_head,
             .causal_mask = causal_mask,
+            .rope_cache = rope_cache,
         };
     }
 
@@ -186,6 +200,18 @@ pub const CausalSelfAttention = struct {
         defer k_flat.deinit(self.allocator);
         var v_flat = try self.splitHeads(v, B, T, H, d_head, tape);
         defer v_flat.deinit(self.allocator);
+
+        // Step 2b: Apply RoPE rotation to Q and K (if enabled).
+        // RoPE encodes position by rotating each (2i, 2i+1) dimension
+        // pair by an angle proportional to the position. Applied in-place
+        // BEFORE the tape-tracked matmul so that the rotation is implicit
+        // in the forward values and backward flows through the matmul
+        // correctly (RoPE is a linear transformation, so dL/dQ_rotated
+        // flows back through the same rotation in backward).
+        if (self.rope_cache) |rope| {
+            rope.applyInPlace(&q_flat);
+            rope.applyInPlace(&k_flat);
+        }
 
         // Step 3: scores = Q_flat @ K_flat^T / sqrt(d_head).
         // K_flat^T: (B*H, T, d_head) -> (B*H, d_head, T) via
@@ -329,6 +355,7 @@ pub const CausalSelfAttention = struct {
         self.w_v.deinit();
         self.w_o.deinit();
         self.causal_mask.deinit(self.allocator);
+        if (self.rope_cache) |*rc| rc.deinit();
     }
 };
 
@@ -340,7 +367,7 @@ test "CausalSelfAttention init — creates 4 linear layers" {
     const alloc = std.testing.allocator;
     var rng = Rng.init(42);
 
-    var attn = try CausalSelfAttention.init(alloc, 8, 1, 4, true, &rng);
+    var attn = try CausalSelfAttention.init(alloc, 8, 1, 4, true, false, &rng);
     defer attn.deinit();
 
     try std.testing.expectEqual(@as(usize, 8), attn.d_model);
@@ -352,20 +379,20 @@ test "CausalSelfAttention init — rejects n_head not dividing d_model" {
     const alloc = std.testing.allocator;
     var rng = Rng.init(42);
     // d_model=8, n_head=3 -> 8 % 3 = 2 != 0 -> InvalidArgument
-    try std.testing.expectError(error.InvalidArgument, CausalSelfAttention.init(alloc, 8, 3, 4, true, &rng));
+    try std.testing.expectError(error.InvalidArgument, CausalSelfAttention.init(alloc, 8, 3, 4, true, false, &rng));
 }
 
 test "CausalSelfAttention init — rejects n_head == 0" {
     const alloc = std.testing.allocator;
     var rng = Rng.init(42);
-    try std.testing.expectError(error.InvalidArgument, CausalSelfAttention.init(alloc, 8, 0, 4, true, &rng));
+    try std.testing.expectError(error.InvalidArgument, CausalSelfAttention.init(alloc, 8, 0, 4, true, false, &rng));
 }
 
 test "CausalSelfAttention forward — n_head=1 produces (B, T, D) output" {
     const alloc = std.testing.allocator;
     var rng = Rng.init(42);
 
-    var attn = try CausalSelfAttention.init(alloc, 8, 1, 4, true, &rng);
+    var attn = try CausalSelfAttention.init(alloc, 8, 1, 4, true, false, &rng);
     defer attn.deinit();
 
     var x = try ops_create.randn(alloc, Shape.init3D(2, 3, 8), &rng, 0.0, 1.0);
@@ -385,7 +412,7 @@ test "CausalSelfAttention forward — n_head=2 produces (B, T, D) output" {
     const alloc = std.testing.allocator;
     var rng = Rng.init(42);
 
-    var attn = try CausalSelfAttention.init(alloc, 8, 2, 4, true, &rng);
+    var attn = try CausalSelfAttention.init(alloc, 8, 2, 4, true, false, &rng);
     defer attn.deinit();
 
     var x = try ops_create.randn(alloc, Shape.init3D(2, 3, 8), &rng, 0.0, 1.0);
@@ -405,7 +432,7 @@ test "CausalSelfAttention forward — n_head=4 on D=16 produces finite output" {
     const alloc = std.testing.allocator;
     var rng = Rng.init(42);
 
-    var attn = try CausalSelfAttention.init(alloc, 16, 4, 4, true, &rng);
+    var attn = try CausalSelfAttention.init(alloc, 16, 4, 4, true, false, &rng);
     defer attn.deinit();
 
     var x = try ops_create.randn(alloc, Shape.init3D(2, 4, 16), &rng, 0.0, 1.0);
@@ -422,7 +449,7 @@ test "CausalSelfAttention causal mask — upper triangle is -1e9" {
     const alloc = std.testing.allocator;
     var rng = Rng.init(42);
 
-    var attn = try CausalSelfAttention.init(alloc, 8, 1, 3, true, &rng);
+    var attn = try CausalSelfAttention.init(alloc, 8, 1, 3, true, false, &rng);
     defer attn.deinit();
 
     // mask[0,0]=0, mask[0,1]=-1e9, mask[0,2]=-1e9
