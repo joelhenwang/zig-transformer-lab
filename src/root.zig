@@ -80,6 +80,7 @@ pub const data = struct {
     pub const dataset = @import("data/dataset.zig");
     pub const windowing = @import("data/windowing.zig");
     pub const batcher = @import("data/batcher.zig");
+    pub const bpe = @import("data/bpe.zig");
 };
 
 // Stage 6 additions:
@@ -167,6 +168,7 @@ test {
     _ = data.dataset;
     _ = data.windowing;
     _ = data.batcher;
+    _ = data.bpe;
 
     // Stage 6:
     _ = lab;
