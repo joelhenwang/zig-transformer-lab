@@ -144,6 +144,26 @@ pub fn build(b: *std.Build) void {
         run_step.dependOn(&run_cmd.step);
     }
 
+    // --- Ops-purity enforcement ---
+    // The ops layer (src/tensor/ops/*.zig) must not import directly from
+    // backend/cuda/. All CUDA routing goes through device_dispatch.zig.
+    //
+    // Two enforcement layers:
+    //   1. Comptime: a test in device_dispatch.zig statically verifies
+    //      that the ops modules do not re-export cuda symbols.
+    //   2. CI/manual: `rg "@import.*backend/cuda" src/tensor/ops/`
+    //      should return only README documentation references.
+    //
+    // The build step `zig build ops-purity` runs the grep check.
+    const purity_step = b.step("ops-purity", "Verify ops layer does not import backend/cuda/ directly");
+    // On systems with rg, this checks. The expected result is exit code 1
+    // (no matches). If matches are found (exit 0), the check_step fails.
+    const purity_cmd = b.addSystemCommand(&.{
+        "rg", "-l", "--glob", "*.zig", "@import.*backend/cuda", "src/tensor/ops/",
+    });
+    purity_cmd.expectExitCode(1); // exit 1 = no matches = PASS
+    purity_step.dependOn(&purity_cmd.step);
+
     // --- Docs check step ---
     // Prints line counts for each docs/*.md chapter. Used to verify
     // each chapter meets the 500-line minimum. Cross-platform: walks the

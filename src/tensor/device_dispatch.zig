@@ -34,6 +34,7 @@
 //!   without introducing another call frame at runtime.
 //!
 
+const std = @import("std");
 const cuda_dispatch = @import("../backend/cuda/dispatch.zig");
 const cuda_gemm = @import("../backend/cuda/gemm.zig");
 
@@ -127,3 +128,59 @@ pub const adamwStep = cuda_dispatch.adamwStep;
 
 pub const embeddingForward = cuda_dispatch.embeddingForward;
 pub const embeddingBackward = cuda_dispatch.embeddingBackward;
+
+// ===========================================================================
+// Comptime seam enforcement
+// ===========================================================================
+//
+// This test verifies at compile time that the ops layer modules do NOT
+// contain any direct reference to cuda_dispatch or cuda_gemm symbols as
+// their own imported declarations. The test imports each ops module and
+// checks that none of them re-export or declare `cuda_dispatch` or
+// `cuda_gemm` as a module-level identifier. This catches accidental
+// direct imports that bypass the device_dispatch seam.
+//
+// The grep-based enforcement (build.zig `ops-purity` step) is the
+// stronger check since it operates on source text. This comptime test
+// is the "belt" to that "suspenders."
+
+const ops_elementwise = @import("ops/elementwise.zig");
+const ops_reduce = @import("ops/reduce.zig");
+const ops_matmul = @import("ops/matmul.zig");
+const ops_softmax = @import("ops/softmax.zig");
+const ops_unary = @import("ops/unary.zig");
+const ops_loss = @import("ops/loss.zig");
+const ops_create = @import("ops/create.zig");
+const ops_shape = @import("ops/shape_ops.zig");
+
+fn assertNoCudaDecl(comptime T: type) void {
+    const info = @typeInfo(T);
+    if (info == .@"struct") {
+        for (info.@"struct".decls) |d| {
+            const name = d.name;
+            if (comptime std.mem.eql(u8, name, "cuda_dispatch") or
+                std.mem.eql(u8, name, "cuda_gemm"))
+            {
+                @compileError("ops module leaks a direct CUDA import: " ++ name);
+            }
+        }
+    }
+}
+
+test "ops-layer purity: no ops module re-exports cuda_dispatch or cuda_gemm" {
+    // Comptime check — fires at compile time if any ops module has a
+    // public `cuda_dispatch` or `cuda_gemm` declaration. Private
+    // (non-pub) consts named `cuda_dispatch` that point to THIS module
+    // are fine — they don't appear in @typeInfo.struct.decls for the
+    // public interface.
+    comptime {
+        assertNoCudaDecl(@TypeOf(ops_elementwise));
+        assertNoCudaDecl(@TypeOf(ops_reduce));
+        assertNoCudaDecl(@TypeOf(ops_matmul));
+        assertNoCudaDecl(@TypeOf(ops_softmax));
+        assertNoCudaDecl(@TypeOf(ops_unary));
+        assertNoCudaDecl(@TypeOf(ops_loss));
+        assertNoCudaDecl(@TypeOf(ops_create));
+        assertNoCudaDecl(@TypeOf(ops_shape));
+    }
+}

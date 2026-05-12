@@ -39,6 +39,7 @@ pub const ops = struct {
     pub const loss = @import("tensor/ops/loss.zig");
     pub const shape_ops = @import("tensor/ops/shape_ops.zig");
 };
+pub const device_dispatch = @import("tensor/device_dispatch.zig");
 
 // Stage 3 additions:
 pub const autograd = @import("autograd/node.zig");
@@ -133,6 +134,7 @@ test {
     _ = ops.softmax;
     _ = ops.loss;
     _ = ops.shape_ops;
+    _ = device_dispatch;
     _ = autograd;
     _ = tape_mod;
     _ = backward_mod;
