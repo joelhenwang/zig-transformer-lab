@@ -46,7 +46,7 @@ const OpKind = @import("../../autograd/node.zig").OpKind;
 // Attention compose these tracked ops, and the original host-side
 // element-copy loops read from `tensor.data` which is the empty
 // compat alias on CUDA.
-const cuda_dispatch = @import("../../backend/cuda/dispatch.zig");
+const cuda_dispatch = @import("../device_dispatch.zig");
 
 /// Reshape a tensor to a new shape, recording the operation on the tape.
 ///

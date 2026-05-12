@@ -45,7 +45,7 @@ const Node = @import("../../autograd/node.zig").Node;
 const OpKind = @import("../../autograd/node.zig").OpKind;
 const ops_shape = @import("shape_ops.zig");
 // PR-iota: reductions route to CUDA when input lives on GPU.
-const cuda_dispatch = @import("../../backend/cuda/dispatch.zig");
+const cuda_dispatch = @import("../device_dispatch.zig");
 
 /// Sum all elements along the given axis.
 ///

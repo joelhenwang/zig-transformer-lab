@@ -60,7 +60,7 @@ const OpKind = @import("../../autograd/node.zig").OpKind;
 // elementwise dispatch. backward.zig's backwardSub / backwardDiv
 // call this function; without CUDA routing here the backward chain
 // would silently operate on empty CPU slices for CUDA tensors.
-const cuda_dispatch = @import("../../backend/cuda/dispatch.zig");
+const cuda_dispatch = @import("../device_dispatch.zig");
 
 // ---------------------------------------------------------------------------
 // erf — Polynomial approximation (Abramowitz & Stegun, formula 7.1.26)

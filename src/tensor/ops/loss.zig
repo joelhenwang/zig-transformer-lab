@@ -62,7 +62,7 @@ const Tape = @import("../../autograd/tape.zig").Tape;
 const Node = @import("../../autograd/node.zig").Node;
 const OpKind = @import("../../autograd/node.zig").OpKind;
 // Milestone 1: CUDA fused CE path routes here.
-const cuda_dispatch = @import("../../backend/cuda/dispatch.zig");
+const cuda_dispatch = @import("../device_dispatch.zig");
 
 /// Mean cross-entropy loss between logits and integer targets.
 ///

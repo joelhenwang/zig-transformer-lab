@@ -54,7 +54,7 @@ const Node = @import("../../autograd/node.zig").Node;
 const OpKind = @import("../../autograd/node.zig").OpKind;
 // PR-lambda: softmax / logSoftmax route CUDA inputs to the GPU
 // last-axis reduction kernels.
-const cuda_dispatch = @import("../../backend/cuda/dispatch.zig");
+const cuda_dispatch = @import("../device_dispatch.zig");
 
 /// Compute the strided offset for a flat element index.
 ///

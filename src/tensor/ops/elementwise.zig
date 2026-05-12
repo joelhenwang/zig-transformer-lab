@@ -69,7 +69,7 @@ const NodeId = @import("../tensor.zig").NodeId;
 // PR-η.2: elementwise dispatch routes CUDA inputs to GPU kernels via
 // src/backend/cuda/dispatch.zig. The CPU ops fall back to this file's
 // loop-based implementations when inputs live on CPU.
-const cuda_dispatch = @import("../../backend/cuda/dispatch.zig");
+const cuda_dispatch = @import("../device_dispatch.zig");
 const shape_isContiguous = @import("../shape.zig").isContiguous;
 
 /// Pick the right CUDA elementwise entry point based on input

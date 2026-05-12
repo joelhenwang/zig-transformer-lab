@@ -63,7 +63,7 @@ const Tape = @import("../../autograd/tape.zig").Tape;
 const Node = @import("../../autograd/node.zig").Node;
 const OpKind = @import("../../autograd/node.zig").OpKind;
 // PR-κ: matmul routes CUDA inputs to cuBLAS via backend.cuda.gemm.
-const cuda_gemm = @import("../../backend/cuda/gemm.zig");
+const cuda_gemm = @import("../device_dispatch.zig");
 
 /// Matrix multiply two rank-2 tensors.
 ///

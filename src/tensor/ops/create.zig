@@ -29,7 +29,7 @@ const Strides = @import("../shape.zig").Strides;
 // PR-iota: device-aware zerosLike/onesLike route to CUDA when the
 // template tensor is on GPU (backward seed allocation, gradient
 // accumulators, etc.).
-const cuda_dispatch = @import("../../backend/cuda/dispatch.zig");
+const cuda_dispatch = @import("../device_dispatch.zig");
 const computeStrides = @import("../shape.zig").computeStrides;
 const totalElements = @import("../shape.zig").totalElements;
 const Tensor = @import("../tensor.zig").Tensor;
