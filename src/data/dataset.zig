@@ -56,6 +56,10 @@ pub const Dataset = struct {
     /// (initWithVocab path).
     vocab_owned: bool,
 
+    /// Whether this Dataset owns the tokens slice.
+    /// False when created via initFromTokens (caller owns the tokens).
+    tokens_owned: bool,
+
     /// Allocator for freeing tokens (and possibly vocab).
     allocator: std.mem.Allocator,
 
@@ -82,6 +86,7 @@ pub const Dataset = struct {
             .tokens = tokens,
             .vocab = vocab,
             .vocab_owned = true,
+            .tokens_owned = true,
             .allocator = allocator,
         };
     }
@@ -106,6 +111,7 @@ pub const Dataset = struct {
             .tokens = tokens,
             .vocab = vocab.*,
             .vocab_owned = false,
+            .tokens_owned = true,
             .allocator = allocator,
         };
     }
@@ -115,9 +121,29 @@ pub const Dataset = struct {
         return self.tokens.len;
     }
 
+    /// Create a Dataset from pre-tokenized data (e.g., from BPE tokenizer).
+    ///
+    /// The tokens slice is BORROWED (not owned). The caller must keep it
+    /// alive for the lifetime of the Dataset. No vocabulary is stored
+    /// (vocab_size is passed separately to the model config).
+    ///
+    /// Worked example:
+    ///   const tokens = try bpe_tok.encode(alloc, corpus);
+    ///   var ds = Dataset.initFromTokens(alloc, tokens);
+    ///   defer ds.deinit();
+    pub fn initFromTokens(allocator: std.mem.Allocator, tokens: []u32) Dataset {
+        return Dataset{
+            .tokens = tokens,
+            .vocab = undefined, // Not used — caller knows vocab_size
+            .vocab_owned = false,
+            .tokens_owned = false,
+            .allocator = allocator,
+        };
+    }
+
     /// Free the token array and (if owned) the vocabulary.
     pub fn deinit(self: *Dataset) void {
-        self.allocator.free(self.tokens);
+        if (self.tokens_owned) self.allocator.free(self.tokens);
         if (self.vocab_owned) {
             self.vocab.deinit();
         }

@@ -145,6 +145,14 @@ pub const TrainConfig = struct {
     /// platforms setting this flag returns `LabError.UnsupportedDevice`
     /// from `Trainer.init`.
     use_cuda: bool = false,
+
+    // --- Modern architecture flags (passed through to TransformerConfig) ---
+    /// Use RMSNorm instead of LayerNorm.
+    use_rms_norm: bool = false,
+    /// Use SwiGLU instead of GELU MLP.
+    use_swiglu: bool = false,
+    /// Use RoPE instead of learned positional embedding.
+    use_rope: bool = false,
 };
 
 /// Result of a completed training run.
@@ -228,6 +236,9 @@ pub const Trainer = struct {
             .bias = cfg.bias,
             .n_layer = cfg.n_layer,
             .n_head = cfg.n_head,
+            .use_rms_norm = cfg.use_rms_norm,
+            .use_swiglu = cfg.use_swiglu,
+            .use_rope = cfg.use_rope,
         };
 
         var model_rng = Rng.init(cfg.model_seed);
@@ -268,6 +279,88 @@ pub const Trainer = struct {
             // first op dispatch.
             try model.moveToCuda(ctx);
 
+            ctx_ptr = ctx;
+        }
+
+        return Trainer{
+            .allocator = allocator,
+            .io = io,
+            .dataset = ds,
+            .windowing = windowing,
+            .batcher = batcher,
+            .model = model,
+            .cfg = cfg,
+            .data_rng = data_rng,
+            .vocab_size = V,
+            .ctx = ctx_ptr,
+        };
+    }
+
+    /// Alternative init for pre-tokenized data (e.g., from BPE tokenizer).
+    ///
+    /// Takes a pre-encoded token array and a vocab size instead of a file
+    /// path. Useful for training with BPE, SentencePiece, or any external
+    /// tokenizer that produces u32 token IDs.
+    ///
+    /// The tokens slice is BORROWED — caller must keep it alive for the
+    /// lifetime of the Trainer.
+    ///
+    /// Worked example:
+    ///   var bpe_tok = try BpeTokenizer.train(alloc, corpus, 8000);
+    ///   const tokens = try bpe_tok.encode(alloc, corpus);
+    ///   var trainer = try Trainer.initFromTokens(alloc, io, tokens, bpe_tok.vocab_size, cfg);
+    ///   defer trainer.deinit();
+    pub fn initFromTokens(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        tokens: []u32,
+        vocab_size: usize,
+        cfg: TrainConfig,
+    ) LabError!Trainer {
+        const V = vocab_size;
+        const T = cfg.seq_len;
+        const B = cfg.batch_size;
+        const D = cfg.d_model;
+
+        const ds = Dataset.initFromTokens(allocator, tokens);
+        const windowing = Windowing.init(tokens, T);
+        var data_rng = Rng.init(cfg.data_seed);
+        var batcher = try Batcher.init(allocator, windowing, B, &data_rng);
+        errdefer batcher.deinit();
+
+        const model_cfg = TransformerConfig{
+            .vocab_size = V,
+            .d_model = D,
+            .max_seq_len = T,
+            .d_ff = cfg.d_ff,
+            .ln_eps = cfg.ln_eps,
+            .bias = cfg.bias,
+            .n_layer = cfg.n_layer,
+            .n_head = cfg.n_head,
+            .use_rms_norm = cfg.use_rms_norm,
+            .use_swiglu = cfg.use_swiglu,
+            .use_rope = cfg.use_rope,
+        };
+
+        var model_rng = Rng.init(cfg.model_seed);
+        var model = try TinyWordTransformer.init(allocator, model_cfg, &model_rng);
+        errdefer model.deinit();
+
+        // CUDA setup (same as init)
+        var ctx_ptr: ?*CudaContext = null;
+        if (cfg.use_cuda) {
+            const ctx = allocator.create(CudaContext) catch return error.OutOfMemory;
+            errdefer allocator.destroy(ctx);
+            ctx.* = try CudaContext.init(allocator);
+            errdefer ctx.deinit();
+            const ptx_modules = [_][:0]const u8{
+                "elementwise", "reduce", "softmax",
+                "unary", "embedding", "ce_loss", "adamw",
+            };
+            for (ptx_modules) |name| {
+                _ = try cuda_module.loadPtxFromFile(ctx, io, name);
+            }
+            try model.moveToCuda(ctx);
             ctx_ptr = ctx;
         }
 
