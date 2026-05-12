@@ -642,21 +642,64 @@ pub const TinyWordTransformer = struct {
         blk: *TransformerBlock,
     ) !void {
         const alloc = self.allocator;
-        const fields = [_]struct { suffix: []const u8, tensor: *Tensor }{
-            .{ .suffix = "ln1.gamma", .tensor = &blk.ln1.gamma },
-            .{ .suffix = "ln1.beta", .tensor = &blk.ln1.beta },
-            .{ .suffix = "attn.w_q.weight", .tensor = &blk.attn.w_q.weight },
-            .{ .suffix = "attn.w_k.weight", .tensor = &blk.attn.w_k.weight },
-            .{ .suffix = "attn.w_v.weight", .tensor = &blk.attn.w_v.weight },
-            .{ .suffix = "attn.w_o.weight", .tensor = &blk.attn.w_o.weight },
-            .{ .suffix = "ln2.gamma", .tensor = &blk.ln2.gamma },
-            .{ .suffix = "ln2.beta", .tensor = &blk.ln2.beta },
-            .{ .suffix = "mlp.fc1.weight", .tensor = &blk.mlp.fc1.weight },
-            .{ .suffix = "mlp.fc2.weight", .tensor = &blk.mlp.fc2.weight },
-        };
-        for (fields) |f| {
-            const name = try std.fmt.allocPrint(alloc, "blocks[{d}].{s}", .{ i, f.suffix });
-            try list.append(alloc, .{ .name = name, .tensor = f.tensor });
+
+        // Normalization params (LN or RMSNorm)
+        if (blk.use_rms_norm) {
+            const rms1 = &blk.rms1.?;
+            const rms2 = &blk.rms2.?;
+            const rn_fields = [_]struct { suffix: []const u8, tensor: *Tensor }{
+                .{ .suffix = "ln1.gamma", .tensor = &@constCast(rms1).gamma },
+                .{ .suffix = "attn.w_q.weight", .tensor = &blk.attn.w_q.weight },
+                .{ .suffix = "attn.w_k.weight", .tensor = &blk.attn.w_k.weight },
+                .{ .suffix = "attn.w_v.weight", .tensor = &blk.attn.w_v.weight },
+                .{ .suffix = "attn.w_o.weight", .tensor = &blk.attn.w_o.weight },
+                .{ .suffix = "ln2.gamma", .tensor = &@constCast(rms2).gamma },
+            };
+            for (rn_fields) |f| {
+                const name = try std.fmt.allocPrint(alloc, "blocks[{d}].{s}", .{ i, f.suffix });
+                try list.append(alloc, .{ .name = name, .tensor = f.tensor });
+            }
+        } else {
+            const ln1 = &blk.ln1.?;
+            const ln2 = &blk.ln2.?;
+            const ln_fields = [_]struct { suffix: []const u8, tensor: *Tensor }{
+                .{ .suffix = "ln1.gamma", .tensor = &@constCast(ln1).gamma },
+                .{ .suffix = "ln1.beta", .tensor = &@constCast(ln1).beta },
+                .{ .suffix = "attn.w_q.weight", .tensor = &blk.attn.w_q.weight },
+                .{ .suffix = "attn.w_k.weight", .tensor = &blk.attn.w_k.weight },
+                .{ .suffix = "attn.w_v.weight", .tensor = &blk.attn.w_v.weight },
+                .{ .suffix = "attn.w_o.weight", .tensor = &blk.attn.w_o.weight },
+                .{ .suffix = "ln2.gamma", .tensor = &@constCast(ln2).gamma },
+                .{ .suffix = "ln2.beta", .tensor = &@constCast(ln2).beta },
+            };
+            for (ln_fields) |f| {
+                const name = try std.fmt.allocPrint(alloc, "blocks[{d}].{s}", .{ i, f.suffix });
+                try list.append(alloc, .{ .name = name, .tensor = f.tensor });
+            }
+        }
+
+        // MLP params (GELU MLP or SwiGLU)
+        if (blk.use_swiglu) {
+            const sg = &blk.swiglu.?;
+            const sg_fields = [_]struct { suffix: []const u8, tensor: *Tensor }{
+                .{ .suffix = "mlp.w_gate.weight", .tensor = &@constCast(sg).w_gate.weight },
+                .{ .suffix = "mlp.w_up.weight", .tensor = &@constCast(sg).w_up.weight },
+                .{ .suffix = "mlp.w_down.weight", .tensor = &@constCast(sg).w_down.weight },
+            };
+            for (sg_fields) |f| {
+                const name = try std.fmt.allocPrint(alloc, "blocks[{d}].{s}", .{ i, f.suffix });
+                try list.append(alloc, .{ .name = name, .tensor = f.tensor });
+            }
+        } else {
+            const mlp_layer = &blk.mlp.?;
+            const mlp_fields = [_]struct { suffix: []const u8, tensor: *Tensor }{
+                .{ .suffix = "mlp.fc1.weight", .tensor = &@constCast(mlp_layer).fc1.weight },
+                .{ .suffix = "mlp.fc2.weight", .tensor = &@constCast(mlp_layer).fc2.weight },
+            };
+            for (mlp_fields) |f| {
+                const name = try std.fmt.allocPrint(alloc, "blocks[{d}].{s}", .{ i, f.suffix });
+                try list.append(alloc, .{ .name = name, .tensor = f.tensor });
+            }
         }
     }
 

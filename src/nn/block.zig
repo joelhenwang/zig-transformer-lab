@@ -42,22 +42,37 @@ const Shape = @import("../tensor/shape.zig").Shape;
 const Tape = @import("../autograd/tape.zig").Tape;
 const Rng = @import("../core/rng.zig").Rng;
 const LayerNorm = @import("layernorm.zig").LayerNorm;
+const RMSNorm = @import("rmsnorm.zig").RMSNorm;
 const CausalSelfAttention = @import("attention.zig").CausalSelfAttention;
 const MLP = @import("mlp.zig").MLP;
+const SwiGLU = @import("swiglu.zig").SwiGLU;
 const TransformerConfig = @import("module.zig").TransformerConfig;
 const ops_elementwise = @import("../tensor/ops/elementwise.zig");
 
 pub const TransformerBlock = struct {
-    ln1: LayerNorm,
+    // Normalization (one of these is active based on config)
+    ln1: ?LayerNorm,
+    ln2: ?LayerNorm,
+    rms1: ?RMSNorm,
+    rms2: ?RMSNorm,
+
     attn: CausalSelfAttention,
-    ln2: LayerNorm,
-    mlp: MLP,
+
+    // MLP (one of these is active based on config)
+    mlp: ?MLP,
+    swiglu: ?SwiGLU,
+
     allocator: std.mem.Allocator,
+    use_rms_norm: bool,
+    use_swiglu: bool,
 
     /// Create a transformer block from a config.
     ///
+    /// When config.use_rms_norm=true, uses RMSNorm instead of LayerNorm.
+    /// When config.use_swiglu=true, uses SwiGLU instead of GELU MLP.
+    ///
     /// Worked example:
-    ///   const cfg = TransformerConfig{ .d_model = 32, .max_seq_len = 16 };
+    ///   const cfg = TransformerConfig{ .d_model = 32, .use_rms_norm = true };
     ///   var block = try TransformerBlock.init(alloc, cfg, &rng);
     ///   defer block.deinit();
     pub fn init(
@@ -65,76 +80,127 @@ pub const TransformerBlock = struct {
         cfg: TransformerConfig,
         rng: *Rng,
     ) LabError!TransformerBlock {
-        var ln1 = try LayerNorm.init(allocator, cfg.d_model, cfg.ln_eps, rng);
-        errdefer ln1.deinit();
+        // --- Normalization layers ---
+        var ln1: ?LayerNorm = null;
+        var ln2: ?LayerNorm = null;
+        var rms1: ?RMSNorm = null;
+        var rms2: ?RMSNorm = null;
+
+        if (cfg.use_rms_norm) {
+            rms1 = try RMSNorm.init(allocator, cfg.d_model, cfg.ln_eps, rng);
+            errdefer rms1.?.deinit();
+            rms2 = try RMSNorm.init(allocator, cfg.d_model, cfg.ln_eps, rng);
+            errdefer rms2.?.deinit();
+        } else {
+            ln1 = try LayerNorm.init(allocator, cfg.d_model, cfg.ln_eps, rng);
+            errdefer ln1.?.deinit();
+            ln2 = try LayerNorm.init(allocator, cfg.d_model, cfg.ln_eps, rng);
+            errdefer ln2.?.deinit();
+        }
+
+        // --- Attention ---
         var attn = try CausalSelfAttention.init(allocator, cfg.d_model, cfg.n_head, cfg.max_seq_len, cfg.bias, rng);
         errdefer attn.deinit();
-        var ln2 = try LayerNorm.init(allocator, cfg.d_model, cfg.ln_eps, rng);
-        errdefer ln2.deinit();
-        var mlp = try MLP.init(allocator, cfg.d_model, cfg.d_ff, cfg.bias, rng);
-        errdefer mlp.deinit();
+
+        // --- Feed-forward ---
+        var mlp: ?MLP = null;
+        var swiglu: ?SwiGLU = null;
+
+        if (cfg.use_swiglu) {
+            swiglu = try SwiGLU.init(allocator, cfg.d_model, cfg.d_ff, cfg.bias, rng);
+            errdefer swiglu.?.deinit();
+        } else {
+            mlp = try MLP.init(allocator, cfg.d_model, cfg.d_ff, cfg.bias, rng);
+            errdefer mlp.?.deinit();
+        }
 
         return TransformerBlock{
             .ln1 = ln1,
-            .attn = attn,
             .ln2 = ln2,
+            .rms1 = rms1,
+            .rms2 = rms2,
+            .attn = attn,
             .mlp = mlp,
+            .swiglu = swiglu,
             .allocator = allocator,
+            .use_rms_norm = cfg.use_rms_norm,
+            .use_swiglu = cfg.use_swiglu,
         };
     }
 
     /// Compute one transformer block: pre-norm + residual.
     ///
-    /// h = x + Attention(LN_1(x))
-    /// out = h + MLP(LN_2(h))
+    /// h = x + Attention(Norm_1(x))
+    /// out = h + FFN(Norm_2(h))
     ///
-    /// Worked example:
-    ///   // x shape (2, 4, 32)
-    ///   var out = try block.forward(x, &tape);
-    ///   // out.shape == (2, 4, 32)
+    /// Norm is LayerNorm or RMSNorm based on config.
+    /// FFN is MLP or SwiGLU based on config.
     pub fn forward(self: TransformerBlock, input: Tensor, tape: ?*Tape) LabError!Tensor {
         // --- Attention sub-block ---
-        // LN_1(x)
-        var ln1_out = try self.ln1.forward(input, tape);
-        defer ln1_out.deinit(self.allocator);
+        // Norm_1(x)
+        var norm1_out = if (self.use_rms_norm)
+            try self.rms1.?.forward(input, tape)
+        else
+            try self.ln1.?.forward(input, tape);
+        defer norm1_out.deinit(self.allocator);
 
-        // Attention(LN_1(x))
-        var attn_out = try self.attn.forward(ln1_out, tape);
+        // Attention(Norm_1(x))
+        var attn_out = try self.attn.forward(norm1_out, tape);
         defer attn_out.deinit(self.allocator);
 
-        // x + Attention(LN_1(x))  — residual connection
+        // x + Attention(Norm_1(x))  — residual connection
         var h = try ops_elementwise.add(self.allocator, input, attn_out, tape);
         defer h.deinit(self.allocator);
 
-        // --- MLP sub-block ---
-        // LN_2(h)
-        var ln2_out = try self.ln2.forward(h, tape);
-        defer ln2_out.deinit(self.allocator);
+        // --- FFN sub-block ---
+        // Norm_2(h)
+        var norm2_out = if (self.use_rms_norm)
+            try self.rms2.?.forward(h, tape)
+        else
+            try self.ln2.?.forward(h, tape);
+        defer norm2_out.deinit(self.allocator);
 
-        // MLP(LN_2(h))
-        var mlp_out = try self.mlp.forward(ln2_out, tape);
-        defer mlp_out.deinit(self.allocator);
+        // FFN(Norm_2(h))
+        var ffn_out = if (self.use_swiglu)
+            try self.swiglu.?.forward(norm2_out, tape)
+        else
+            try self.mlp.?.forward(norm2_out, tape);
+        defer ffn_out.deinit(self.allocator);
 
-        // h + MLP(LN_2(h))  — residual connection
-        const output = try ops_elementwise.add(self.allocator, h, mlp_out, tape);
-
+        // h + FFN(Norm_2(h))  — residual connection
+        const output = try ops_elementwise.add(self.allocator, h, ffn_out, tape);
         return output;
     }
 
     /// Append this block's learnable parameters to the list.
     pub fn parameters(self: *TransformerBlock, list: *std.ArrayList(*Tensor)) void {
-        self.ln1.parameters(list);
+        if (self.use_rms_norm) {
+            (@constCast(&self.rms1.?)).parameters(list);
+        } else {
+            (@constCast(&self.ln1.?)).parameters(list);
+        }
         self.attn.parameters(list);
-        self.ln2.parameters(list);
-        self.mlp.parameters(list);
+        if (self.use_rms_norm) {
+            (@constCast(&self.rms2.?)).parameters(list);
+        } else {
+            (@constCast(&self.ln2.?)).parameters(list);
+        }
+        if (self.use_swiglu) {
+            (@constCast(&self.swiglu.?)).parameters(list);
+        } else {
+            (@constCast(&self.mlp.?)).parameters(list);
+        }
     }
 
     /// Free all sub-layers.
     pub fn deinit(self: *TransformerBlock) void {
-        self.ln1.deinit();
+        if (self.ln1) |*ln| ln.deinit();
+        if (self.ln2) |*ln| ln.deinit();
+        if (self.rms1) |*rn| rn.deinit();
+        if (self.rms2) |*rn| rn.deinit();
         self.attn.deinit();
-        self.ln2.deinit();
-        self.mlp.deinit();
+        if (self.mlp) |*m| m.deinit();
+        if (self.swiglu) |*sg| sg.deinit();
     }
 };
 

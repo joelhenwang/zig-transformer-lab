@@ -56,9 +56,11 @@ pub const nn = struct {
     pub const linear = @import("nn/linear.zig");
     pub const embedding = @import("nn/embedding.zig");
     pub const layernorm = @import("nn/layernorm.zig");
+    pub const rmsnorm = @import("nn/rmsnorm.zig");
     pub const activations = @import("nn/activations.zig");
     pub const attention = @import("nn/attention.zig");
     pub const mlp = @import("nn/mlp.zig");
+    pub const swiglu = @import("nn/swiglu.zig");
     pub const block = @import("nn/block.zig");
     pub const model = @import("nn/model.zig");
 };
@@ -149,6 +151,8 @@ test {
     _ = nn.activations;
     _ = nn.attention;
     _ = nn.mlp;
+    _ = nn.swiglu;
+    _ = nn.rmsnorm;
     _ = nn.block;
     _ = nn.model;
     _ = optim.optimizer;

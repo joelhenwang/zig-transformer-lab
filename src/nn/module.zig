@@ -140,6 +140,16 @@ pub const TransformerConfig = struct {
     /// a non-zero value is silently ignored until a future stage
     /// implements masked dropout + dropout-aware backward.
     dropout: f32 = 0.0,
+
+    /// Use RMSNorm instead of LayerNorm (Session 6 addition).
+    /// Default false preserves existing behavior. When true, the
+    /// TransformerBlock uses RMSNorm (no mean-centering, no beta).
+    use_rms_norm: bool = false,
+
+    /// Use SwiGLU MLP instead of GELU MLP (Session 6 addition).
+    /// Default false preserves existing behavior. When true, the
+    /// TransformerBlock uses SwiGLU (3 Linears + SiLU gating).
+    use_swiglu: bool = false,
 };
 
 /// Helper: collect parameters from a slice of layers that all have
