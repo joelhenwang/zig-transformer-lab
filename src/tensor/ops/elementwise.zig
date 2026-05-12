@@ -72,6 +72,17 @@ const NodeId = @import("../tensor.zig").NodeId;
 const cuda_dispatch = @import("../device_dispatch.zig");
 const shape_isContiguous = @import("../shape.zig").isContiguous;
 
+// ---------------------------------------------------------------------------
+// Backward imports (colocated backward functions need these)
+// ---------------------------------------------------------------------------
+const grad_helpers = @import("../../autograd/grad_helpers.zig");
+const BackwardResult = grad_helpers.BackwardResult;
+const heapAlloc = grad_helpers.heapAlloc;
+const broadcastTo = grad_helpers.broadcastTo;
+const ops_reduce = @import("reduce.zig");
+const neg_unary = @import("unary.zig").neg;
+
+
 /// Pick the right CUDA elementwise entry point based on input
 /// shape / layout. Same-shape + contiguous inputs take the fast
 /// flat-index path; anything else (broadcast, transposed, sliced)
@@ -395,6 +406,156 @@ fn recordBinaryOp(tape: ?*Tape, out: *Tensor, a: *const Tensor, b: *const Tensor
 
 // ---------------------------------------------------------------------------
 // Tests
+
+// ---------------------------------------------------------------------------
+// Backward pass implementations (colocated with forward ops)
+// ---------------------------------------------------------------------------
+
+/// add(a, b) → c
+/// dL/da = sumToShape(dL/dc, a.shape)
+/// dL/db = sumToShape(dL/dc, b.shape)
+///
+/// Broadcasting backward: if a was broadcast from (1,3) to (2,3),
+/// sumToShape reduces the gradient back along the broadcasted axes.
+pub fn backwardAdd(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .tensor_pair => |tp| {
+            const da = try ops_reduce.sumToShape(allocator, grad_output.*, tp.a.shape);
+            result[0] = try heapAlloc(allocator, da);
+            const db = try ops_reduce.sumToShape(allocator, grad_output.*, tp.b.shape);
+            result[1] = try heapAlloc(allocator, db);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
+/// sub(a, b) → c
+/// dL/da = sumToShape(dL/dc, a.shape)
+/// dL/db = sumToShape(-dL/dc, b.shape)
+pub fn backwardSub(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .tensor_pair => |tp| {
+            const da = try ops_reduce.sumToShape(allocator, grad_output.*, tp.a.shape);
+            result[0] = try heapAlloc(allocator, da);
+            var neg_grad = try neg_unary(allocator, grad_output.*, null);
+            defer neg_grad.deinit(allocator);
+            const db = try ops_reduce.sumToShape(allocator, neg_grad, tp.b.shape);
+            result[1] = try heapAlloc(allocator, db);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
+/// mul(a, b) → c
+/// dL/da = sumToShape(dL/dc * b, a.shape)
+/// dL/db = sumToShape(dL/dc * a, b.shape)
+pub fn backwardMul(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .tensor_pair => |tp| {
+            var da_full = try mul(allocator, grad_output.*, tp.b, null);
+            defer da_full.deinit(allocator);
+            const da = try ops_reduce.sumToShape(allocator, da_full, tp.a.shape);
+            result[0] = try heapAlloc(allocator, da);
+
+            var db_full = try mul(allocator, grad_output.*, tp.a, null);
+            defer db_full.deinit(allocator);
+            const db = try ops_reduce.sumToShape(allocator, db_full, tp.b.shape);
+            result[1] = try heapAlloc(allocator, db);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
+/// div(a, b) → c = a / b
+/// dL/da = sumToShape(dL/dc / b, a.shape)
+/// dL/db = sumToShape(-dL/dc * a / b², b.shape)
+pub fn backwardDiv(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .tensor_pair => |tp| {
+            var da_full = try div(allocator, grad_output.*, tp.b, null);
+            defer da_full.deinit(allocator);
+            const da = try ops_reduce.sumToShape(allocator, da_full, tp.a.shape);
+            result[0] = try heapAlloc(allocator, da);
+
+            // -dL/dc * a / b²
+            var neg_grad = try neg_unary(allocator, grad_output.*, null);
+            defer neg_grad.deinit(allocator);
+            var neg_times_a = try mul(allocator, neg_grad, tp.a, null);
+            defer neg_times_a.deinit(allocator);
+            var b_sq = try mul(allocator, tp.b, tp.b, null);
+            defer b_sq.deinit(allocator);
+            var db_full = try div(allocator, neg_times_a, b_sq, null);
+            defer db_full.deinit(allocator);
+            const db = try ops_reduce.sumToShape(allocator, db_full, tp.b.shape);
+            result[1] = try heapAlloc(allocator, db);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
+/// add_scalar(a, s) → c = a + s
+/// dL/da = dL/dc  (scalar has no gradient)
+pub fn backwardAddScalar(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .tensor_scalar => |ts| {
+            const da = try ops_reduce.sumToShape(allocator, grad_output.*, ts.shape);
+            result[0] = try heapAlloc(allocator, da);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
+/// mul_scalar(a, s) → c = a * s
+/// dL/da = dL/dc * s
+pub fn backwardMulScalar(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .tensor_scalar => |ts| {
+            // dL/da = dL/dc * s
+            var scaled = try mulScalar(allocator, grad_output.*, ts.scalar, null);
+            defer scaled.deinit(allocator);
+            const da = try ops_reduce.sumToShape(allocator, scaled, ts.shape);
+            result[0] = try heapAlloc(allocator, da);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
 // ---------------------------------------------------------------------------
 
 test "add (2,3) + (2,3) = (2,3)" {

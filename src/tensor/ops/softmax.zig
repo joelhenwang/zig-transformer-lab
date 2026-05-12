@@ -56,6 +56,19 @@ const OpKind = @import("../../autograd/node.zig").OpKind;
 // last-axis reduction kernels.
 const cuda_dispatch = @import("../device_dispatch.zig");
 
+// ---------------------------------------------------------------------------
+// Backward imports (colocated backward functions need these)
+// ---------------------------------------------------------------------------
+const grad_helpers = @import("../../autograd/grad_helpers.zig");
+const BackwardResult = grad_helpers.BackwardResult;
+const heapAlloc = grad_helpers.heapAlloc;
+const broadcastTo = grad_helpers.broadcastTo;
+const elw = @import("elementwise.zig");
+const red = @import("reduce.zig");
+const ops_elementwise_bw = @import("elementwise.zig");
+const ops_reduce_bw = @import("reduce.zig");
+
+
 /// Compute the strided offset for a flat element index.
 ///
 /// This helper decodes a flat index into multi-dimensional indices
@@ -308,6 +321,82 @@ pub fn logSoftmax(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) La
 
 // ---------------------------------------------------------------------------
 // Tests
+
+// ---------------------------------------------------------------------------
+// Backward pass implementations (colocated with forward ops)
+// ---------------------------------------------------------------------------
+
+/// softmax(x) → S
+/// dL/dx = S * (dL/dS - (dL/dS · S) * 1)  [row-wise, last axis]
+///
+/// This is the "diag - outer" formula for softmax Jacobian:
+///   ∂softmax_i/∂x_j = S_i(δ_ij - S_j)
+/// So the VJP is: dL/dx_j = S_j * (dL/dS_j - Σ_i S_i * dL/dS_i)
+pub fn backwardSoftmax(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .tensor_ref => |x| {
+            var s = try softmax(allocator, x, null);
+            defer s.deinit(allocator);
+
+            // dot = sum(dL/dS * S, last_axis, keepdims)
+            var prod = try elw.mul(allocator, grad_output.*, s, null);
+            defer prod.deinit(allocator);
+            const ndim = grad_output.shape.ndim();
+            const last_axis: u2 = @intCast(ndim - 1);
+            var dot = try red.sum(allocator, prod, last_axis, null);
+            defer dot.deinit(allocator);
+
+            // dL/dS - dot (broadcast across last axis)
+            var diff = try elw.sub(allocator, grad_output.*, dot, null);
+            defer diff.deinit(allocator);
+
+            // S * diff
+            const da = try elw.mul(allocator, s, diff, null);
+            result[0] = try heapAlloc(allocator, da);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
+/// log_softmax(x) → y
+/// dL/dx = dL/dy - softmax(x) * sum(dL/dy, last_axis, keepdims)
+///
+/// More numerically stable than going through softmax backward.
+pub fn backwardLogSoftmax(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .tensor_ref => |x| {
+            var s = try softmax(allocator, x, null);
+            defer s.deinit(allocator);
+
+            const ndim = grad_output.shape.ndim();
+            const last_axis: u2 = @intCast(ndim - 1);
+            var sum_dy = try red.sum(allocator, grad_output.*, last_axis, null);
+            defer sum_dy.deinit(allocator);
+
+            // softmax * sum_dy (broadcast across last axis)
+            var scaled = try elw.mul(allocator, s, sum_dy, null);
+            defer scaled.deinit(allocator);
+
+            // dL/dy - scaled
+            const da = try elw.sub(allocator, grad_output.*, scaled, null);
+            result[0] = try heapAlloc(allocator, da);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
 // ---------------------------------------------------------------------------
 
 test "softmax [[1,2,3]] = [[0.0900, 0.2447, 0.6652]]" {

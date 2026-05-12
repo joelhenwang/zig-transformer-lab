@@ -45,6 +45,11 @@ const module = @import("module.zig");
 // PR-mu: embedding routes CUDA inputs to GPU gather / scatter-add
 // kernels via backend.cuda.dispatch.
 const cuda_dispatch = @import("../backend/cuda/dispatch.zig");
+// Backward helpers (colocated backward function needs these)
+const grad_helpers = @import("../autograd/grad_helpers.zig");
+const BackwardResult = grad_helpers.BackwardResult;
+const heapAlloc = grad_helpers.heapAlloc;
+const bw_cuda_dispatch = @import("../tensor/device_dispatch.zig");
 
 pub const Embedding = struct {
     weight: Tensor,
@@ -174,6 +179,73 @@ pub const Embedding = struct {
 
 // ---------------------------------------------------------------------------
 // Tests
+
+// ---------------------------------------------------------------------------
+// Backward pass implementations (colocated with forward ops)
+// ---------------------------------------------------------------------------
+
+/// embedding(weight, indices) → output
+/// dL/dweight = scatter-add: grad_weight[idx[i], :] += grad_output[i, :]
+///
+/// The embedding forward gathers rows: output[i] = weight[idx[i]].
+/// The backward scatters the output gradient back into the weight
+/// gradient: each row's gradient is added to the corresponding
+/// weight row. This is a "scatter-add" operation.
+///
+/// The gradient for the indices (parent 1) is always null — integer
+/// indices don't have gradients.
+pub fn backwardEmbedding(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .embedding_info => |ei| {
+            // ei.weight: (vocab_size, d_model) — snapshot by value
+            // ei.indices: []const f32 — borrowed slice of index values
+            const vocab_size = ei.weight.shape.dims[0];
+            const d_model = ei.weight.shape.dims[1];
+
+            // Initialize weight gradient to zeros
+            var grad_weight = try Tensor.init(allocator, ei.weight.shape);
+            grad_weight.fill(0.0);
+
+            // Scatter-add: for each position in the output, the gradient
+            // flows back to the corresponding row in the weight table.
+            // grad_output shape: (num_indices, d_model)
+            const num_indices = ei.indices.len;
+            for (0..num_indices) |i| {
+                const idx: usize = @intFromFloat(ei.indices[i]);
+                if (idx >= vocab_size) {
+                    grad_weight.deinit(allocator);
+                    return error.InvalidArgument;
+                }
+                // grad_weight[idx, :] += grad_output[i, :]
+                for (0..d_model) |d| {
+                    grad_weight.cpuData()[idx * d_model + d] += grad_output.cpuData()[i * d_model + d];
+                }
+            }
+
+            result[0] = try heapAlloc(allocator, grad_weight);
+            // result[1] remains null — indices don't require grad
+        },
+        .tensor_pair => |tp| {
+            // PR-mu: CUDA embedding path. tp.a = weight (CUDA snapshot),
+            // tp.b = ids (CUDA snapshot). grad_output is CUDA too.
+            const V = tp.a.shape.dims[0];
+            // Flatten grad_output's leading dims into (N, D). The
+            // existing shape is (...ids.shape..., D) which the scatter
+            // kernel treats as a flat (N, D); tape-snapshot of tp.b
+            // already has the ids.shape we need.
+            const grad_weight = try bw_cuda_dispatch.embeddingBackward(tp.b, grad_output.*, V);
+            result[0] = try heapAlloc(allocator, grad_weight);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
 // ---------------------------------------------------------------------------
 
 test "Embedding init — correct shape" {

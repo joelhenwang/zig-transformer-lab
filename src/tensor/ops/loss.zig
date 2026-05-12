@@ -64,6 +64,17 @@ const OpKind = @import("../../autograd/node.zig").OpKind;
 // Milestone 1: CUDA fused CE path routes here.
 const cuda_dispatch = @import("../device_dispatch.zig");
 
+// ---------------------------------------------------------------------------
+// Backward imports (colocated backward functions need these)
+// ---------------------------------------------------------------------------
+const grad_helpers = @import("../../autograd/grad_helpers.zig");
+const BackwardResult = grad_helpers.BackwardResult;
+const heapAlloc = grad_helpers.heapAlloc;
+const broadcastTo = grad_helpers.broadcastTo;
+const ops_softmax_bw = @import("softmax.zig");
+const bw_cuda_dispatch = @import("../device_dispatch.zig");
+
+
 /// Mean cross-entropy loss between logits and integer targets.
 ///
 /// Computes the mean cross-entropy loss over a batch.  Internally uses
@@ -197,6 +208,78 @@ pub fn crossEntropy(allocator: std.mem.Allocator, logits: Tensor, targets: Tenso
 
 // ---------------------------------------------------------------------------
 // Tests
+
+// ---------------------------------------------------------------------------
+// Backward pass implementations (colocated with forward ops)
+// ---------------------------------------------------------------------------
+
+/// cross_entropy(logits, targets) → loss
+/// dL/dlogits = softmax(logits) - one_hot(targets)
+///
+/// This is the famous "softmax + 1" backward. The gradient of
+/// cross-entropy loss w.r.t. the logits is simply the softmax
+/// probabilities minus a one-hot vector at the target class.
+/// This is incredibly efficient — no Jacobian needed!
+pub fn backwardCrossEntropy(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .ce_info => |ci| {
+            // Recompute softmax(logits)
+            var s = try ops_softmax_bw.softmax(allocator, ci.logits, null);
+            defer s.deinit(allocator);
+
+            // Build one-hot: one_hot[i, targets[i]] = 1
+            // Then: dL/dlogits = (softmax - one_hot) / B
+            // where B is the batch size (since loss is mean over batch)
+            const B = s.shape.dims[0];
+            const C = s.shape.dims[1];
+            var grad_logits = try Tensor.init(allocator, s.shape);
+            for (0..B) |b| {
+                for (0..C) |c| {
+                    const idx = b * C + c;
+                    const target_idx: usize = @intFromFloat(@round(ci.targets[b]));
+                    const one_hot_val: f32 = if (c == target_idx) 1.0 else 0.0;
+                    // dL/dlogits[i,j] = (1/B) * (softmax[i,j] - one_hot[i,j])
+                    // The (1/B) comes from the mean reduction in cross_entropy
+                    grad_logits.cpuData()[idx] = (s.cpuData()[idx] - one_hot_val) / @as(f32, @floatFromInt(B));
+                }
+            }
+
+            // Scale by the upstream gradient (which is 1.0 for scalar loss)
+            // For a scalar loss, grad_output = [1.0], so just multiply by 1.0
+            const grad_scale = grad_output.cpuData()[0];
+            for (0..grad_logits.cpuData().len) |i| {
+                grad_logits.cpuData()[i] *= grad_scale;
+            }
+
+            result[0] = try heapAlloc(allocator, grad_logits);
+        },
+        .ce_cuda_grad => |saved_grad| {
+            // CUDA fast path (Milestone 1). The fused forward kernel
+            // already baked the `1/B` mean factor and the
+            // `softmax - one_hot` subtraction into `saved_grad`, so
+            // backward just returns a DtoD clone.
+            //
+            // We intentionally do NOT read grad_output.cpuData()[0] here —
+            // CUDA tensors keep an empty CPU compat alias. The tape's
+            // `backward` seeds the loss gradient with 1.0 via
+            // ops_create.onesLike, and cross-entropy output is always
+            // the root of backward in our autograd design. If a future
+            // caller ever routes a non-unit gradient through CE, they
+            // would need to fuse the scale into the clone (one extra
+            // mulScalar launch). Not needed today.
+            const g_copy = try bw_cuda_dispatch.cloneDevice(saved_grad);
+            result[0] = try heapAlloc(allocator, g_copy);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
 // ---------------------------------------------------------------------------
 
 test "crossEntropy known 3-class example" {

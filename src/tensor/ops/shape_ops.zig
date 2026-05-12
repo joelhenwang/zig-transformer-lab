@@ -48,6 +48,15 @@ const OpKind = @import("../../autograd/node.zig").OpKind;
 // compat alias on CUDA.
 const cuda_dispatch = @import("../device_dispatch.zig");
 
+// ---------------------------------------------------------------------------
+// Backward imports (colocated backward functions need these)
+// ---------------------------------------------------------------------------
+const grad_helpers = @import("../../autograd/grad_helpers.zig");
+const BackwardResult = grad_helpers.BackwardResult;
+const heapAlloc = grad_helpers.heapAlloc;
+const broadcastTo = grad_helpers.broadcastTo;
+
+
 /// Reshape a tensor to a new shape, recording the operation on the tape.
 ///
 /// Unlike Tensor.reshape() which returns a view, this always returns an
@@ -472,6 +481,109 @@ pub fn transposeAxes12_4dTracked(allocator: std.mem.Allocator, tensor: Tensor, t
     return out;
 }// ---------------------------------------------------------------------------
 // Tests
+
+// ---------------------------------------------------------------------------
+// Backward pass implementations (colocated with forward ops)
+// ---------------------------------------------------------------------------
+
+/// transpose2d(a) → aᵀ
+/// dL/da = transpose2d(dL/dc)
+/// Transpose is its own inverse: (Aᵀ)ᵀ = A.
+pub fn backwardTranspose2d(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .tensor_ref => |a| {
+            // Transpose the gradient back. transpose2d() returns a
+            // non-contiguous VIEW (strides are swapped, no data copy).
+            // We MUST use reshapeTracked (which does stride-aware
+            // element-by-element copy) instead of sumToShape (which
+            // uses @memcpy in its fast path and ignores strides).
+            //
+            // Without this fix, the gradient for Linear.weight is
+            // silently transposed — sumToShape sees the view's shape
+            // matches the target, does @memcpy of the raw buffer, and
+            // copies data in the wrong (non-transposed) order.
+            const grad_t = try grad_output.transpose2d();
+            const da = try reshapeTracked(allocator, grad_t, a.shape, null);
+            result[0] = try heapAlloc(allocator, da);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
+/// reshape(a) → a_reshaped
+/// dL/da = reshape(dL/dc, a.shape)
+/// Just reinterpret the gradient's memory layout back to the original shape.
+pub fn backwardReshape(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .tensor_ref => |a| {
+            // Reshape's backward is another reshape — the gradient just
+            // needs to be reshaped back to the original input's shape.
+            // sumToShape is wrong here: it sums over broadcast dims,
+            // which would e.g. collapse (B,T,D)→(T,D) instead of
+            // correctly reshaping (B,T,D)→(B*T,D).
+            const da = try reshapeTracked(allocator, grad_output.*, a.shape, null);
+            result[0] = try heapAlloc(allocator, da);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
+/// transpose_inner2d(a: (B, M, K)) → (B, K, M)
+/// dL/da = transpose_inner2d(dL/dc)
+/// Transpose is its own inverse: applying it twice restores the original.
+pub fn backwardTransposeInner2d(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .tensor_ref => |a| {
+            // Transpose the gradient's inner dims back.
+            const grad_t = try transposeInner2d(grad_output.*);
+            // Make contiguous copy matching the original input's shape.
+            const da = try reshapeTracked(allocator, grad_t, a.shape, null);
+            result[0] = try heapAlloc(allocator, da);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
+/// transpose_axes12_4d(a: (B, T, H, D)) → (B, H, T, D)
+/// dL/da = transpose_axes12_4d(dL/dc)
+/// Same permutation applied twice returns the identity, so the
+/// backward is just another call to the same view-producing op.
+pub fn backwardTransposeAxes12_4d(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .tensor_ref => |a| {
+            const grad_t = try transposeAxes12_4d(grad_output.*);
+            // Materialise contiguous to match the original input's shape.
+            const da = try reshapeTracked(allocator, grad_t, a.shape, null);
+            result[0] = try heapAlloc(allocator, da);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
 // ---------------------------------------------------------------------------
 
 test "reshapeTracked (2,3) → (6,)" {

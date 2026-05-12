@@ -47,6 +47,16 @@ const ops_shape = @import("shape_ops.zig");
 // PR-iota: reductions route to CUDA when input lives on GPU.
 const cuda_dispatch = @import("../device_dispatch.zig");
 
+// ---------------------------------------------------------------------------
+// Backward imports (colocated backward functions need these)
+// ---------------------------------------------------------------------------
+const grad_helpers = @import("../../autograd/grad_helpers.zig");
+const BackwardResult = grad_helpers.BackwardResult;
+const heapAlloc = grad_helpers.heapAlloc;
+const broadcastTo = grad_helpers.broadcastTo;
+const elw_mulScalar = @import("elementwise.zig").mulScalar;
+
+
 /// Sum all elements along the given axis.
 ///
 /// Worked example:
@@ -458,6 +468,58 @@ pub fn scaleInPlace(allocator: std.mem.Allocator, tensor: *Tensor, coeff: f32) L
 
 // ---------------------------------------------------------------------------
 // Tests
+
+// ---------------------------------------------------------------------------
+// Backward pass implementations (colocated with forward ops)
+// ---------------------------------------------------------------------------
+
+/// sum(a, axis) → a_reduced
+/// dL/da = broadcastTo(dL/dc, a.shape)
+///
+/// The gradient of a sum is just the broadcast/expand of the upstream
+/// gradient back to the original shape. When you sum along an axis,
+/// each element in that axis contributed equally, so the gradient
+/// flows back equally to all of them.
+pub fn backwardSum(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .reduce_info => |ri| {
+            const da = try broadcastTo(allocator, grad_output.*, ri.shape);
+            result[0] = try heapAlloc(allocator, da);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
+/// mean(a, axis) → a_meaned
+/// dL/da = broadcastTo(dL/dc / axis_size, a.shape)
+///
+/// Mean = sum / N, so the gradient has the 1/N factor distributed
+/// equally to all elements along the reduced axis.
+pub fn backwardMean(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .reduce_info => |ri| {
+            const axis_size = @as(f32, @floatFromInt(ri.shape.dims[ri.axis]));
+            var scaled = try elw_mulScalar(allocator, grad_output.*, 1.0 / axis_size, null);
+            defer scaled.deinit(allocator);
+            const da = try broadcastTo(allocator, scaled, ri.shape);
+            result[0] = try heapAlloc(allocator, da);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
 // ---------------------------------------------------------------------------
 
 test "sum along axis 0 of (2,3)" {

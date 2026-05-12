@@ -63,6 +63,16 @@ const OpKind = @import("../../autograd/node.zig").OpKind;
 const cuda_dispatch = @import("../device_dispatch.zig");
 
 // ---------------------------------------------------------------------------
+// Backward imports (colocated backward functions need these)
+// ---------------------------------------------------------------------------
+const grad_helpers = @import("../../autograd/grad_helpers.zig");
+const BackwardResult = grad_helpers.BackwardResult;
+const heapAlloc = grad_helpers.heapAlloc;
+const broadcastTo = grad_helpers.broadcastTo;
+const ops_elementwise = @import("elementwise.zig");
+
+
+// ---------------------------------------------------------------------------
 // erf — Polynomial approximation (Abramowitz & Stegun, formula 7.1.26)
 // ---------------------------------------------------------------------------
 
@@ -554,6 +564,179 @@ pub fn sqrt(allocator: std.mem.Allocator, tensor: Tensor, tape: ?*Tape) LabError
 
 // ---------------------------------------------------------------------------
 // Tests
+
+// ---------------------------------------------------------------------------
+// Backward pass implementations (colocated with forward ops)
+// ---------------------------------------------------------------------------
+
+/// neg(a) → c = -a
+/// dL/da = -dL/dc
+pub fn backwardNeg(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    _ = node;
+    const da = try neg(allocator, grad_output.*, null);
+    result[0] = try heapAlloc(allocator, da);
+}
+
+
+/// exp(a) → c = exp(a)
+/// dL/da = dL/dc * exp(a)
+pub fn backwardExp(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .tensor_ref => |a| {
+            var exp_a = try exp(allocator, a, null);
+            defer exp_a.deinit(allocator);
+            const da = try ops_elementwise.mul(allocator, grad_output.*, exp_a, null);
+            result[0] = try heapAlloc(allocator, da);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
+/// log(a) → c = log(a)
+/// dL/da = dL/dc / a
+pub fn backwardLog(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .tensor_ref => |a| {
+            const da = try ops_elementwise.div(allocator, grad_output.*, a, null);
+            result[0] = try heapAlloc(allocator, da);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
+/// relu(a) → c = max(0, a)
+/// dL/da = dL/dc * (a > 0 ? 1 : 0)
+pub fn backwardRelu(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .tensor_ref => |a| {
+            var mask = try Tensor.init(allocator, a.shape);
+            for (a.cpuData(), 0..) |v, i| {
+                mask.cpuData()[i] = if (v > 0.0) 1.0 else 0.0;
+            }
+            defer mask.deinit(allocator);
+            const da = try ops_elementwise.mul(allocator, grad_output.*, mask, null);
+            result[0] = try heapAlloc(allocator, da);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
+/// gelu(a) → c = GELU(a)
+/// dL/da = dL/dc * GELU'(a)
+pub fn backwardGelu(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .tensor_ref => |a| {
+            // CUDA fast path (Milestone 2): one fused kernel computes
+            // grad_in = grad_out * (phi + x*pdf) using erff + expf
+            // intrinsics. This avoids the host-side loop over a.data
+            // (which is the empty compat alias on CUDA).
+            if (a.device == .cuda) {
+                const da = try cuda_dispatch.geluExactBackward(a, grad_output.*);
+                result[0] = try heapAlloc(allocator, da);
+                return;
+            }
+            var gelu_grad = try Tensor.init(allocator, a.shape);
+            defer gelu_grad.deinit(allocator);
+            for (a.cpuData(), 0..) |v, i| {
+                gelu_grad.cpuData()[i] = geluDerivative(v);
+            }
+            const da = try ops_elementwise.mul(allocator, grad_output.*, gelu_grad, null);
+            result[0] = try heapAlloc(allocator, da);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
+/// sqrt(a) → c = √a
+/// dL/da = dL/dc * 1 / (2 * √a) = dL/dc / (2 * c)
+///
+/// The derivative of √x is 1 / (2√x). Since we saved the input,
+/// we compute √a again (or equivalently, divide by 2*c where c=√a).
+pub fn backwardSqrt(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .tensor_ref => |a| {
+            // √a — recompute the forward value
+            var sqrt_a = try sqrt(allocator, a, null);
+            defer sqrt_a.deinit(allocator);
+            // 2 * √a
+            var two_sqrt_a = try ops_elementwise.mulScalar(allocator, sqrt_a, 2.0, null);
+            defer two_sqrt_a.deinit(allocator);
+            // dL/da = dL/dc / (2√a)
+            const da = try ops_elementwise.div(allocator, grad_output.*, two_sqrt_a, null);
+            result[0] = try heapAlloc(allocator, da);
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
+/// Derivative of the exact GELU function.
+///
+/// GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
+///
+/// GELU'(x) = 0.5 * (1 + erf(x/sqrt(2)))
+///          + x * exp(-x²/2) / sqrt(2*pi)
+///
+/// The first term is the "cumulative" part (CDF of standard normal),
+/// and the second is the "density" part (PDF of standard normal times x).
+pub fn geluDerivative(x: f32) f32 {
+    const x_f64: f64 = @floatCast(x);
+    const sqrt2: f64 = 1.4142135623730951;
+    const sqrt2pi: f64 = 2.5066282746310002;
+    const z = x_f64 / sqrt2;
+    const erf_val = erfApprox(z);
+    const cumulative = 0.5 * (1.0 + erf_val);
+    const density = x_f64 * @exp(-0.5 * x_f64 * x_f64) / sqrt2pi;
+    const result_f64 = cumulative + density;
+    return @floatCast(result_f64);
+}
+
+
+/// Approximate error function erf(x) — Abramowitz & Stegun formula 7.1.26.
+/// Duplicated from unary.zig to avoid circular dependency once ops take tape.
+pub fn erfApprox(x: f64) f64 {
+    const sign: f64 = if (x >= 0) 1.0 else -1.0;
+    const a = @abs(x);
+    const t = 1.0 / (1.0 + 0.3275911 * a);
+    const y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * @exp(-a * a);
+    return sign * y;
+}
+
+
 // ---------------------------------------------------------------------------
 
 test "exp [0, 1, 2] = [1, e, e^2]" {

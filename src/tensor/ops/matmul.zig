@@ -65,6 +65,17 @@ const OpKind = @import("../../autograd/node.zig").OpKind;
 // PR-κ: matmul routes CUDA inputs to cuBLAS via backend.cuda.gemm.
 const cuda_gemm = @import("../device_dispatch.zig");
 
+// ---------------------------------------------------------------------------
+// Backward imports (colocated backward functions need these)
+// ---------------------------------------------------------------------------
+const grad_helpers = @import("../../autograd/grad_helpers.zig");
+const BackwardResult = grad_helpers.BackwardResult;
+const heapAlloc = grad_helpers.heapAlloc;
+const broadcastTo = grad_helpers.broadcastTo;
+const bw_cuda_dispatch = @import("../device_dispatch.zig");
+const bw_shape_ops = @import("shape_ops.zig");
+
+
 /// Matrix multiply two rank-2 tensors.
 ///
 /// Computes out = a x b using the cache-friendly ikj loop order.
@@ -299,6 +310,102 @@ pub fn transpose2d(tensor: Tensor) LabError!Tensor {
 
 // ---------------------------------------------------------------------------
 // Tests
+
+// ---------------------------------------------------------------------------
+// Backward pass implementations (colocated with forward ops)
+// ---------------------------------------------------------------------------
+
+/// matmul(A, B) → C = A @ B
+/// dL/dA = dL/dC @ Bᵀ
+/// dL/dB = Aᵀ @ dL/dC
+///
+/// This is the most important backward in the transformer — every
+/// linear layer and attention score computation uses matmul.
+pub fn backwardMatmul(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .tensor_pair => |tp| {
+            // dL/dA = dL/dC @ Bᵀ
+            const bt = try tp.b.transpose2d();
+            // CUDA matmul requires contiguous inputs; the transpose
+            // view is non-contiguous. Materialise a fresh contiguous
+            // copy via bcast_copy (identity-shape broadcastTo) and
+            // deinit it after the matmul consumes it.
+            if (bt.device == .cuda) {
+                var bt_c = try bw_cuda_dispatch.broadcastTo(bt, bt.shape);
+                defer bt_c.storage.deinit(allocator);
+                const da_val = try matmul(allocator, grad_output.*, bt_c, null);
+                result[0] = try heapAlloc(allocator, da_val);
+            } else {
+                const da_val = try matmul(allocator, grad_output.*, bt, null);
+                result[0] = try heapAlloc(allocator, da_val);
+            }
+
+            // dL/dB = Aᵀ @ dL/dC
+            const at = try tp.a.transpose2d();
+            if (at.device == .cuda) {
+                var at_c = try bw_cuda_dispatch.broadcastTo(at, at.shape);
+                defer at_c.storage.deinit(allocator);
+                const db_val = try matmul(allocator, at_c, grad_output.*, null);
+                result[1] = try heapAlloc(allocator, db_val);
+            } else {
+                const db_val = try matmul(allocator, at, grad_output.*, null);
+                result[1] = try heapAlloc(allocator, db_val);
+            }
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
+/// matmul_batch(A, B) → C  [batched]
+/// dL/dA = dL/dC @ Bᵀ,  dL/dB = Aᵀ @ dL/dC
+/// Same formula as 2D matmul, but with inner-dim transpose for 3D.
+pub fn backwardMatmulBatch(
+    allocator: std.mem.Allocator,
+    node: Node,
+    grad_output: *Tensor,
+    result: *BackwardResult,
+) LabError!void {
+    switch (node.saved) {
+        .tensor_pair => |tp| {
+            // B is (B_batch, K, N) → Bᵀ is (B_batch, N, K). For CUDA
+            // we must materialise the transpose view into a contiguous
+            // buffer because cuBLAS matmulBatch rejects non-contig
+            // inputs. For CPU the view is fine — the CPU matmul walks
+            // via strides.
+            const bt = try bw_shape_ops.transposeInner2d(tp.b);
+            if (bt.device == .cuda) {
+                var bt_c = try bw_cuda_dispatch.broadcastTo(bt, bt.shape);
+                defer bt_c.storage.deinit(allocator);
+                const da_val = try matmulBatch(allocator, grad_output.*, bt_c, null);
+                result[0] = try heapAlloc(allocator, da_val);
+            } else {
+                const da_val = try matmulBatch(allocator, grad_output.*, bt, null);
+                result[0] = try heapAlloc(allocator, da_val);
+            }
+
+            // A is (B_batch, M, K) → Aᵀ is (B_batch, K, M). Same fix.
+            const at = try bw_shape_ops.transposeInner2d(tp.a);
+            if (at.device == .cuda) {
+                var at_c = try bw_cuda_dispatch.broadcastTo(at, at.shape);
+                defer at_c.storage.deinit(allocator);
+                const db_val = try matmulBatch(allocator, at_c, grad_output.*, null);
+                result[1] = try heapAlloc(allocator, db_val);
+            } else {
+                const db_val = try matmulBatch(allocator, at, grad_output.*, null);
+                result[1] = try heapAlloc(allocator, db_val);
+            }
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+
 // ---------------------------------------------------------------------------
 
 test "matmul 2x3 @ 3x4 = 2x4 with hand-computed values" {
