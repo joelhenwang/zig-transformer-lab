@@ -59,6 +59,7 @@ const Windowing = @import("../data/windowing.zig").Windowing;
 const Batcher = @import("../data/batcher.zig").Batcher;
 const crossEntropy = @import("../tensor/ops/loss.zig").crossEntropy;
 const ops_shape = @import("../tensor/ops/shape_ops.zig");
+const ops_reduce = @import("../tensor/ops/reduce.zig");
 // CUDA imports (used only when cfg.use_cuda = true). On non-Linux
 // platforms the CudaContext.init call fails at runtime with
 // LabError.CudaError; this import itself compiles on every platform
@@ -420,54 +421,24 @@ pub const Trainer = struct {
             //   2. clip_coeff = max_norm / total_norm
             //   3. If clip_coeff < 1, scale all gradients by clip_coeff
             //
-            // On CUDA the grad buffers live in device memory, so the
-            // norm scan must DtoH-copy each grad into a scratch host
-            // buffer. If clipping fires, we scale on host and HtoD it
-            // back. For the 2/2/64 config this is ~40k f32s per step
-            // = 160 KB of HtoD/DtoH — well below the kernel-dispatch
-            // cost floor. A pure-GPU clip (reduce.sumSq -> mulScalar)
-            // is a clean Stage 9 optimisation.
+            // Device-agnostic: sumOfSquaresAll and scaleInPlace handle
+            // CPU/CUDA routing internally. On CUDA this is pure-GPU —
+            // only a single 4-byte DtoH per parameter for the scalar sum.
             const max_norm = self.cfg.grad_clip_norm;
             var total_norm_sq: f64 = 0;
             if (max_norm > 0) {
                 for (params.items) |param| {
                     if (param.grad) |g| {
-                        if (g.device == .cuda) {
-                            const n_elems = g.storage.len();
-                            const host_buf = try allocator.alloc(f32, n_elems);
-                            defer allocator.free(host_buf);
-                            try g.storage.cuda.copyToHost(host_buf);
-                            for (host_buf) |val| {
-                                const v: f64 = @floatCast(val);
-                                total_norm_sq += v * v;
-                            }
-                        } else {
-                            for (g.cpuData()) |val| {
-                                const v: f64 = @floatCast(val);
-                                total_norm_sq += v * v;
-                            }
-                        }
+                        total_norm_sq += try ops_reduce.sumOfSquaresAll(allocator, g.*);
                     }
                 }
                 const total_norm = @sqrt(total_norm_sq);
                 if (total_norm > 0) {
-                    const clip_coeff_f64 = @as(f64, @floatFromInt(@as(usize, 1))) * max_norm / total_norm;
-                    const clip_coeff: f32 = @floatCast(clip_coeff_f64);
+                    const clip_coeff: f32 = @floatCast(max_norm / total_norm);
                     if (clip_coeff < 1.0) {
                         for (params.items) |param| {
                             if (param.grad) |g| {
-                                if (g.device == .cuda) {
-                                    const n_elems = g.storage.len();
-                                    const host_buf = try allocator.alloc(f32, n_elems);
-                                    defer allocator.free(host_buf);
-                                    try g.storage.cuda.copyToHost(host_buf);
-                                    for (host_buf) |*v| v.* *= clip_coeff;
-                                    try g.storage.cuda.copyFromHost(host_buf);
-                                } else {
-                                    for (g.cpuData()) |*v| {
-                                        v.* *= clip_coeff;
-                                    }
-                                }
+                                try ops_reduce.scaleInPlace(allocator, g, clip_coeff);
                             }
                         }
                     }
