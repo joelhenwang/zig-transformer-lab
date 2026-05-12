@@ -58,24 +58,12 @@ const ops_create = @import("../tensor/ops/create.zig");
 // PR-iota: backward.broadcastTo routes to CUDA when grad is on GPU.
 const cuda_dispatch = @import("../backend/cuda/dispatch.zig");
 
-const max_parent_grads = 2;
-pub const BackwardResult = [max_parent_grads]?*Tensor;
+// Shared helpers (extracted to break circular imports in Phase 4).
+const grad_helpers = @import("grad_helpers.zig");
+const heapAlloc = grad_helpers.heapAlloc;
 
-/// Heap-allocate a Tensor value and return a pointer to it.
-///
-/// BackwardResult entries are `?*Tensor`, so every Tensor value produced
-/// by an op must be boxed on the heap before being stored in the result
-/// array. This helper centralizes the alloc+store pattern to avoid
-/// repeating allocator.create / ptr.* = ... at every call site.
-///
-/// Memory ownership:
-///   The returned pointer is owned by the caller, who must eventually
-///   call ptr.deinit(allocator) and allocator.destroy(ptr).
-fn heapAlloc(allocator: std.mem.Allocator, tensor: Tensor) LabError!*Tensor {
-    const ptr = try allocator.create(Tensor);
-    ptr.* = tensor;
-    return ptr;
-}
+const max_parent_grads = 2;
+pub const BackwardResult = grad_helpers.BackwardResult;
 
 // ---------------------------------------------------------------------------
 // Main dispatch
@@ -843,162 +831,11 @@ fn backwardEmbedding(
 }
 
 // ---------------------------------------------------------------------------
-// broadcastTo — expand a tensor to a larger shape
+// Shared helpers (re-exported from grad_helpers.zig)
 // ---------------------------------------------------------------------------
 
-/// Broadcast a tensor from a smaller shape to a larger (target) shape.
-///
-/// This is the INVERSE of sumToShape: instead of summing along broadcast
-/// axes, we REPEAT the data along those axes.
-///
-/// Algorithm:
-///   1. If shapes are equal → return a view (no-op).
-///   2. Right-align the shapes.
-///   3. For each axis where target has a larger dim:
-///      - If tensor dim is 1 → repeat the values along this axis.
-///      - If tensor has fewer dims → add a new axis (unsqueeze).
-///   4. Return the broadcasted tensor.
-///
-/// Worked example:
-///   broadcastTo(t: (1,3), target: (2,3))
-///     → [[a,b,c], [a,b,c]]  (repeat row 0 twice)
-///
-///   broadcastTo(t: (3,), target: (2,3))
-///     → [[a,b,c], [a,b,c]]  (unsqueeze, then repeat)
-///
-/// Implementation: iterate over the output tensor's elements, mapping
-/// each multi-dim index back to the input tensor using broadcast rules
-/// (if input dim is 1, use index 0; otherwise use the output index).
-///
-/// Memory ownership:
-///   Returns a new owned tensor. Caller must deinit.
-pub fn broadcastTo(allocator: std.mem.Allocator, tensor: Tensor, target: Shape) LabError!Tensor {
-    if (tensor.device == .cuda) {
-        return try cuda_dispatch.broadcastTo(tensor, target);
-    }
-    // Same shape → return an owned copy (not a view) because callers
-    // may deinit the source tensor, which would invalidate a view.
-    // CRITICAL: must check contiguity before @memcpy. If the tensor
-    // is a non-contiguous view (e.g., from transpose2d), @memcpy
-    // copies raw buffer bytes in memory order, ignoring strides,
-    // producing silently wrong data. The stride-aware loop reads
-    // elements in logical (shape) order using strides for correct
-    // indexing.
-    if (shape_equals(tensor.shape, target)) {
-        const out = try Tensor.init(allocator, target);
-        if (isContiguous(tensor.shape, tensor.strides)) {
-            @memcpy(out.cpuData(), tensor.cpuData()[0..out.cpuData().len]);
-        } else {
-            const n = totalElements(target);
-            const ndim = tensor.shape.ndim();
-            for (0..n) |flat| {
-                var offset: usize = 0;
-                var remaining: usize = flat;
-                var axis: usize = 0;
-                while (axis + 1 < ndim) : (axis += 1) {
-                    var block: usize = 1;
-                    var a2: usize = axis + 1;
-                    while (a2 < ndim) : (a2 += 1) block *= tensor.shape.dims[a2];
-                    const idx = remaining / block;
-                    remaining %= block;
-                    offset += idx * tensor.strides.values[axis];
-                }
-                offset += remaining * tensor.strides.values[axis];
-                out.cpuData()[flat] = tensor.cpuData()[offset];
-            }
-        }
-        return out;
-    }
-
-    var result = try Tensor.init(allocator, target);
-    const out_n = totalElements(target);
-    const ndim_out = target.ndim();
-    const ndim_in = tensor.shape.ndim();
-
-    // For each element in the output, compute the corresponding input index
-    for (0..out_n) |out_i| {
-        // Decompose flat output index into multi-dim coordinates
-        var out_coords: [4]usize = .{ 0, 0, 0, 0 };
-        var remaining = out_i;
-        for (0..ndim_out) |d| {
-            const rev_d = ndim_out - 1 - d;
-            out_coords[rev_d] = remaining % target.dims[rev_d];
-            remaining /= target.dims[rev_d];
-        }
-
-        // Map output coordinates to input coordinates (broadcast rules)
-        var in_flat: usize = 0;
-        const extra_dims = if (ndim_out > ndim_in) ndim_out - ndim_in else 0;
-        for (0..ndim_in) |d| {
-            const out_d = extra_dims + d;
-            const in_dim = tensor.shape.dims[d];
-            const coord = if (in_dim == 1) 0 else out_coords[out_d];
-            in_flat += coord * tensor.strides.values[d];
-        }
-
-        result.cpuData()[out_i] = tensor.cpuData()[in_flat];
-    }
-
-    return result;
-}
-
-// ---------------------------------------------------------------------------
-// Gradient accumulation
-// ---------------------------------------------------------------------------
-
-/// Accumulate src gradient into dst: dst += src.
-///
-/// This implements the multivariable chain rule: if a tensor is used
-/// in multiple operations, its gradient is the SUM of contributions
-/// from each operation.
-///
-/// Device routing (Session 2):
-///   CUDA tensors keep an empty CPU compat alias (PR-δ), so the
-///   CPU loop `for (0..n) |i| dst.cpuData()[i] += src.cpuData()[i]` over
-///   `dst.cpuData().len == 0` is a silent no-op — dropping every
-///   multi-path gradient contribution (e.g. LayerNorm's path from
-///   `a` through `mean(a)` back to `a`). The CUDA branch launches
-///   the same fused add kernel used by elementwise.add, writing
-///   the result back into `dst`'s existing buffer in place.
-pub fn accumulateGrad(dst: *Tensor, src: *Tensor) void {
-    std.debug.assert(shape_equals(dst.shape, src.shape));
-    if (dst.device == .cuda) {
-        // In-place accumulate via DtoD temp: tmp = dst + src, copy tmp -> dst.
-        //
-        // Why not a dedicated in-place kernel? The current elw_add kernel
-        // writes to a third buffer (`c = a + b`) and we don't have an
-        // `add_inplace` variant. Adding one is ~10 LOC but adds an API
-        // surface the CPU path doesn't have. For now we allocate a temp
-        // output, then DtoD-copy back. One extra allocation + one extra
-        // copy per accumulate; negligible at our scale.
-        var tmp = cuda_dispatch.add(dst.*, src.*) catch |err| {
-            // The assertion above + same-device invariants guarantee this
-            // cannot fail for shape reasons. Only OOM is plausible; we
-            // must not silently drop the accumulation.
-            std.log.warn("accumulateGrad CUDA failed: {}", .{err});
-            return;
-        };
-        defer tmp.storage.deinit(undefined); // allocator unused on CUDA deinit
-        // Copy tmp -> dst's existing DeviceBuffer. Both are same shape,
-        // contiguous, same context. cuMemcpyDtoD_v2 handles it.
-        const dst_buf = switch (dst.storage) {
-            .cuda => |b| b,
-            .cpu => unreachable, // device==.cuda invariant
-        };
-        const src_buf = switch (tmp.storage) {
-            .cuda => |b| b,
-            .cpu => unreachable,
-        };
-        dst_buf.copyFromDevice(src_buf) catch |err| {
-            std.log.warn("accumulateGrad CUDA DtoD copy failed: {}", .{err});
-        };
-        return;
-    }
-    const n = dst.cpuData().len;
-    for (0..n) |i| {
-        dst.cpuData()[i] += src.cpuData()[i];
-    }
-}
+pub const broadcastTo = grad_helpers.broadcastTo;
+pub const accumulateGrad = grad_helpers.accumulateGrad;
 
 // ---------------------------------------------------------------------------
 // GELU derivative

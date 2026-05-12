@@ -135,6 +135,7 @@ test {
     _ = ops.loss;
     _ = ops.shape_ops;
     _ = device_dispatch;
+    _ = @import("autograd/grad_helpers.zig");
     _ = autograd;
     _ = tape_mod;
     _ = backward_mod;
