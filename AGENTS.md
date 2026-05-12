@@ -25,10 +25,6 @@ abstraction back to its PyTorch counterpart.
 
 Deferred / post-scope items (not blocking):
 
-- **Pure-GPU gradient clip** (Stage 8 perf follow-up). The Trainer's
-  gradient clipping currently DtoH-scans then HtoDs scaled buffers.
-  Replacing with a reduce.sumSq + mulScalar pair would reclaim ~5 %
-  of per-step wall-clock at the 2/2/64 config.
 - **Nsight Compute permissions** (Stage 8 docs follow-up). Remote
   needs `/etc/modprobe.d/` override to unblock GPU performance
   counters for non-root `ncu` runs. See
@@ -39,6 +35,13 @@ Deferred / post-scope items (not blocking):
 - **Mixed precision** (D7 explicitly gates this out of scope).
   `f16`/`bf16` dtypes would require autocast, loss scaling, and
   a tf32 path in cuBLAS.
+
+Delivered (previously deferred):
+
+- **Pure-GPU gradient clip** — delivered in `arch-phase-3-complete`
+  (commit `6bb45d1`, 2026-05-12). The Trainer's grad-clip now uses
+  `sumOfSquaresAll` + `scaleInPlace` which are pure-GPU on CUDA
+  inputs. Eliminates ~160 KB of per-step HtoD/DtoH at 2/2/64.
 
 > **Continuation guide:** `docs/stage9_plan.md` documents how Stage 9
 > was executed. `docs/00_overview.md` §2 is the canonical reading

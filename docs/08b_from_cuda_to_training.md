@@ -169,10 +169,10 @@ Step N enters the loop.
       GPU: one kernel launch per op's backward.
       Each param's grad tensor is allocated on GPU.
 
-(m) Gradient clipping (device-aware)
-      GPU -> CPU: DtoH-copy each grad for norm scan.
-      If clip_coeff < 1: DtoH + scale + HtoD per param.
-      Transient host memory: ~200 KB per step.
+(m) Gradient clipping (device-agnostic)
+      sumOfSquaresAll per gradient (pure-GPU: mul + sumAll + 4-byte DtoH).
+      If clip_coeff < 1: scaleInPlace per param (pure-GPU: mulScalar kernel).
+      No per-element HtoD/DtoH — only scalar reads.
 
 (n) opt.step(params)
       GPU: adamw_step kernel reads params.data + grads + m + v,
@@ -190,8 +190,8 @@ Step N enters the loop.
 ```
 
 Total HtoD per step: `~520 bytes` (ids + targets).
-Total DtoH per step: `~4 bytes` (loss scalar) + `~40 KB` (grad clip
-scan at 2/2/64). Kernel launches per step: ~200 (rough count).
+Total DtoH per step: `~4 bytes` (loss scalar) + `~4 bytes × N_params`
+(grad clip scalar sums). Kernel launches per step: ~200 (rough count).
 
 ### 2.3 What dominates the wall-clock
 
@@ -254,12 +254,11 @@ tune around sanitizer numbers.
 
 ### 3.4 When it does bite
 
-Real perf bugs in this class:
+real perf bugs in this class:
 
-- Reading `loss.data[0]` before `toCpu`. `data` is the empty stub
-  slice on CUDA; the read returns 0.0 always. No sanitizer catches
-  this — it's a silent correctness bug that also happens to mask a
-  missing DtoH.
+- Reading `loss.cpuData()[0]` before `toCpu`. `cpuData()` asserts
+  `device == .cpu` in debug builds — so this now panics loudly rather
+  than silently returning stale data.
 - Debug code that prints intermediate activations each step.
   Innocent-looking but triggers a DtoH per print. 100 prints × 10 µs
   = 1 ms extra per step on a 4.7 ms/step baseline. That's 20% slower

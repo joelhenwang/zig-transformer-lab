@@ -440,25 +440,40 @@ it in one function.
 
 ---
 
-## 7. `Tensor.data` and `Tensor.owned` as transition aliases
+## 7. `Tensor.data` and `Tensor.owned` — removed (arch-phase-3)
 
-You may have noticed that the PR-δ diff did not delete `Tensor.data`
-or `Tensor.owned`. They are still there, kept in sync with
-`storage.cpu.data` and `storage.cpu.owned` respectively. Why?
+The PR-δ diff originally kept `Tensor.data` and `Tensor.owned` as
+transition aliases alongside the new `Storage` union. That migration
+has now been completed in `arch-phase-3-complete`:
 
-Because the library has roughly 800 call sites that read or write
-`tensor.data[i]`. Migrating them all to `tensor.storage.cpu.data[i]`
-(or `tensor.cpuData()`) in a single PR would have:
+- **Phase 1a** added `cpuData()` and `isOwned()` accessor methods.
+- **Phase 1b** migrated all ~900 call sites from `tensor.data[i]` to
+  `tensor.cpuData()[i]` and removed the duplicate fields entirely.
 
-- Exploded the diff to several thousand lines
-- Touched every op's inner loop (easy to introduce subtle bugs)
-- Made the architectural move in PR-δ harder to review because the
-  reviewer would have to disentangle the refactor from the
-  data-access rename
+The Tensor struct went from 14 fields to 12. `Storage` is now the
+**single source of truth** for buffer ownership and location. There
+is no longer a sync invariant between top-level fields and storage —
+because the top-level fields don't exist.
 
-So we chose the conservative path: introduce the new representation
-as the source of truth, add convenience aliases so existing code
-compiles, and defer the rename to a follow-up cleanup PR.
+### Accessing CPU data
+
+```zig
+// Read:
+const val = tensor.cpuData()[i];
+
+// Write:
+tensor.cpuData()[i] = 42.0;
+
+// Iterate:
+for (tensor.cpuData()) |v| { ... }
+
+// Ownership check (works for both CPU and CUDA):
+if (tensor.isOwned()) { ... }
+```
+
+`cpuData()` asserts `device == .cpu` in debug builds. Calling it on a
+CUDA tensor panics immediately rather than silently iterating an empty
+slice. This catches device-confusion bugs at the call site.
 
 The aliases are:
 
@@ -591,9 +606,8 @@ documented here so you know they exist:
 
 ### 10.1 The 800 `tensor.data[i]` call sites
 
-Still direct field access. Works because of the alias. Should be
-migrated to `tensor.cpuData()` or an equivalent accessor before we
-delete the alias.
+**Completed** in `arch-phase-3-complete` (Phase 1a/1b). All sites now
+use `tensor.cpuData()[i]`. The `.data` field no longer exists.
 
 ### 10.2 No `slice` op
 
@@ -602,22 +616,19 @@ non-zero offset. The slice op is a one-function addition (see the
 Exercise below); we deferred it because nothing in Stage 6 actually
 needed sliced views.
 
-### 10.3 No `cpuData()` accessor on `Tensor`
+### 10.3 `cpuData()` accessor on `Tensor`
 
-Would simplify migration. The function is trivial:
+**Completed** in `arch-phase-3-complete` (Phase 1a). The accessor is:
 
 ```zig
-pub fn cpuData(self: Tensor) LabError![]f32 {
-    return switch (self.storage) {
-        .cpu => |s| s.data,
-        .cuda => error.DeviceMismatch,
-    };
+pub inline fn cpuData(self: Tensor) []f32 {
+    std.debug.assert(self.device == .cpu);
+    return self.storage.cpu.data;
 }
 ```
 
-Not added in PR-δ because every current call site reads `tensor.data`
-directly. We will add it in the cleanup PR that migrates the
-accessors.
+It asserts `device == .cpu` in debug builds, replacing the old pattern
+where `tensor.data` on a CUDA tensor silently returned an empty slice.
 
 ### 10.4 No multi-device storage
 
@@ -662,15 +673,12 @@ device-mismatch path (never the data path). Once PR-ι introduces
 `CudaStorage`, the hand-built form will require real fields
 (`ptr`, `len`, `device_id`, `owned`).
 
-### "I see both `tensor.data.len` and `tensor.storage.len()` in the code. Which is right?"
+### "How do I access the CPU data buffer?"
 
-For a CPU tensor, both are equal — the storage length is the buffer
-length, which is the slice length. For a CUDA tensor (future), only
-`storage.len()` is meaningful; `tensor.data.len` will be zero.
-
-Prefer `storage.len()` in new code. The existing uses of
-`tensor.data.len` work today because every tensor in the library is
-CPU.
+Use `tensor.cpuData()` — it returns `[]f32` and asserts `device == .cpu`
+in debug builds. For ownership checks, use `tensor.isOwned()` which
+works for both CPU and CUDA tensors. The old `tensor.data` field no
+longer exists (removed in arch-phase-3).
 
 ---
 

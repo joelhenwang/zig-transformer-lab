@@ -397,12 +397,25 @@ integration harness.
 ## 12. From Dispatching an Op on CPU to on CUDA
 
 A question new readers ask first: "when I call `add(a, b)`, how does
-it know to run on the right device?" The answer lives in a handful
-of switch statements inside the op dispatchers. This section walks
-one op — `add` — through both backends side by side so you can see
-the whole path in one glance.
+it know to run on the right device?" The answer lives in the
+`device_dispatch.zig` seam and a handful of device checks inside the
+op dispatchers. This section walks one op — `add` — through both
+backends side by side so you can see the whole path in one glance.
 
-### 12.1 The entry point
+### 12.1 The architecture seam
+
+`src/tensor/device_dispatch.zig` is the **single module** where the
+ops layer touches the CUDA backend. Every ops file imports from
+`device_dispatch` (never directly from `backend/cuda/`). This seam is
+enforced at compile time (a test in `device_dispatch.zig`) and at build
+time (`zig build ops-purity` — a grep check that fails if any ops file
+imports directly from `backend/cuda/`).
+
+Two adapters sit behind the seam:
+- **CPU adapter**: inline Zig loops in each ops file
+- **CUDA adapter**: `backend/cuda/dispatch.zig` + `backend/cuda/gemm.zig`
+
+### 12.2 The entry point
 
 `src/tensor/ops/elementwise.zig` exposes the public `add`
 entrypoint. Here's the sequence, abbreviated:
